@@ -27,7 +27,10 @@ export const handler = async (event: any): Promise<LambdaResponse> => {
 
     const command = new DeleteItemCommand({
       TableName: process.env.USER_CLINIC_ASSIGNMENTS_TABLE,
-      Key: { userSub: { S: userSub }, clinicId: { S: clinicId } },
+      Key: {
+        userSub: { S: userSub },
+        clinicId: { S: clinicId },
+      },
     });
     await dynamoClient.send(command);
 

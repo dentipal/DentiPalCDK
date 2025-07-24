@@ -16,6 +16,9 @@ export const handler = async (event: any): Promise<LambdaResponse> => {
     if (!accessToken) {
       return { statusCode: 400, body: JSON.stringify({ error: "Access token is required" }) };
     }
+    if (!userSub) {
+      return { statusCode: 400, body: JSON.stringify({ error: "UserSub is required" }) };
+    }
 
     // Clean up assignments
     const cleanupCommand = new QueryCommand({
@@ -25,10 +28,15 @@ export const handler = async (event: any): Promise<LambdaResponse> => {
     });
     const assignments = await dynamoClient.send(cleanupCommand);
     for (const item of assignments.Items || []) {
-      await dynamoClient.send(new DeleteItemCommand({
-        TableName: process.env.USER_CLINIC_ASSIGNMENTS_TABLE,
-        Key: { userSub: { S: userSub }, clinicId: { S: item.clinicId.S } },
-      }));
+      if (item.clinicId?.S) { // Ensure clinicId.S is defined
+        await dynamoClient.send(new DeleteItemCommand({
+          TableName: process.env.USER_CLINIC_ASSIGNMENTS_TABLE,
+          Key: {
+            userSub: { S: userSub },
+            clinicId: { S: item.clinicId.S },
+          },
+        }));
+      }
     }
 
     const command = new DeleteUserCommand({ AccessToken: accessToken });
