@@ -1,0 +1,278 @@
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import {
+    DynamoDBClient,
+    QueryCommand,
+    PutItemCommand,
+    GetItemCommand,
+    AttributeValue,
+    GetItemCommandInput
+} from "@aws-sdk/client-dynamodb";
+import { v4 as uuidv4 } from "uuid";
+// Assuming validateToken is a utility function in a local file
+import { validateToken } from "./utils";
+
+// --- Type Definitions ---
+
+// Simplified type for the expected DynamoDB Item structure
+interface DynamoDBItem {
+    [key: string]: AttributeValue;
+}
+
+// Interface for the expected request body data structure
+interface ApplicationData {
+    jobId: string;
+    message?: string;
+    proposedRate?: number; // Hourly rate
+    availability?: string;
+    startDate?: string;
+    notes?: string;
+}
+
+// Type for CORS headers
+interface CorsHeaders {
+    [header: string]: string;
+}
+
+// --- Initialization ---
+
+const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+
+const corsHeaders: CorsHeaders = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*", // Allow all origins
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
+};
+
+// --- Lambda Handler ---
+
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // Handle OPTIONS (preflight) request
+    if (event.httpMethod === 'OPTIONS') {
+        return { statusCode: 200, headers: corsHeaders, body: '' };
+    }
+
+    try {
+        console.log("Table name for Job Postings: DentiPal-JobPostings");
+        console.log("Table name for Job Applications: DentiPal-JobApplications");
+        console.log("Table name for Clinic Profiles: DentiPal-ClinicProfiles");
+        console.log("Table name for Job Negotiations: DentiPal-JobNegotiations");
+
+        // 1. Authorization
+        // validateToken must return the user's sub (string)
+        const professionalUserSub: string = await validateToken(event);
+
+        const applicationData: ApplicationData = JSON.parse(event.body || '{}');
+        console.log("Request body:", applicationData);
+
+        if (!applicationData.jobId) {
+            console.warn("[VALIDATION] Missing required field: jobId");
+            return {
+                statusCode: 400,
+                body: JSON.stringify({ error: "Required field: jobId" }),
+                headers: corsHeaders
+            };
+        }
+
+        const jobId = applicationData.jobId;
+
+        // 2. ✅ Fetch job posting using jobId-index GSI
+        const jobQuery = new QueryCommand({
+            TableName: "DentiPal-JobPostings",
+            IndexName: "jobId-index",
+            KeyConditionExpression: "jobId = :jobId",
+            ExpressionAttributeValues: {
+                ":jobId": { S: jobId }
+            }
+        });
+
+        const jobQueryResult = await dynamodb.send(jobQuery);
+        if (!jobQueryResult.Items || jobQueryResult.Items.length === 0) {
+            console.warn(`[VALIDATION] Job posting not found for jobId: ${jobId}`);
+            return {
+                statusCode: 404,
+                body: JSON.stringify({ error: "Job posting not found" }),
+                headers: corsHeaders
+            };
+        }
+
+        const jobItem = jobQueryResult.Items[0];
+        const clinicId = jobItem.clinicId?.S;
+        const jobStatus = jobItem.status?.S || 'active';
+
+        if (!clinicId) {
+            console.error(`[DATA_ERROR] Job posting ${jobId} is missing clinicId.`);
+            return {
+                statusCode: 400,
+                body: JSON.stringify({ error: "Clinic ID not found in job posting" }),
+                headers: corsHeaders
+            };
+        }
+
+        if (jobStatus !== "active") {
+            console.warn(`[VALIDATION] Job status is '${jobStatus}'. Cannot apply.`);
+            return {
+                statusCode: 400,
+                body: JSON.stringify({ error: `Cannot apply to ${jobStatus} job posting` }),
+                headers: corsHeaders
+            };
+        }
+
+        // 3. ✅ Check if application already exists (PK: jobId, SK: professionalUserSub assumed)
+        // Note: DynamoDB Query on the primary key (PK and SK) is implicitly supported
+        const existingApplicationCommand = new QueryCommand({
+            TableName: "DentiPal-JobApplications",
+            // Assuming PK is jobId and SK is professionalUserSub for the main table index
+            KeyConditionExpression: "jobId = :jobId AND professionalUserSub = :professionalUserSub",
+            ExpressionAttributeValues: {
+                ":jobId": { S: jobId },
+                ":professionalUserSub": { S: professionalUserSub }
+            }
+        });
+
+        const existingApplication = await dynamodb.send(existingApplicationCommand);
+        if (existingApplication.Items && existingApplication.Items.length > 0) {
+            console.warn(`[CONFLICT] User ${professionalUserSub} already applied to job ${jobId}.`);
+            return {
+                statusCode: 409,
+                body: JSON.stringify({ error: "You have already applied to this job" }),
+                headers: corsHeaders
+            };
+        }
+
+        // 4. ✅ Prepare application item
+        const applicationId = uuidv4();
+        const timestamp = new Date().toISOString();
+        const hasProposedRate = applicationData.proposedRate !== undefined && applicationData.proposedRate !== null;
+
+        const applicationItem: DynamoDBItem = {
+            jobId: { S: jobId },
+            professionalUserSub: { S: professionalUserSub },
+            applicationId: { S: applicationId },
+            clinicId: { S: clinicId },
+            // Status is 'negotiating' if a rate is proposed, otherwise 'pending'
+            applicationStatus: { S: hasProposedRate ? "negotiating" : "pending" },
+            appliedAt: { S: timestamp },
+            updatedAt: { S: timestamp }
+        };
+
+        if (applicationData.message) {
+            applicationItem.applicationMessage = { S: applicationData.message };
+        }
+        if (hasProposedRate) {
+            applicationItem.proposedRate = { N: applicationData.proposedRate!.toString() };
+        }
+        if (applicationData.availability) {
+            applicationItem.availability = { S: applicationData.availability };
+        }
+        if (applicationData.startDate) {
+            applicationItem.startDate = { S: applicationData.startDate };
+        }
+        if (applicationData.notes) {
+            applicationItem.notes = { S: applicationData.notes };
+        }
+
+        let negotiationId: string | undefined;
+        if (hasProposedRate) {
+            negotiationId = uuidv4();
+            applicationItem.negotiationId = { S: negotiationId };
+        }
+
+        console.log("Creating job application:", JSON.stringify(applicationItem));
+
+        // 5. ✅ Insert into JobApplications table
+        await dynamodb.send(new PutItemCommand({
+            TableName: "DentiPal-JobApplications", // Using hardcoded table name as in original
+            Item: applicationItem
+        }));
+
+        // 6. ✅ Negotiating Logic - Handle if the response is "negotiating"
+        if (hasProposedRate && negotiationId) {
+            // Create negotiation item
+            const negotiationItem: DynamoDBItem = {
+                negotiationId: { S: negotiationId },
+                jobId: { S: jobId },
+                applicationId: { S: applicationId },
+                professionalUserSub: { S: professionalUserSub },
+                clinicId: { S: clinicId },
+                negotiationStatus: { S: 'pending' },
+                // Use the safe proposedRate value
+                proposedHourlyRate: { N: applicationData.proposedRate!.toString() },
+                createdAt: { S: timestamp },
+                updatedAt: { S: timestamp },
+                message: { S: applicationData.message || 'Negotiation initiated by professional during application' }
+            };
+
+            // Save negotiation item to JobNegotiations table
+            await dynamodb.send(new PutItemCommand({
+                TableName: "DentiPal-JobNegotiations", // Using hardcoded table name as in original
+                Item: negotiationItem
+            }));
+
+            console.log("Job negotiation created:", JSON.stringify(negotiationItem));
+        }
+
+        // 7. ✅ Fetch clinic info (Optional/Non-fatal)
+        let clinicInfo: any = null;
+        try {
+            const clinicCommand = new GetItemCommand({
+                TableName: "DentiPal-ClinicProfiles", // Using hardcoded table name as in original
+                Key: {
+                    clinicId: { S: clinicId }
+                }
+            });
+
+            const clinicResponse = await dynamodb.send(clinicCommand);
+            const clinic = clinicResponse.Item;
+
+            if (clinic) {
+                clinicInfo = {
+                    name: clinic.clinic_name?.S || "Unknown Clinic",
+                    city: clinic.city?.S || "",
+                    state: clinic.state?.S || "",
+                    practiceType: clinic.practice_type?.S || "",
+                    primaryPracticeArea: clinic.primary_practice_area?.S || "",
+                    contactName: `${clinic.primary_contact_first_name?.S || ""} ${clinic.primary_contact_last_name?.S || ""}`.trim()
+                };
+            }
+        } catch (err) {
+            console.warn("Failed to fetch clinic info (non-fatal):", (err as Error).message);
+        }
+
+        // 8. ✅ Prepare job info from the fetched jobItem
+        const jobInfo = {
+            title: jobItem.job_title?.S || `${jobItem.professional_role?.S || "Professional"} Position`,
+            type: jobItem.job_type?.S || "unknown",
+            role: jobItem.professional_role?.S || "",
+            hourlyRate: jobItem.hourly_rate?.N ? parseFloat(jobItem.hourly_rate.N) : undefined,
+            date: jobItem.date?.S,
+            dates: jobItem.dates?.SS
+        };
+
+        // 9. ✅ Final response
+        return {
+            statusCode: 201,
+            body: JSON.stringify({
+                message: "Job application submitted successfully",
+                applicationId,
+                jobId,
+                status: hasProposedRate ? "negotiating" : "pending",
+                appliedAt: timestamp,
+                job: jobInfo,
+                clinic: clinicInfo
+            }),
+            headers: corsHeaders
+        };
+    } catch (error) {
+        const err = error as Error;
+        console.error("Error creating job application:", err);
+        return {
+            statusCode: 500,
+            body: JSON.stringify({
+                error: "Failed to submit job application. Please try again.",
+                details: err.message
+            }),
+            headers: corsHeaders
+        };
+    }
+};
