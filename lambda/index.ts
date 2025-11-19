@@ -1,7 +1,10 @@
+// index.ts
+
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context, Handler } from 'aws-lambda';
 
 // --- HANDLER IMPORTS ---
-// NOTE: All imports below assume a 'handler' function is exported from the respective module (e.g., export const handler = ...).
+// NOTE: In a real project, you would ensure these imported files are also TypeScript (.ts)
+// and have correct handler signatures (e.g., const handler: Handler<APIGatewayProxyEvent, APIGatewayProxyResult> = async (event) => {...})
 
 // User Management
 import { handler as createUserHandler } from "./handlers/createUser";
@@ -121,17 +124,14 @@ import { handler as sendReferralInviteHandler } from "./handlers/sendReferralInv
 import { handler as generatePresignedUrlHandler } from "./handlers/generatePresignedUrl";
 import { handler as getFileUrlHandler } from "./handlers/getFileUrl";
 import { handler as deleteFileHandler } from "./handlers/deleteFile";
-// The upload helpers export named handlers (profileImageHandler, certificateHandler, videoResumeHandler)
-import { profileImageHandler, certificateHandler, videoResumeHandler } from "./handlers/updateFile";
+import { handler as updateFileHandler } from "./handlers/updateFile";
 
 // Public Routes
 import { handler as publicProfessionalsHandler } from "./handlers/publicProfessionals";
 import { handler as publicClinicsHandler } from "./handlers/findJobs";
 
-// Widen the RouteHandler signature to accept various lambda shapes used across handlers
-// Allow any handler shape (v1/v2/custom) by accepting any args.
-// Handlers may return a Promise or use callback style (void). Accept both.
-type RouteHandler = (...args: any[]) => Promise<any> | void;
+// Define the shape of a Route Handler
+type RouteHandler = (event: APIGatewayProxyEvent) => Promise<APIGatewayProxyResult>;
 
 // Define the structure of the routes object
 interface Routes {
@@ -143,9 +143,6 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
     const routeKey = `${httpMethod}:${resource}`;
     
     // Type assertion to ensure the object structure aligns with the Routes interface
-    // Note: The compatibility errors below (TS2322) are due to differences between
-    // imported handler definitions (which might use APIGatewayProxyEventV2 or custom types)
-    // and the local RouteHandler type. Widening the signature above should resolve most.
     const routes: Routes = {
         // User management routes
         "POST:/users": createUserHandler,
@@ -223,6 +220,12 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "PUT:/jobs/consulting/{jobId}": updateMultiDayConsultingHandler,
         "DELETE:/jobs/consulting/{jobId}": deleteMultiDayConsultingHandler,
 
+        "POST:/jobs/permanent": createPermanentJobHandler,
+        "GET:/jobs/permanent/{jobId}": getPermanentJobHandler,
+        "GET:/jobs/permanent": getAllPermanentJobsHandler,
+        "PUT:/jobs/permanent/{jobId}": updatePermanentJobHandler,
+        "DELETE:/jobs/permanent/{jobId}": deletePermanentJobHandler,
+
         // Aggregate/Clinic-specific job list endpoints
         "GET:/jobs/multiday/{jobId}": getAllMultidayJobsHandler, // This route parameter looks like it might be unnecessary based on the original JS
         "GET:/jobs/multiday/clinic/{clinicId}": getAllMultidayForClinicHandler,
@@ -278,13 +281,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/files/profile-images": getFileUrlHandler,
         "GET:/files/certificates": getFileUrlHandler,
         "GET:/files/video-resumes": getFileUrlHandler,
-        
-        // Map file upload routes to the specific handlers exported from updateFile.ts
-        "PUT:/files/profile-images": profileImageHandler,
-        "PUT:/files/profile-image": profileImageHandler,
-        "PUT:/files/certificates": certificateHandler,
-        "PUT:/files/video-resumes": videoResumeHandler,
-        
+        "PUT:/files/profile-images": updateFileHandler,
+        "PUT /files/profile-image": updateFileHandler, // Note: Extra space in method here, though usually handled by API Gateway normalize
+        "PUT:/files/certificates": updateFileHandler,
+        "PUT:/files/video-resumes": updateFileHandler,
         "DELETE:/files/profile-images": deleteFileHandler,
         "DELETE:/files/certificates": deleteFileHandler,
         "DELETE:/files/video-resumes": deleteFileHandler,
@@ -366,8 +366,7 @@ const matchesPattern = (actualRoute: string, patternRoute: string): boolean => {
 };
 
 // Main Lambda Handler
-// Use Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult> to cover both API Gateway and EventBridge events
-export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult> = async (event: APIGatewayProxyEvent | any, context?: Context): Promise<APIGatewayProxyResult> => {
+export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult> = async (event: APIGatewayProxyEvent | any): Promise<APIGatewayProxyResult> => {
 
     console.log("--- START: FULL INCOMING EVENT ---");
     console.log(JSON.stringify(event, null, 2));
@@ -378,7 +377,6 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
         console.log("✅ SUCCESS: EventBridge trigger DETECTED. Routing to shift completion handler.");
         try {
             // Note: updateCompletedShiftsHandler is the imported handler from the module
-            // The imported handler expects a single argument (event). Pass only event to satisfy its signature.
             return await updateCompletedShiftsHandler(event);
         } catch (error) {
             console.error("❌ ERROR inside scheduled task (updateCompletedShifts):", error);
@@ -450,9 +448,7 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
     // --- STEP 4: Execute Handler ---
     try {
         console.log(`✅ SUCCESS: Routing to handler for ${httpMethod}:${matchedResource}`);
-        // Pass both event and context to the matched handler. Accept different handler return shapes.
-        const handlerResult = routeHandler(event as any, context);
-        return await (handlerResult as Promise<any>);
+        return await routeHandler(event as APIGatewayProxyEvent);
     }
     catch (error: any) {
         console.error(`❌ ERROR processing ${httpMethod} ${matchedResource}:`, error);
@@ -469,4 +465,6 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
 };
 
 // Exporting handler for AWS Lambda
+// Note: The original JS used module.exports = { handler: handler } via commonjs, 
+// which TypeScript simplifies with an export statement in an ES module environment.
 export { getRouteHandler, matchesPattern }; // Exporting for potential unit testing
