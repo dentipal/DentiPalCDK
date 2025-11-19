@@ -1,16 +1,34 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.handler = void 0;
-const utils_1 = require("./utils");
-const professionalRoles_1 = require("./professionalRoles");
+// getProfessionalQuestions.ts
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+import { validateToken } from "./utils";
+import { VALID_ROLE_VALUES } from "./professionalRoles";
+
+interface Question {
+    field: string;
+    label: string;
+    type: string;
+    required: boolean;
+    options?: string[];
+    description?: string;
+    placeholder?: string;
+}
+
+type RoleQuestionsMap = Record<string, Question[]>;
+
 // Common front desk questions for all professional roles
-const FRONT_DESK_QUESTIONS = [
+const FRONT_DESK_QUESTIONS: Question[] = [
     {
         field: 'dental_software_experience',
         label: 'Which dental software have you used?',
         type: 'multiselect',
         required: false,
-        options: ['Ascend', 'CareStack', 'ClearDent', 'Cloud 9', 'Curve', 'DOX', 'Dental Vision', 'DentaPro', 'Dentech', 'Denticon', 'Dentrix', 'Dexis', 'DrFirst', 'EagleSoft', 'Easy Dental', 'Epic', 'EZ 2000 Dental', 'Gendex', 'iCoreConnect', 'Macpractice', 'Medisoft', 'Open Dental', 'ORTOTRAC', 'Oryx Dental', 'Practice Works', 'QDV', 'QSI Dental', 'Quadra Dental', 'Sidexis', 'SOFTDENT', 'SuzyDental', 'Tab32', 'Windent', 'Other', 'none'],
+        options: [
+            'Ascend', 'CareStack', 'ClearDent', 'Cloud 9', 'Curve', 'DOX', 'Dental Vision', 'DentaPro',
+            'Dentech', 'Denticon', 'Dentrix', 'Dexis', 'DrFirst', 'EagleSoft', 'Easy Dental', 'Epic',
+            'EZ 2000 Dental', 'Gendex', 'iCoreConnect', 'Macpractice', 'Medisoft', 'Open Dental',
+            'ORTOTRAC', 'Oryx Dental', 'Practice Works', 'QDV', 'QSI Dental', 'Quadra Dental', 'Sidexis',
+            'SOFTDENT', 'SuzyDental', 'Tab32', 'Windent', 'Other', 'none'
+        ],
         description: 'Select all dental software you have experience with'
     },
     {
@@ -56,7 +74,8 @@ const FRONT_DESK_QUESTIONS = [
         description: 'Language skills help with diverse patient populations'
     }
 ];
-const ROLE_QUESTIONS = {
+
+const ROLE_QUESTIONS: RoleQuestionsMap = {
     associate_dentist: [
         // Front desk skills valuable for practice management and patient relations
         ...FRONT_DESK_QUESTIONS,
@@ -358,7 +377,8 @@ const ROLE_QUESTIONS = {
             label: 'Describe your patient coordination experience',
             type: 'textarea',
             required: true,
-            placeholder: 'Include experience with scheduling, insurance coordination, patient communication',
+            placeholder:
+                'Include experience with scheduling, insurance coordination, patient communication',
             description: 'Detail your experience managing patient relationships and coordination'
         },
         {
@@ -390,8 +410,10 @@ const ROLE_QUESTIONS = {
             label: 'Describe your treatment coordination experience',
             type: 'textarea',
             required: true,
-            placeholder: 'Include experience with treatment planning, case presentation, financial coordination',
-            description: 'Detail your experience coordinating treatment plans and presentations'
+            placeholder:
+                'Include experience with treatment planning, case presentation, financial coordination',
+            description:
+                'Detail your experience coordinating treatment plans and presentations'
         },
         {
             field: 'case_presentation_experience',
@@ -411,8 +433,10 @@ const ROLE_QUESTIONS = {
             label: 'Rate your knowledge of dental terminology and procedures',
             type: 'text',
             required: true,
-            placeholder: 'Describe your familiarity with dental procedures and terminology',
-            description: 'Strong dental knowledge is essential for treatment coordination'
+            placeholder:
+                'Describe your familiarity with dental procedures and terminology',
+            description:
+                'Strong dental knowledge is essential for treatment coordination'
         },
         {
             field: 'sales_experience',
@@ -423,29 +447,35 @@ const ROLE_QUESTIONS = {
         }
     ]
 };
-const handler = async (event) => {
+
+export const handler = async (
+    event: APIGatewayProxyEvent
+): Promise<APIGatewayProxyResult> => {
     try {
-        await (0, utils_1.validateToken)(event);
+        await validateToken(event);
+
         const { role } = event.queryStringParameters || {};
+
         if (!role) {
             return {
                 statusCode: 200,
                 body: JSON.stringify({
-                    availableRoles: professionalRoles_1.VALID_ROLE_VALUES,
+                    availableRoles: VALID_ROLE_VALUES,
                     message: "Provide 'role' parameter to get specific questions"
                 })
             };
         }
-        // Validate role using the imported validation
-        if (!professionalRoles_1.VALID_ROLE_VALUES.includes(role)) {
+
+        if (!VALID_ROLE_VALUES.includes(role)) {
             return {
                 statusCode: 400,
                 body: JSON.stringify({
-                    error: `Invalid role. Valid options: ${professionalRoles_1.VALID_ROLE_VALUES.join(', ')}`,
-                    availableRoles: professionalRoles_1.VALID_ROLE_VALUES
+                    error: `Invalid role. Valid options: ${VALID_ROLE_VALUES.join(", ")}`,
+                    availableRoles: VALID_ROLE_VALUES
                 })
             };
         }
+
         return {
             statusCode: 200,
             body: JSON.stringify({
@@ -454,8 +484,7 @@ const handler = async (event) => {
                 totalQuestions: ROLE_QUESTIONS[role].length
             })
         };
-    }
-    catch (error) {
+    } catch (error: any) {
         console.error("Error getting professional questions:", error);
         return {
             statusCode: 500,
@@ -463,4 +492,3 @@ const handler = async (event) => {
         };
     }
 };
-exports.handler = handler;

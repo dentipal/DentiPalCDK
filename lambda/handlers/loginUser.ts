@@ -1,31 +1,30 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.handler = void 0;
-
-const {
+import {
   CognitoIdentityProviderClient,
   InitiateAuthCommand,
   AuthFlowType,
-} = require("@aws-sdk/client-cognito-identity-provider");
-const { DynamoDBClient, ScanCommand } = require("@aws-sdk/client-dynamodb");
+} from "@aws-sdk/client-cognito-identity-provider";
+import { DynamoDBClient, ScanCommand, ScanCommandInput } from "@aws-sdk/client-dynamodb";
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 const dynamo = new DynamoDBClient({ region: process.env.REGION });
 
 /* ----------------- helpers ----------------- */
-const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+const norm = (s: string | undefined): string =>
+  String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
 const CLINIC_GROUPS_NORM = new Set(["root", "clinicadmin", "clinicmanager", "clinicviewer"]);
 
-function isClinicRole(groups) {
+function isClinicRole(groups: string[] | undefined): boolean {
   const normalized = (groups || []).map(norm);
   const ok = normalized.some((g) => CLINIC_GROUPS_NORM.has(g));
   console.log("[auth] groups raw:", groups, "normalized:", normalized, "isClinicRole:", ok);
   return ok;
 }
 
-function formatAddressFromItem(item) {
+function formatAddressFromItem(item: any): string {
   // Support new canonical fields and fallback to legacy single `address`
-  const get = (k) => (item[k] && item[k].S) ? item[k].S : "";
+  const get = (k: string): string => (item[k] && item[k].S ? item[k].S : "");
   const parts = [
     get("addressLine1"),
     get("addressLine2"),
@@ -39,7 +38,9 @@ function formatAddressFromItem(item) {
 }
 /* ------------------------------------------- */
 
-const handler = async (event) => {
+export const handler = async (
+  event: APIGatewayProxyEvent
+): Promise<APIGatewayProxyResult> => {
   console.log("Login request received:", event.body);
 
   const headers = {
@@ -49,7 +50,7 @@ const handler = async (event) => {
   };
 
   try {
-    const loginData = JSON.parse(event.body || "{}");
+    const loginData: { email?: string; password?: string } = JSON.parse(event.body || "{}");
 
     if (!loginData.email || !loginData.password) {
       console.warn("Missing required fields");
@@ -85,28 +86,28 @@ const handler = async (event) => {
     }
 
     // Decode id token (no external deps)
-    const idToken = tokens.IdToken;
+    const idToken = tokens.IdToken!;
     const payloadBase64 = idToken.split(".")[1];
     const decodedPayload = JSON.parse(Buffer.from(payloadBase64, "base64").toString("utf-8"));
 
-    const userSub = decodedPayload.sub;
-    const userGroups = decodedPayload["cognito:groups"] || [];
+    const userSub: string = decodedPayload.sub;
+    const userGroups: string[] = decodedPayload["cognito:groups"] || [];
 
     console.log("=== USER AUTHENTICATION DEBUG ===");
     console.log("User sub:", userSub);
     console.log("User groups:", userGroups);
     console.log("User email:", email);
 
-    let associatedClinics = [];
+    const associatedClinics: Array<{ clinicId: string; name: string; address: string }> = [];
 
     if (isClinicRole(userGroups)) {
       console.log("=== CLINIC RETRIEVAL DEBUG ===");
       console.log("[login] User has clinic role, fetching associated clinics for sub:", userSub);
       console.log("[login] Using table:", process.env.CLINICS_TABLE);
 
-      const params = {
-        TableName: process.env.CLINICS_TABLE,               // e.g. "DentiPal-Clinics"
-        FilterExpression: "contains(AssociatedUsers, :sub)",// works for List(L) or String Set(SS)
+      const params: ScanCommandInput = {
+        TableName: process.env.CLINICS_TABLE!,
+        FilterExpression: "contains(AssociatedUsers, :sub)",
         ExpressionAttributeValues: { ":sub": { S: userSub } },
         ProjectionExpression:
           "clinicId, #nm, address, addressLine1, addressLine2, addressLine3, city, #st, pincode, AssociatedUsers",
@@ -145,22 +146,18 @@ const handler = async (event) => {
           const clinicId = item.clinicId?.S || "";
           const name = item.name?.S || "";
           const address = formatAddressFromItem(item);
-          
-          // Debug: Show AssociatedUsers for each clinic
+
           let associatedUsersDebug = "N/A";
           if (item.AssociatedUsers) {
             if (item.AssociatedUsers.SS) {
-              // String Set
               associatedUsersDebug = `SS: [${item.AssociatedUsers.SS.join(", ")}]`;
             } else if (item.AssociatedUsers.L) {
-              // List
-              const listItems = item.AssociatedUsers.L.map(listItem => {
+              const listItems = item.AssociatedUsers.L.map((listItem: any) => {
                 if (listItem.S) return listItem.S;
                 return JSON.stringify(listItem);
               });
               associatedUsersDebug = `L: [${listItems.join(", ")}]`;
             } else if (item.AssociatedUsers.S) {
-              // Single String
               associatedUsersDebug = `S: ${item.AssociatedUsers.S}`;
             } else {
               associatedUsersDebug = `Unknown format: ${JSON.stringify(item.AssociatedUsers)}`;
@@ -171,7 +168,7 @@ const handler = async (event) => {
             clinicId,
             name,
             associatedUsers: associatedUsersDebug,
-            userSubMatch: associatedUsersDebug.includes(userSub)
+            userSubMatch: associatedUsersDebug.includes(userSub),
           });
 
           if (clinicId) {
@@ -185,7 +182,6 @@ const handler = async (event) => {
         lastKey = page.LastEvaluatedKey;
         pageNumber++;
         console.log(`[login] === PAGE ${pageNumber - 1} SCAN END ===`);
-
       } while (lastKey);
 
       console.log("=== FINAL CLINIC RESULTS ===");
@@ -198,7 +194,6 @@ const handler = async (event) => {
       console.log("[login] User groups were:", userGroups);
     }
 
-    // Build response
     const responseBody = {
       message: "Login successful",
       tokens: {
@@ -221,11 +216,11 @@ const handler = async (event) => {
       email: responseBody.user.email,
       sub: responseBody.user.sub,
       groups: responseBody.user.groups,
-      clinicsCount: responseBody.user.associatedClinics.length
+      clinicsCount: responseBody.user.associatedClinics.length,
     });
 
     return { statusCode: 200, headers, body: JSON.stringify(responseBody) };
-  } catch (error) {
+  } catch (error: any) {
     console.error("=== ERROR DEBUG ===");
     console.error("Error during login:", error);
     console.error("Error name:", error.name);
@@ -252,5 +247,3 @@ const handler = async (event) => {
     };
   }
 };
-
-exports.handler = handler;

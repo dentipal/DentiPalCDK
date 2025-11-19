@@ -1,11 +1,17 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.handler = void 0;
 
-const { DynamoDBClient, ScanCommand, QueryCommand } = require("@aws-sdk/client-dynamodb");
-const { validateToken } = require("./utils");
+import {
+  DynamoDBClient,
+  ScanCommand,
+  QueryCommand,
+  AttributeValue,
+} from "@aws-sdk/client-dynamodb";
+import { validateToken } from "./utils";
 
-const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+export const dynamodb = new DynamoDBClient({
+  region: process.env.REGION,
+});
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -13,61 +19,81 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-// --- helper: pick the latest negotiation by updatedAt/createdAt ---
-function pickLatestNegotiation(items) {
+// -------- Helper: Pick Latest Negotiation --------
+function pickLatestNegotiation(items: Record<string, AttributeValue>[]) {
   if (!items || !items.length) return null;
-  const score = (it) => {
-    // prefer updatedAt, fallback createdAt
-    const u = it.updatedAt?.S;
-    const c = it.createdAt?.S;
-    const tryNum = (v) => {
+
+  const score = (it: any) => {
+    const tryNum = (v: string) => {
       const n = Number(v);
-      if (!Number.isNaN(n) && n > 0 && String(n).length >= 10) return n; // epoch sec/ms
+      if (!Number.isNaN(n) && n > 0 && String(n).length >= 10) return n;
       const d = Date.parse(v);
       return Number.isNaN(d) ? -Infinity : d;
     };
+
+    const u = it.updatedAt?.S;
+    const c = it.createdAt?.S;
+
     if (u) return tryNum(u);
     if (c) return tryNum(c);
     return -Infinity;
   };
-  let best = items[0], bestScore = score(items[0]);
+
+  let best = items[0];
+  let bestScore = score(items[0]);
+
   for (let i = 1; i < items.length; i++) {
     const s = score(items[i]);
-    if (s > bestScore) { best = items[i]; bestScore = s; }
+    if (s > bestScore) {
+      best = items[i];
+      bestScore = s;
+    }
   }
+
   return best;
 }
 
-// Helpers
-const num = (x) => (x?.N ? parseFloat(x.N) : undefined);
-const bool = (x) =>
-  typeof x?.BOOL === "boolean"
-    ? x.BOOL
-    : (x?.S?.toLowerCase?.() === "true" ? true : x?.S?.toLowerCase?.() === "false" ? false : undefined);
-const str = (x) => x?.S || "";
-const strOr = (...xs) => xs.find((v) => v?.S)?.S || "";
+// --- Helpers to clean DynamoDB attributes ---
+const num = (x: AttributeValue | undefined): number | undefined =>
+  x && "N" in x ? parseFloat(x.N as string) : undefined;
 
-const handler = async (event) => {
+const bool = (x: AttributeValue | undefined): boolean | undefined => {
+  if (x && "BOOL" in x) return x.BOOL as boolean;
+  if (x && "S" in x) {
+    const v = (x.S as string)?.toLowerCase();
+    if (v === "true") return true;
+    if (v === "false") return false;
+  }
+  return undefined;
+};
+
+const str = (x: AttributeValue | undefined): string =>
+  x && "S" in x ? (x.S as string) : "";
+
+const strOr = (a?: AttributeValue, b?: AttributeValue): string =>
+  (a && "S" in a && a.S) || (b && "S" in b && b.S) || "";
+
+// ---- MAIN LAMBDA HANDLER ----
+export const handler = async (event: any) => {
   try {
-    // Handle preflight request
+    // Handle OPTIONS
     if (event.httpMethod === "OPTIONS") {
       return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
-    // Token validation
     const userSub = await validateToken(event);
     const queryParams = event.queryStringParameters || {};
 
-    // Optional filters
-    const status = queryParams.status; // "pending", "accepted", "declined", "negotiating"
-    const jobType = queryParams.jobType; // "temporary", "multi_day_consulting", "permanent"
+    const status = queryParams.status;
+    const jobType = queryParams.jobType;
     const limit = queryParams.limit ? parseInt(queryParams.limit) : 50;
 
-    // Get job applications for the professional user
+    // ---- Scan Applications Table ----
     const applicationsCommand = new ScanCommand({
       TableName: process.env.JOB_APPLICATIONS_TABLE,
       FilterExpression:
-        "professionalUserSub = :userSub" + (status ? " AND applicationStatus = :status" : ""),
+        "professionalUserSub = :userSub" +
+        (status ? " AND applicationStatus = :status" : ""),
       ExpressionAttributeValues: {
         ":userSub": { S: userSub },
         ...(status && { ":status": { S: status } }),
@@ -76,21 +102,21 @@ const handler = async (event) => {
     });
 
     const applicationsResponse = await dynamodb.send(applicationsCommand);
-    const applications = [];
+    const applications: any[] = [];
 
-    // Normalize DynamoDB "dates" -> string[]
-    const toDates = (attr) =>
-      Array.isArray(attr?.SS)
-        ? attr.SS
-        : Array.isArray(attr?.L)
-        ? attr.L.map((v) => v?.S).filter(Boolean)
-        : typeof attr?.S === "string"
-        ? [attr.S]
-        : [];
+    const toDates = (attr: AttributeValue | undefined): string[] => {
+      if (!attr) return [];
+      if ("SS" in attr && Array.isArray(attr.SS)) return attr.SS;
+      if ("L" in attr && Array.isArray(attr.L))
+        return attr.L.map((v: any) => v?.S).filter(Boolean);
+      if ("S" in attr && typeof attr.S === "string") return [attr.S];
+      return [];
+    };
 
+    // ---- Iterate Applications ----
     if (applicationsResponse.Items) {
       for (const item of applicationsResponse.Items) {
-        const application = {
+        const application: any = {
           applicationId: str(item.applicationId),
           jobId: str(item.jobId),
           clinicId: str(item.clinicId),
@@ -107,7 +133,7 @@ const handler = async (event) => {
           acceptedRate: num(item.acceptedRate),
         };
 
-        // ---- fetch job details (existing) ----
+        // ----- Fetch Job Details -----
         try {
           const jobCommand = new QueryCommand({
             TableName: process.env.JOB_POSTINGS_TABLE,
@@ -119,11 +145,14 @@ const handler = async (event) => {
           });
 
           const jobResponse = await dynamodb.send(jobCommand);
-          if (jobResponse.Items && jobResponse.Items[0]) {
+
+          if (jobResponse.Items?.[0]) {
             const job = jobResponse.Items[0];
 
             application.jobTitle =
-              str(job.job_title) || `${str(job.professional_role) || "Professional"} Position`;
+              str(job.job_title) ||
+              `${str(job.professional_role) || "Professional"} Position`;
+
             application.jobType = str(job.job_type);
             application.professionalRole = str(job.professional_role);
             application.description = str(job.job_description);
@@ -134,8 +163,10 @@ const handler = async (event) => {
             application.startTime = str(job.start_time);
             application.endTime = str(job.end_time);
             application.hourlyRate = num(job.hourly_rate) ?? 0;
-            application.mealBreak = str(job.meal_break) || (bool(job.meal_break) ?? null);
-            application.freeParkingAvailable = bool(job.freeParkingAvailable) ?? false;
+            application.mealBreak =
+              str(job.meal_break) || (bool(job.meal_break) ?? null);
+            application.freeParkingAvailable =
+              bool(job.freeParkingAvailable) ?? false;
             application.parkingType = str(job.parkingType);
             application.parkingRate = num(job.parking_rate) ?? 0;
             application.softwareRequired = str(job.clinicSoftware);
@@ -145,6 +176,7 @@ const handler = async (event) => {
             application.jobSalaryMin = num(job.salary_min) ?? null;
             application.payType = str(job.work_schedule);
             application.jobSalaryMax = num(job.salary_max) ?? null;
+
             application.location = {
               addressLine1: str(job.addressLine1),
               addressLine2: str(job.addressLine2),
@@ -153,24 +185,33 @@ const handler = async (event) => {
               state: str(job.state),
               zipCode: str(job.pincode),
             };
+
             application.startDate = str(job.start_date);
+
             application.contactInfo = {
               email: str(job.contact_email),
               phone: str(job.contact_phone),
             };
 
-            application.specialRequirements = job.special_requirements?.SS || [];
+            application.specialRequirements =
+              job.special_requirements?.SS || [];
+
             application.status = str(job.status) || "active";
+
             application.createdAt = strOr(job.created_at, job.createdAt);
             application.updatedAt = strOr(job.updated_at, job.updatedAt);
           }
-        } catch (jobError) {
-          console.warn(`Failed to fetch job details for ${application.jobId}:`, jobError);
+        } catch (jobError: any) {
+          console.warn(
+            `Failed to fetch job details for ${application.jobId}:`,
+            jobError
+          );
         }
 
-        // ---- NEW: if negotiating, fetch negotiation info via applicationId-index ----
+        // ---- Negotiation Flow ----
         const isNegotiating =
-          (application.applicationStatus || "").toLowerCase() === "negotiating";
+          (application.applicationStatus || "").toLowerCase() ===
+          "negotiating";
 
         if (isNegotiating && application.applicationId) {
           try {
@@ -182,26 +223,23 @@ const handler = async (event) => {
                 ExpressionAttributeValues: {
                   ":aid": { S: application.applicationId },
                 },
-                // keep projection small; we only need these fields
                 ProjectionExpression:
                   "applicationId, negotiationId, clinicCounterHourlyRate, professionalCounterHourlyRate, negotiationStatus, updatedAt, createdAt",
-                // If your GSI has a RANGE (e.g., updatedAt), you could add:
-                // ScanIndexForward: false, Limit: 1
               })
             );
 
-            const items = negoResp.Items || [];
-            const latest = pickLatestNegotiation(items);
+            const latest = pickLatestNegotiation(negoResp.Items || []);
 
             if (latest) {
               application.negotiation = {
                 negotiationId: str(latest.negotiationId),
-                clinicCounterHourlyRate: num(latest.clinicCounterHourlyRate) ?? null,
-                professionalCounterHourlyRate: num(latest.professionalCounterHourlyRate) ?? null,
+                clinicCounterHourlyRate:
+                  num(latest.clinicCounterHourlyRate) ?? null,
+                professionalCounterHourlyRate:
+                  num(latest.professionalCounterHourlyRate) ?? null,
                 negotiationStatus: str(latest.negotiationStatus),
                 updatedAt: str(latest.updatedAt),
                 createdAt: str(latest.createdAt),
-                // NOTE: proposedRate is already on `application` from the applications table
               };
             }
           } catch (e) {
@@ -212,15 +250,17 @@ const handler = async (event) => {
           }
         }
 
-        // Apply job type filter if specified
+        // ---- Job Type Filtering ----
         if (!jobType || application.jobType === jobType) {
           applications.push(application);
         }
       }
     }
 
+    // ---- Sort by most recent appliedAt ----
     applications.sort(
-      (a, b) => new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime()
+      (a, b) =>
+        new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime()
     );
 
     return {
@@ -237,7 +277,7 @@ const handler = async (event) => {
         },
       }),
     };
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error retrieving job applications:", error);
     return {
       statusCode: 500,
@@ -249,5 +289,3 @@ const handler = async (event) => {
     };
   }
 };
-
-exports.handler = handler;
