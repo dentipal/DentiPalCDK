@@ -5,9 +5,18 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient, ScanCommand, ScanCommandInput } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 const dynamo = new DynamoDBClient({ region: process.env.REGION });
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: JSON.stringify(bodyObj),
+});
 
 /* ----------------- helpers ----------------- */
 const norm = (s: string | undefined): string =>
@@ -41,24 +50,19 @@ function formatAddressFromItem(item: any): string {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-  console.log("Login request received:", event.body);
+  // CORS Preflight
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+  }
 
-  const headers = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  };
+  console.log("Login request received:", event.body);
 
   try {
     const loginData: { email?: string; password?: string } = JSON.parse(event.body || "{}");
 
     if (!loginData.email || !loginData.password) {
       console.warn("Missing required fields");
-      return {
-        statusCode: 400,
-        headers,
-        body: JSON.stringify({ error: "Required fields: email, password" }),
-      };
+      return json(400, { error: "Required fields: email, password" });
     }
 
     const email = String(loginData.email).toLowerCase();
@@ -78,11 +82,7 @@ export const handler = async (
 
     if (!tokens) {
       console.warn("Authentication failed for email:", email);
-      return {
-        statusCode: 401,
-        headers,
-        body: JSON.stringify({ error: "Authentication failed. Please check your credentials." }),
-      };
+      return json(401, { error: "Authentication failed. Please check your credentials." });
     }
 
     // Decode id token (no external deps)
@@ -219,7 +219,8 @@ export const handler = async (
       clinicsCount: responseBody.user.associatedClinics.length,
     });
 
-    return { statusCode: 200, headers, body: JSON.stringify(responseBody) };
+    return json(200, responseBody);
+
   } catch (error: any) {
     console.error("=== ERROR DEBUG ===");
     console.error("Error during login:", error);
@@ -228,22 +229,21 @@ export const handler = async (
     console.error("Error stack:", error.stack);
 
     if (error.name === "NotAuthorizedException") {
-      return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid email or password" }) };
+      return json(401, { error: "Invalid email or password" });
     }
     if (error.name === "UserNotConfirmedException") {
-      return { statusCode: 403, headers, body: JSON.stringify({ error: "Email not verified. Please verify your account first." }) };
+      return json(403, { error: "Email not verified. Please verify your account first." });
     }
     if (error.name === "UserNotFoundException") {
-      return { statusCode: 404, headers, body: JSON.stringify({ error: "User not found. Please check your email or register first." }) };
+      return json(404, { error: "User not found. Please check your email or register first." });
     }
     if (error.name === "TooManyRequestsException") {
-      return { statusCode: 429, headers, body: JSON.stringify({ error: "Too many login attempts. Please try again later." }) };
+      return json(429, { error: "Too many login attempts. Please try again later." });
     }
 
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({ error: "Login failed. Please try again.", details: error.message }),
-    };
+    return json(500, {
+      error: "Login failed. Please try again.",
+      details: error.message,
+    });
   }
 };

@@ -18,7 +18,7 @@ import {
 } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { validateToken } from "./utils"; // Ensure this path is correct based on your file structure
-
+import { CORS_HEADERS } from "./corsHeaders";
 // --- Type Definitions ---
 
 type DynamoDBItem = { [key: string]: AttributeValue | undefined };
@@ -55,14 +55,7 @@ const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
 const ses = new SESClient({ region: SES_REGION } as SESClientConfig);
 
 // Get CORS Origin from environment variable or default to localhost
-const ORIGIN: string = process.env.CORS_ORIGIN || "http://localhost:5173";
-const CORS_HEADERS = {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': ORIGIN, 
-    'Access-Control-Allow-Methods': 'POST,OPTIONS', 
-    'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
-    'Access-Control-Allow-Credentials': 'true', 
-};
+
 
 // --- Email Template Function ---
 

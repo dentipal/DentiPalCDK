@@ -13,16 +13,18 @@ import {
 
 // IMPORTANT: Lambda runs JS → keep `.js`
 import { validateToken } from "./utils.js";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // DynamoDB Client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-// CORS Headers
-const CORS_HEADERS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  "Access-Control-Allow-Methods": "OPTIONS, GET",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: JSON.stringify(bodyObj)
+});
 
 /* ─────────────────────────────────────────────────────────────────────────────
    ADD #1: Normalize DynamoDB date attributes -> string[]
@@ -138,13 +140,9 @@ export const handler = async (
 
     const clinicId = extractClinicId(event);
     if (!clinicId) {
-      return {
-        statusCode: 400,
-        headers: CORS_HEADERS,
-        body: JSON.stringify({
-          error: "clinicId is required (query param ?clinicId=...)",
-        }),
-      };
+      return json(400, {
+        error: "clinicId is required (query param ?clinicId=...)",
+      });
     }
 
     const jobs: any[] = [];
@@ -189,26 +187,19 @@ export const handler = async (
       return String(aKey).localeCompare(String(bKey));
     });
 
-    return {
-      statusCode: 200,
-      headers: CORS_HEADERS,
-      body: JSON.stringify({
-        message: "Completed shifts retrieved successfully",
-        clinicId,
-        count: jobs.length,
-        jobs,
-      }),
-    };
+    return json(200, {
+      message: "Completed shifts retrieved successfully",
+      clinicId,
+      count: jobs.length,
+      jobs,
+    });
+    
   } catch (err: any) {
     console.error("Error retrieving completed shifts:", err);
 
-    return {
-      statusCode: 500,
-      headers: CORS_HEADERS,
-      body: JSON.stringify({
-        error: "Failed to retrieve completed shifts. Please try again.",
-        details: err?.message || String(err),
-      }),
-    };
+    return json(500, {
+      error: "Failed to retrieve completed shifts. Please try again.",
+      details: err?.message || String(err),
+    });
   }
 };

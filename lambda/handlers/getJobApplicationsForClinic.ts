@@ -8,7 +8,7 @@ import {
   BatchGetItemCommand,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
-
+import {CORS_HEADERS} from "./corsHeaders";
 // ---- env / config ----
 const REGION: string =
   process.env.REGION || process.env.AWS_REGION || "us-east-1";
@@ -31,14 +31,7 @@ const NEGOTIATIONS_TABLE: string =
 
 const ddb = new DynamoDBClient({ region: REGION });
 
-// ---- CORS ----
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token",
-  "Access-Control-Allow-Methods": "OPTIONS,GET",
-  "Content-Type": "application/json",
-};
+
 
 // ---------- helpers ----------
 const JJ = (x: any): string => {

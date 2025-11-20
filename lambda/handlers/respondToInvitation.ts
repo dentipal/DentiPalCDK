@@ -63,11 +63,7 @@ const JOB_NEGOTIATIONS_TABLE: string = process.env.JOB_NEGOTIATIONS_TABLE!;
 
 const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
 
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
+import { CORS_HEADERS } from "./corsHeaders";
 
 const VALID_RESPONSES: ReadonlyArray<InvitationResponseData['response']> = ["accepted", "declined", "negotiating"];
 

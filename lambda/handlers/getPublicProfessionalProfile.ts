@@ -7,14 +7,17 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-const corsHeaders: Record<string, string> = {
-  "Access-Control-Allow-Origin": process.env.CORS_ALLOWED_ORIGIN || "*",
-  "Access-Control-Allow-Headers": "Content-Type,Authorization",
-  "Access-Control-Allow-Methods": "GET,OPTIONS",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: JSON.stringify(bodyObj),
+});
 
 /**
  * Unmarshall a single DynamoDB AttributeValue into a JS value.
@@ -84,9 +87,9 @@ function getPathSegments(event: APIGatewayProxyEvent): string[] {
 /**
  * Extract userSub when using a greedy proxy route (/{proxy+}).
  * Accepts:
- *   - event.pathParameters.userSub (direct param routes)
- *   - event.pathParameters.proxy = "profiles/<userSub>(/...)" (greedy proxy)
- *   - fallback by parsing the full path
+ * - event.pathParameters.userSub (direct param routes)
+ * - event.pathParameters.proxy = "profiles/<userSub>(/...)" (greedy proxy)
+ * - fallback by parsing the full path
  */
 function getUserSubFromEvent(event: APIGatewayProxyEvent): string | undefined {
   // 1) direct param (if route is /profiles/{userSub})
@@ -125,7 +128,7 @@ export const handler = async (
   try {
     // CORS preflight
     if (getMethod(event) === "OPTIONS") {
-      return { statusCode: 200, headers: corsHeaders, body: "" };
+      return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     // Validate caller token (clinic/user)
@@ -135,23 +138,19 @@ export const handler = async (
     const professionalUserSub = getUserSubFromEvent(event);
 
     if (!professionalUserSub) {
-      return {
-        statusCode: 400,
-        headers: corsHeaders,
-        body: JSON.stringify({
-          error: "Professional userSub missing from path",
-          debug: {
-            pathParameters: event.pathParameters ?? null,
-            fullPath:
-              event.path ||
-              (event.requestContext as any)?.http?.path ||
-              (event.requestContext as any)?.path ||
-              null,
-            stage: (event.requestContext as any)?.stage || null,
-            segments: getPathSegments(event),
-          },
-        }),
-      };
+      return json(400, {
+        error: "Professional userSub missing from path",
+        debug: {
+          pathParameters: event.pathParameters ?? null,
+          fullPath:
+            event.path ||
+            (event.requestContext as any)?.http?.path ||
+            (event.requestContext as any)?.path ||
+            null,
+          stage: (event.requestContext as any)?.stage || null,
+          segments: getPathSegments(event),
+        },
+      });
     }
 
     // Query DynamoDB for the professional's profile(s)
@@ -170,11 +169,8 @@ export const handler = async (
 
     const profiles = items.map((it) => unmarshallMap(it));
 
-    return {
-      statusCode: 200,
-      headers: corsHeaders,
-      body: JSON.stringify({ profile: profiles[0] || null }),
-    };
+    return json(200, { profile: profiles[0] || null });
+
   } catch (error: any) {
     console.error("Error getting public professional profile:", error);
     const statusCode =
@@ -183,10 +179,8 @@ export const handler = async (
         ? 401
         : 500;
 
-    return {
-      statusCode,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: error.message || "Internal server error" }),
-    };
+    return json(statusCode, {
+      error: error.message || "Internal server error",
+    });
   }
 };

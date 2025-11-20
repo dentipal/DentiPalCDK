@@ -1,12 +1,13 @@
-import { 
-    DynamoDBClient, 
-    GetItemCommand, 
-    UpdateItemCommand, 
+import {
+    DynamoDBClient,
+    GetItemCommand,
+    UpdateItemCommand,
     AttributeValue,
-    UpdateItemCommandInput
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { Buffer } from 'buffer'; 
+import { Buffer } from 'buffer';
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -35,7 +36,7 @@ interface UpdateFields {
     description?: string;
     specialties?: string[];
     business_hours?: Record<string, any>;
-    [key: string]: any; 
+    [key: string]: any;
 }
 
 /** Full request body structure */
@@ -57,72 +58,73 @@ const ALLOWED_FIELDS: ReadonlyArray<keyof UpdateFields> = [
     "parking_type", "description", "specialties", "business_hours"
 ];
 
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: JSON.stringify(bodyObj)
+});
+
 // --- Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     console.info("🔧 Starting updateClinicProfile handler");
 
+    // CORS Preflight
+    if (event.httpMethod === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         if (!CLINIC_PROFILES_TABLE) {
             console.error("❌ CLINIC_PROFILES_TABLE environment variable is not set.");
-            return {
-                statusCode: 500,
-                body: JSON.stringify({ error: "Server configuration error: Table not defined." }),
-            };
+            return json(500, { error: "Server configuration error: Table not defined." });
         }
 
         // Step 1: Decode JWT token manually
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
         if (!authHeader || !authHeader.startsWith("Bearer ")) {
             console.error("❌ Missing or invalid Authorization header");
-            return {
-                statusCode: 401,
-                body: JSON.stringify({ error: "Missing or invalid Authorization header" }),
-            };
+            return json(401, { error: "Missing or invalid Authorization header" });
         }
 
         const token = authHeader.split(" ")[1];
         const parts = token.split(".");
         if (parts.length < 2) {
-             return {
-                statusCode: 401,
-                body: JSON.stringify({ error: "Invalid token format" }),
-            };
+             return json(401, { error: "Invalid token format" });
         }
-        
+
         const payload = parts[1];
-        
+
         // Decode the Base64URL payload
         const decodedClaims: JwtClaims = JSON.parse(
             Buffer.from(payload, "base64").toString("utf8")
         );
 
         const userSub: string = decodedClaims.sub;
-        
+
         // Normalize groups into a string array
         const rawGroups = decodedClaims["cognito:groups"];
-        const groups: string[] = Array.isArray(rawGroups) 
-            ? rawGroups.map(String) 
-            : (typeof rawGroups === 'string' 
-                ? rawGroups.split(',').map(s => s.trim()).filter(Boolean) 
+        const groups: string[] = Array.isArray(rawGroups)
+            ? rawGroups.map(String)
+            : (typeof rawGroups === 'string'
+                ? rawGroups.split(',').map(s => s.trim()).filter(Boolean)
                 : []);
-        
+
         const userType: string = decodedClaims["custom:user_type"] || "professional";
 
         // Step 2: Get clinicId from API Gateway proxy path
         // Expected path: /clinic-profiles/{clinicId} or via proxy
         const pathParts: string[] = event.path?.split("/") || [];
-        const clinicId: string | undefined = pathParts.pop();
+        // Extract the last segment as clinicId
+        const clinicId: string | undefined = pathParts[pathParts.length - 1];
 
         console.info("📦 Decoded claims:", decodedClaims);
         console.info("🏥 Extracted clinicId from path:", clinicId);
 
         if (!clinicId || !userSub) {
             console.error("❌ Missing clinicId or userSub");
-            return {
-                statusCode: 401,
-                body: JSON.stringify({ error: "Missing clinicId or userSub" }),
-            };
+            return json(401, { error: "Missing clinicId or userSub" });
         }
 
         // Step 3: Verify user is clinic or Root
@@ -131,10 +133,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!isClinicUser && !isRootUser) {
             console.warn("🚫 Unauthorized userType for profile update:", userType);
-            return {
-                statusCode: 403,
-                body: JSON.stringify({ error: "Access denied – only clinic users can update clinic profiles" }),
-            };
+            return json(403, { error: "Access denied – only clinic users can update clinic profiles" });
         }
 
         // Step 4: Parse body and validate
@@ -143,10 +142,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!profileId) {
             console.warn("⚠️ profileId missing in request body");
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "profileId is required" }),
-            };
+            return json(400, { error: "profileId is required" });
         }
 
         // Step 5: Confirm profile exists
@@ -162,10 +158,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!existingProfile.Item) {
             console.warn("⚠️ Clinic profile not found for clinicId:", clinicId);
-            return {
-                statusCode: 404,
-                body: JSON.stringify({ error: "Clinic profile not found" }),
-            };
+            return json(404, { error: "Clinic profile not found" });
         }
 
         // Step 6: Prepare update fields
@@ -179,9 +172,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (value !== undefined && value !== null) {
                 const attrName = `#${key}`;
                 const attrValue = `:${key}`;
-                
+
                 expressionAttributeNames[attrName] = key as string;
-                
+
                 // Convert JS types to DynamoDB AttributeValues
                 if (typeof value === 'string') {
                     expressionAttributeValues[attrValue] = { S: value };
@@ -196,12 +189,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                         expressionAttributeValues[attrValue] = { SS: strList };
                      }
                 } else if (typeof value === 'object' && key === 'business_hours') {
-                    // Simple serialization for map/object types if specific structure isn't enforced,
-                    // or build a Map Attribute Value. Here we use M (Map).
+                    // Simple serialization for map/object types using Map Attribute Value
                     const mapAttr: Record<string, AttributeValue> = {};
                     Object.entries(value).forEach(([k, v]) => {
                         if (typeof v === 'string') mapAttr[k] = { S: v };
-                        // Add more type checks if business_hours is complex
+                        // Add logic here if nested objects are needed in business_hours
                     });
                     expressionAttributeValues[attrValue] = { M: mapAttr };
                 }
@@ -214,10 +206,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (updateExpressions.length === 0) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "No valid fields provided for update" }),
-            };
+            return json(400, { error: "No valid fields provided for update" });
         }
 
         // Step 7: Execute Update
@@ -239,26 +228,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         console.info("✅ Clinic profile updated");
 
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                message: "Clinic profile updated successfully",
-                profileId,
-                updatedAt: new Date().toISOString(),
-                profile: result.Attributes, // Note: Attributes will be in DynamoDB JSON format
-            }),
-        };
-    } catch (error) {
+        return json(200, {
+            message: "Clinic profile updated successfully",
+            profileId,
+            updatedAt: new Date().toISOString(),
+            profile: result.Attributes,
+        });
+    } catch (error: any) {
         console.error("❌ Error in updateClinicProfile:", error);
         const errorMessage = (error as Error).message;
-        
+
         if (errorMessage.includes("Missing or invalid Authorization")) {
-             return { statusCode: 401, body: JSON.stringify({ error: errorMessage }) };
+             return json(401, { error: errorMessage });
         }
 
-        return {
-            statusCode: 500,
-            body: JSON.stringify({ error: "Failed to update clinic profile", details: errorMessage }),
-        };
+        return json(500, { error: "Failed to update clinic profile", details: errorMessage });
     }
 };

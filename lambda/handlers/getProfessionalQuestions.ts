@@ -1,7 +1,15 @@
-// getProfessionalQuestions.ts
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: JSON.stringify(bodyObj),
+});
 
 interface Question {
     field: string;
@@ -451,44 +459,43 @@ const ROLE_QUESTIONS: RoleQuestionsMap = {
 export const handler = async (
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    // CORS Preflight
+    if (event.httpMethod === "OPTIONS") {
+        return {
+            statusCode: 200,
+            headers: CORS_HEADERS,
+            body: "",
+        };
+    }
+
     try {
         await validateToken(event);
 
         const { role } = event.queryStringParameters || {};
 
         if (!role) {
-            return {
-                statusCode: 200,
-                body: JSON.stringify({
-                    availableRoles: VALID_ROLE_VALUES,
-                    message: "Provide 'role' parameter to get specific questions"
-                })
-            };
+            return json(200, {
+                availableRoles: VALID_ROLE_VALUES,
+                message: "Provide 'role' parameter to get specific questions"
+            });
         }
 
         if (!VALID_ROLE_VALUES.includes(role)) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({
-                    error: `Invalid role. Valid options: ${VALID_ROLE_VALUES.join(", ")}`,
-                    availableRoles: VALID_ROLE_VALUES
-                })
-            };
+            return json(400, {
+                error: `Invalid role. Valid options: ${VALID_ROLE_VALUES.join(", ")}`,
+                availableRoles: VALID_ROLE_VALUES
+            });
         }
 
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                role,
-                questions: ROLE_QUESTIONS[role],
-                totalQuestions: ROLE_QUESTIONS[role].length
-            })
-        };
+        const questions = ROLE_QUESTIONS[role] || [];
+
+        return json(200, {
+            role,
+            questions: questions,
+            totalQuestions: questions.length
+        });
     } catch (error: any) {
         console.error("Error getting professional questions:", error);
-        return {
-            statusCode: 500,
-            body: JSON.stringify({ error: error.message })
-        };
+        return json(500, { error: error.message });
     }
 };

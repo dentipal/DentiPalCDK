@@ -1,17 +1,25 @@
-import { DynamoDB } from "aws-sdk";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, UpdateCommand, GetCommand, GetCommandOutput, UpdateCommandInput } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
+const REGION: string = process.env.REGION || "us-east-1";
 const CLINIC_PROFILES_TABLE: string = process.env.CLINIC_PROFILES_TABLE!; 
-const dynamodb = new DynamoDB.DocumentClient();
 
-const corsHeaders: Record<string, string> = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "OPTIONS,PUT",
-};
+// Initialize V3 Client and Document Client (Abstracts Marshalling)
+const client = new DynamoDBClient({ region: REGION });
+const ddbDoc = DynamoDBDocumentClient.from(client);
 
-// --- 2. Type Definitions (Interfaces) ---
+// --- 2. Helpers ---
+
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
+// --- 3. Type Definitions (Interfaces) ---
 
 /** Interface for the expected incoming request body (camelCase, potentially nested) */
 interface ClinicProfileBody {
@@ -83,7 +91,7 @@ interface CognitoClaims {
     [key: string]: any;
 }
 
-// --- 3. Transformer Function ---
+// --- 4. Transformer Function ---
 
 /**
  * Maps frontend camelCase/nested fields to backend DynamoDB snake_case/flattened attributes.
@@ -145,33 +153,30 @@ const transformBody = (body: ClinicProfileBody): DynamoBody => {
     return transformed;
 };
 
-// --- 4. Lambda Handler ---
+// --- 5. Lambda Handler ---
 
-/**
- * AWS Lambda handler for updating a clinic profile in DynamoDB.
- * @param event - The API Gateway Proxy Event.
- * @returns The API Gateway Proxy Result.
- */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     console.info("🔧 Starting updateClinicProfile handler");
 
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
+
     // Handle OPTIONS request for CORS preflight
-    if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: corsHeaders, body: "" };
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
         // Step 1: Decode JWT token manually
         const authHeader: string | undefined = event.headers?.Authorization || event.headers?.authorization;
         if (!authHeader || !authHeader.startsWith("Bearer ")) {
-            throw new Error("Missing or invalid Authorization header");
+            return json(401, { error: "Missing or invalid Authorization header" });
         }
 
         const token = authHeader.split(" ")[1];
         const payload = token.split(".")[1];
         
         if (!payload) {
-             throw new Error("Invalid JWT token format: missing payload");
+             return json(401, { error: "Invalid JWT token format: missing payload" });
         }
 
         // Base64URL decoding: replace non-URL-safe characters before decoding
@@ -184,21 +189,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         if (typeof userSub !== 'string' || userSub.trim().length === 0) {
              console.error("❌ userSub is missing or invalid in token claims.");
-             throw new Error("Invalid user identity in token.");
+             return json(401, { error: "Invalid user identity in token." });
         }
 
         // Step 2: Get clinicId from API Gateway proxy path
-        // Assuming path format is /clinics/{clinicId}/profile
         const pathParts: string[] = event.path?.split("/").filter(Boolean) || [];
         // The clinicId is the second-to-last segment (e.g., /clinics/a1b2c3d4/profile -> a1b2c3d4)
-        const clinicIdFromPath: string | undefined = pathParts[pathParts.length - 2]; 
+        const clinicIdFromPath: string | undefined = pathParts[pathParts.length - 2] || event.pathParameters?.clinicId;
 
         if (!clinicIdFromPath) {
-            return { 
-                statusCode: 400, 
-                headers: corsHeaders, 
-                body: JSON.stringify({ error: "Missing clinicId in URL path. Ensure the path format is /clinics/{clinicId}/profile" }) 
-            };
+            return json(400, { error: "Missing clinicId in URL path. Ensure the path format is /clinics/{clinicId}/profile" });
         }
 
         // Step 3: Verify user is authorized (Role Check)
@@ -207,43 +207,32 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!isRootUser && (!isClinicUser || userSub !== clinicIdFromPath)) {
             console.warn(`❌ Authorization failed for userSub: ${userSub} trying to update clinicId: ${clinicIdFromPath}.`);
-            return {
-                statusCode: 403,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: "Access denied – you are not authorized to update this clinic profile." }),
-            };
+            return json(403, { error: "Access denied – you are not authorized to update this clinic profile." });
         }
 
-        // Step 4/5: Check ownership/existence via DynamoDB Get (using Composite Key)
+        // Step 4: Check ownership/existence via DynamoDB Get (using Composite Key)
         const profileIdForUpdate: string = clinicIdFromPath; 
         
-        const getParams: DynamoDB.DocumentClient.GetItemInput = {
+        // Note: Composite Key: clinicId is partition key, userSub is sort key used in table definition
+        const getCommand = new GetCommand({
             TableName: CLINIC_PROFILES_TABLE,
-            Key: { clinicId: profileIdForUpdate, userSub: userSub }, // Composite Key: clinicId is partition key, userSub is sort key
-        };
+            Key: { clinicId: profileIdForUpdate, userSub: userSub }, 
+        });
 
-        let existingProfile: DynamoDB.DocumentClient.GetItemOutput;
+        let existingProfile: GetCommandOutput;
         try {
-            existingProfile = await dynamodb.get(getParams).promise();
+            existingProfile = await ddbDoc.send(getCommand);
         } catch (dbError) {
             console.error("❌ DynamoDB get error during ownership check:", dbError);
-            return {
-                statusCode: 500,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: "Failed to retrieve clinic profile for validation." }),
-            };
+            return json(500, { error: "Failed to retrieve clinic profile for validation." });
         }
 
         if (!existingProfile.Item) {
-            return {
-                statusCode: 404,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: "Clinic profile not found or you do not have permission to access it." }),
-            };
+            return json(404, { error: "Clinic profile not found or you do not have permission to access it." });
         }
         
         // =========================================================================
-        // STEP 6: TRANSFORM, MAP, AND FILTER THE INCOMING DATA
+        // STEP 5: TRANSFORM, MAP, AND FILTER THE INCOMING DATA
         // =========================================================================
         
         const requestBody: ClinicProfileBody = JSON.parse(event.body || "{}");
@@ -274,14 +263,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
         
         if (updatedFields.length === 0) {
-            return {
-                statusCode: 400,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: "No updateable fields provided in the request body after transformation." }),
-            };
+            return json(400, { error: "No updateable fields provided in the request body after transformation." });
         }
 
-        // Step 7: Build DynamoDB Update Expression
+        // Step 6: Build DynamoDB Update Expression
         let updateExpression: string = "SET ";
         const expressionAttributeNames: Record<string, string> = { "#updatedAt": "updatedAt" };
         const expressionAttributeValues: Record<string, any> = { ":updatedAt": new Date().toISOString() };
@@ -292,7 +277,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         updatedFields.forEach(field => {
             setExpressions.push(`#${field} = :${field}`);
             
-            // FIX: Cast 'field' to string to satisfy Record<string, string>
+            // Cast 'field' to string to satisfy Record<string, string>
             expressionAttributeNames[`#${field}`] = field as string;
             
             expressionAttributeValues[`:${field}`] = validUpdateFields[field as keyof DynamoBody];
@@ -301,32 +286,28 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         updateExpression += setExpressions.join(", ");
         updateExpression += ", #updatedAt = :updatedAt"; // Always update the 'updatedAt' field
 
-        const updateParams: DynamoDB.DocumentClient.UpdateItemInput = {
+        const updateCommand = new UpdateCommand({
             TableName: CLINIC_PROFILES_TABLE,
             Key: { clinicId: profileIdForUpdate, userSub: userSub }, 
             UpdateExpression: updateExpression,
             ExpressionAttributeNames: expressionAttributeNames,
             ExpressionAttributeValues: expressionAttributeValues,
             ReturnValues: "ALL_NEW",
-        };
+        });
 
-        const result = await dynamodb.update(updateParams).promise();
+        const result = await ddbDoc.send(updateCommand);
 
         console.info("✅ Clinic profile updated successfully for clinicId:", profileIdForUpdate);
 
-        // Step 8: Return updated profile data
-        return {
-            statusCode: 200,
-            headers: corsHeaders,
-            body: JSON.stringify({
-                message: "Clinic profile updated successfully",
-                clinicId: profileIdForUpdate,
-                updatedAt: expressionAttributeValues[":updatedAt"],
-                profile: result.Attributes, 
-            }),
-        };
+        // Step 7: Return updated profile data
+        return json(200, {
+            message: "Clinic profile updated successfully",
+            clinicId: profileIdForUpdate,
+            updatedAt: expressionAttributeValues[":updatedAt"],
+            profile: result.Attributes, 
+        });
+
     } catch (error) {
-        // Ensure error is treated as an Error object
         const err = error as Error;
         console.error("❌ Unhandled error in updateClinicProfile:", err);
         
@@ -336,10 +317,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isClientError = errorMessage.includes("Authorization") || errorMessage.includes("identity") || errorMessage.includes("Missing clinicId") || errorMessage.includes("JWT");
         const statusCode = isClientError ? 401 : 500;
         
-        return {
-            statusCode: statusCode,
-            headers: corsHeaders,
-            body: JSON.stringify({ error: errorMessage }),
-        };
+        return json(statusCode, { error: errorMessage });
     }
 };

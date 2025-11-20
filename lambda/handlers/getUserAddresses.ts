@@ -1,15 +1,11 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { DynamoDB } from "aws-sdk";
 import { verifyToken } from "./utils";
-
+import { CORS_HEADERS } from "./corsHeaders";
 const dynamodb = new DynamoDB.DocumentClient();
 const USER_ADDRESSES_TABLE = process.env.USER_ADDRESSES_TABLE!;
 
-const corsHeaders = {
-    "Access-Control-Allow-Origin": process.env.CORS_ALLOWED_ORIGIN || "http://localhost:5173",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-};
+
 
 export const handler = async (
     event: APIGatewayProxyEvent
@@ -21,7 +17,7 @@ export const handler = async (
         if (!userInfo) {
             return {
                 statusCode: 401,
-                headers: corsHeaders,
+                headers: CORS_HEADERS,
                 body: JSON.stringify({ error: "Unauthorized - Invalid or expired token" }),
             };
         }
@@ -42,14 +38,14 @@ export const handler = async (
         if (!result.Items || result.Items.length === 0) {
             return {
                 statusCode: 404,
-                headers: corsHeaders,
+                headers: CORS_HEADERS,
                 body: JSON.stringify({ error: "No addresses found for this user" }),
             };
         }
 
         return {
             statusCode: 200,
-            headers: corsHeaders,
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 message: "User addresses retrieved successfully",
                 addresses: result.Items,
@@ -60,7 +56,7 @@ export const handler = async (
         console.error("Error retrieving user addresses:", error);
         return {
             statusCode: 500,
-            headers: corsHeaders,
+            headers: CORS_HEADERS,
             body: JSON.stringify({ error: "Failed to retrieve user addresses" }),
         };
     }

@@ -1,7 +1,8 @@
 import { DynamoDBClient, UpdateItemCommand, AttributeValue } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// 1. Added AccessLevel to imports to fix the type error
 import { validateToken, hasClinicAccess, buildAddress, AccessLevel } from "./utils"; 
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -29,6 +30,19 @@ const REGION: string = process.env.REGION || "us-east-1";
 const CLINICS_TABLE: string | undefined = process.env.CLINICS_TABLE;
 
 const dynamoClient = new DynamoDBClient({ region: REGION });
+
+// --- Helpers ---
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
+const getMethod = (e: APIGatewayProxyEvent): string =>
+    // Check httpMethod (v1) or requestContext.http.method (v2)
+    e?.httpMethod || (e?.requestContext as any)?.http?.method || "GET";
 
 /** ----------------- NEW: robust groups parsing + helpers ----------------- */
 
@@ -72,12 +86,19 @@ const ALLOWED_UPDATERS: ReadonlySet<string> = new Set(["root", "clinicadmin"]);
 /** ----------------------------------------------------------------------- */
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    const method = getMethod(event);
+
+    // 1. CORS Preflight
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
-        // 1. Authentication
+        // 2. Authentication
         // Assuming validateToken returns userSub (string) or throws if invalid
         const userSub: string = await validateToken(event); 
 
-        // 2. Group Authorization Check (Root, ClinicAdmin)
+        // 3. Group Authorization Check (Root, ClinicAdmin)
         const rawGroups: string[] = parseGroupsFromAuthorizer(event);
         const normalized: string[] = rawGroups.map(normalize);
         const isRootGroup: boolean = normalized.includes("root");
@@ -85,33 +106,28 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isAllowedGroup: boolean = normalized.some(g => ALLOWED_UPDATERS.has(g));
         
         if (!isAllowedGroup) {
-            return { 
-                statusCode: 403, 
-                body: JSON.stringify({ error: "Access denied: only Root or ClinicAdmin can update clinics" }) 
-            };
+            return json(403, { error: "Access denied: only Root or ClinicAdmin can update clinics" });
         }
 
-        // 3. Extract Clinic ID
+        // 4. Extract Clinic ID
         let clinicId: string | undefined = event.pathParameters?.clinicId || event.pathParameters?.proxy;
         console.log("Extracted clinicId:", clinicId);
 
         if (!clinicId) {
-            return { statusCode: 400, body: JSON.stringify({ error: "Clinic ID is required in path parameters" }) };
+            return json(400, { error: "Clinic ID is required in path parameters" });
         }
 
-        // 4. Clinic-Scoped Access Check
+        // 5. Clinic-Scoped Access Check
         // Root bypasses clinic-scoped check; ClinicAdmin must have clinic access
         if (!isRootGroup) {
-            // FIX: Cast string to AccessLevel to satisfy TypeScript
-            // Note: Ensure "ClinicAdmin" matches the spelling expected by your AccessLevel type/enum
             const hasAccess: boolean = await hasClinicAccess(userSub, clinicId, "ClinicAdmin" as AccessLevel);
             
             if (!hasAccess) {
-                return { statusCode: 403, body: JSON.stringify({ error: "Access denied to update clinic" }) };
+                return json(403, { error: "Access denied to update clinic" });
             }
         }
 
-        // 5. Parse and Prepare Update Data
+        // 6. Parse and Prepare Update Data
         const body: UpdateClinicBody = JSON.parse(event.body || '{}');
         const { name, addressLine1, addressLine2, addressLine3, city, state, pincode } = body;
         
@@ -147,15 +163,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Check if only timestamp is being updated
         // If we only have 1 item in the array, it's just 'updatedAt'
         if (updateExpression.length === 1 && updateExpression[0].includes("updatedAt")) { 
-            return { statusCode: 400, body: JSON.stringify({ error: "No fields to update" }) };
+            return json(400, { error: "No fields to update" });
         }
 
         if (!CLINICS_TABLE) {
              console.error("Environment variable CLINICS_TABLE is not set.");
-             return { statusCode: 500, body: JSON.stringify({ error: "Server configuration error." }) };
+             return json(500, { error: "Server configuration error." });
         }
 
-        // 6. Execute DynamoDB Update
+        // 7. Execute DynamoDB Update
         const command = new UpdateItemCommand({
             TableName: CLINICS_TABLE,
             Key: { clinicId: { S: clinicId } },
@@ -168,19 +184,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         await dynamoClient.send(command);
         
-        // 7. Success Response
-        return {
-            statusCode: 200,
-            body: JSON.stringify({ status: "success", message: "Clinic updated successfully" }),
-        };
+        // 8. Success Response
+        return json(200, { 
+            status: "success", 
+            message: "Clinic updated successfully" 
+        });
+        
     } catch (err) {
         const error = err as Error;
         console.error("Error updating clinic:", error);
         
         // Provide more detailed error response in production/development
-        return { 
-            statusCode: 500, 
-            body: JSON.stringify({ error: `Failed to update clinic: ${error.message}` }) 
-        };
+        return json(500, { error: `Failed to update clinic: ${error.message}` });
     }
 };

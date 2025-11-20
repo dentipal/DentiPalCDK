@@ -1,46 +1,44 @@
 import {
-    DynamoDBClient,
-    GetItemCommand,
-    QueryCommand,
-    AttributeValue
+  DynamoDBClient,
+  GetItemCommand,
+  QueryCommand,
+  AttributeValue
 } from "@aws-sdk/client-dynamodb";
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-export const handler = async (event: any): Promise<any> => {
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: JSON.stringify(bodyObj),
+});
+
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // Handle HTTP API (v2) structure where method is in requestContext.http
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+
+    // CORS Preflight
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
-        // Validate token and handle invalid/missing auth explicitly
-        let userSub: string;
-        try {
-            userSub = validateToken(event);
-        } catch (authErr: any) {
-            console.warn("Token validation failed:", authErr);
-            return {
-                statusCode: 403,
-                body: JSON.stringify({ error: "Forbidden: invalid or missing authorization" }),
-                headers: {
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                }
-            };
-        }
+        const userSub = await validateToken(event);
 
         // Extract jobId from the proxy path (if using {proxy+})
+        // Expected structure: /jobs/temporary/{jobId}
         const pathParts = event.pathParameters?.proxy?.split('/');
         const jobId: string | undefined = pathParts?.[2];
 
         if (!jobId) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({
-                    error: "jobId is required in path parameters"
-                }),
-                headers: {
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                }
-            };
+            return json(400, {
+                error: "jobId is required in path parameters"
+            });
         }
 
         // Get the temporary job
@@ -54,32 +52,18 @@ export const handler = async (event: any): Promise<any> => {
 
         const jobResponse = await dynamodb.send(jobCommand);
         if (!jobResponse.Item) {
-            return {
-                statusCode: 404,
-                body: JSON.stringify({
-                    error: "Temporary job not found or access denied"
-                }),
-                headers: {
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                }
-            };
+            return json(404, {
+                error: "Temporary job not found or access denied"
+            });
         }
 
         const job = jobResponse.Item;
 
         // Verify it's a temporary job
         if (job.job_type?.S !== "temporary") {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({
-                    error: "This is not a temporary job. Use the appropriate endpoint for this job type."
-                }),
-                headers: {
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                }
-            };
+            return json(400, {
+                error: "This is not a temporary job. Use the appropriate endpoint for this job type."
+            });
         }
 
         // Clinic address
@@ -118,14 +102,9 @@ export const handler = async (event: any): Promise<any> => {
 
         const profileResponse = await dynamodb.send(profileCommand);
         if (!profileResponse.Item) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "Profile not found for this clinic" }),
-                headers: {
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                }
-            };
+            return json(400, {
+                error: "Profile not found for this clinic"
+            });
         }
 
         const clinicProfile = profileResponse.Item;
@@ -179,29 +158,16 @@ export const handler = async (event: any): Promise<any> => {
             bookingOutPeriod: profileData.bookingOutPeriod
         };
 
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                message: "Temporary job retrieved successfully",
-                job: temporaryJob
-            }),
-            headers: {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization",
-            }
-        };
+        return json(200, {
+            message: "Temporary job retrieved successfully",
+            job: temporaryJob
+        });
+
     } catch (error: any) {
         console.error("Error retrieving temporary job:", error);
-        return {
-            statusCode: 500,
-            body: JSON.stringify({
-                error: "Failed to retrieve temporary job. Please try again.",
-                details: error.message
-            }),
-            headers: {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization",
-            }
-        };
+        return json(500, {
+            error: "Failed to retrieve temporary job. Please try again.",
+            details: error.message
+        });
     }
 };

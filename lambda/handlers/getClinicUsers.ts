@@ -1,4 +1,3 @@
-// handlers/getClinicUsers.ts
 "use strict";
 
 import {
@@ -14,18 +13,18 @@ import {
 
 // IMPORTANT: Use .js because Lambda runs JS, not TS
 import { validateToken } from "./utils.js";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize DynamoDB
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-// CORS Headers
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token",
-  "Access-Control-Allow-Methods": "OPTIONS,GET",
-  "Content-Type": "application/json",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: JSON.stringify(bodyObj)
+});
 
 // Extract clinicId from event object
 function extractClinicId(event: APIGatewayProxyEvent): string | null {
@@ -62,7 +61,7 @@ export const handler = async (
   // Handle OPTIONS
   if (method === "OPTIONS") {
     return {
-      statusCode: 204,
+      statusCode: 200,
       headers: CORS_HEADERS,
       body: "",
     };
@@ -76,14 +75,9 @@ export const handler = async (
     const clinicId = extractClinicId(event);
 
     if (!clinicId) {
-      return {
-        statusCode: 400,
-        headers: CORS_HEADERS,
-        body: JSON.stringify({
-          error:
-            "clinicId is required in the path (/clinics/{clinicId}/users)",
-        }),
-      };
+      return json(400, {
+        error: "clinicId is required in the path (/clinics/{clinicId}/users)",
+      });
     }
 
     // Query DynamoDB
@@ -95,11 +89,7 @@ export const handler = async (
     );
 
     if (!res.Item) {
-      return {
-        statusCode: 404,
-        headers: CORS_HEADERS,
-        body: JSON.stringify({ error: "Clinic not found" }),
-      };
+      return json(404, { error: "Clinic not found" });
     }
 
     // Extract AssociatedUsers from DynamoDB item
@@ -116,22 +106,15 @@ export const handler = async (
     }
 
     // Success Response
-    return {
-      statusCode: 200,
-      headers: CORS_HEADERS,
-      body: JSON.stringify({
-        clinicId,
-        associatedUsers,
-      }),
-    };
+    return json(200, {
+      clinicId,
+      associatedUsers,
+    });
+    
   } catch (err: any) {
     console.error("Error fetching clinic users:", err);
-    return {
-      statusCode: 500,
-      headers: CORS_HEADERS,
-      body: JSON.stringify({
-        error: err?.message || "Internal server error",
-      }),
-    };
+    return json(500, {
+      error: err?.message || "Internal server error",
+    });
   }
 };

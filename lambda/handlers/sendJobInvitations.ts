@@ -67,16 +67,10 @@ const REGION: string = process.env.REGION!;
 const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!;
 const PROFESSIONAL_PROFILES_TABLE: string = process.env.PROFESSIONAL_PROFILES_TABLE!;
 const JOB_INVITATIONS_TABLE: string = process.env.JOB_INVITATIONS_TABLE!;
-
+import { CORS_HEADERS } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
 
 // Get CORS Origin from environment variable or default to localhost
-const ORIGIN: string = process.env.CORS_ORIGIN || "http://localhost:5173";
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": ORIGIN,
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "OPTIONS,POST",
-};
 
 // --- Main Handler Function ---
 export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEvent): Promise<HandlerResponse> => {

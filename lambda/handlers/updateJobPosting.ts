@@ -1,21 +1,26 @@
-import { 
-    DynamoDBClient, 
-    GetItemCommand, 
-    UpdateItemCommand, 
-    AttributeValue,
-    GetItemCommandInput,
-    UpdateItemCommandInput,
-    GetItemCommandOutput
-} from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand, UpdateCommandInput } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+import { CORS_HEADERS } from "./corsHeaders";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
-const dynamodb: DynamoDBClient = new DynamoDBClient({ region: REGION });
-const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; // Non-null assertion for environment variable
+const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; 
 
-// --- 2. Type Definitions ---
+// Initialize V3 Client and Document Client
+const client = new DynamoDBClient({ region: REGION });
+const ddbDoc = DynamoDBDocumentClient.from(client);
+
+// --- 2. Helpers ---
+
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
+// --- 3. Type Definitions ---
 
 /** Union type for allowed job types */
 type JobType = 'temporary' | 'multi_day_consulting' | 'permanent';
@@ -47,115 +52,89 @@ interface UpdateJobPostingBody {
     vacation_days?: number;
     work_schedule?: string;
     start_date?: string;
+    
+    [key: string]: any;
 }
 
-/** Interface for the DynamoDB Job Item structure (unmarshalled attributes) */
+/** Interface for the DynamoDB Job Item structure (Unmarshalled) */
 interface JobItem {
-    jobId: { S: string };
-    clinicUserSub: { S: string };
-    job_type: { S: JobType };
-    status?: { S: string };
-    [key: string]: AttributeValue | undefined;
+    jobId: string;
+    clinicUserSub: string;
+    job_type: JobType;
+    status?: string;
+    [key: string]: any;
 }
 
-// --- 3. Handler Function ---
+// --- 4. Handler Function ---
 
-/**
- * Allows a clinic owner to update a specific job posting.
- * Includes job type-specific validation and ensures ownership.
- */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
+
+    // 1. Handle CORS Preflight
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
+    if (method !== 'PUT') {
+        return json(405, { error: 'Method not allowed' });
+    }
+
     try {
         // Auth check: Get userSub from the authorizer
         const userSub: string | undefined = event.requestContext.authorizer?.claims?.sub;
         if (!userSub) {
-            return {
-                statusCode: 401,
-                body: JSON.stringify({ error: 'Unauthorized: Missing user identity.' })
-            };
-        }
-
-        // Method check
-        if (event.httpMethod !== 'PUT') {
-            return {
-                statusCode: 405,
-                body: JSON.stringify({ error: 'Method not allowed' })
-            };
+            return json(401, { error: 'Unauthorized: Missing user identity.' });
         }
 
         // Extract job ID from path parameters
         const jobId: string | undefined = event.pathParameters?.jobId;
         if (!jobId) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: 'Job ID is required' })
-            };
+            return json(400, { error: 'Job ID is required' });
         }
 
         if (!event.body) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: 'Request body is required' })
-            };
+            return json(400, { error: 'Request body is required' });
         }
         
         const updateData: UpdateJobPostingBody = JSON.parse(event.body);
 
         // --- Step 1: Get existing job to verify ownership and job type ---
-        const getParams: GetItemCommandInput = {
+        const getCommand = new GetCommand({
             TableName: JOB_POSTINGS_TABLE,
-            Key: {
-                jobId: { S: jobId }
-            }
-        };
-        const existingJobResponse: GetItemCommandOutput = await dynamodb.send(new GetItemCommand(getParams));
+            Key: { jobId: jobId }
+        });
+        
+        const existingJobResponse = await ddbDoc.send(getCommand);
         
         if (!existingJobResponse.Item) {
-            return {
-                statusCode: 404,
-                body: JSON.stringify({ error: 'Job not found' })
-            };
+            return json(404, { error: 'Job not found' });
         }
         
         const existingItem = existingJobResponse.Item as JobItem;
-        const clinicUserSub: string | undefined = existingItem.clinicUserSub?.S;
-        const jobType: JobType | undefined = existingItem.job_type?.S;
-        const currentStatus: string = existingItem.status?.S || 'open';
+        const clinicUserSub = existingItem.clinicUserSub;
+        const jobType = existingItem.job_type;
+        const currentStatus = existingItem.status || 'open';
 
         // Check for critical missing data
         if (!clinicUserSub || !jobType) {
-             return {
-                statusCode: 500,
-                body: JSON.stringify({ error: 'Internal job data missing (clinicUserSub or job_type)' })
-            };
+             return json(500, { error: 'Internal job data missing (clinicUserSub or job_type)' });
         }
 
         // Security check: Only clinic owner can update their jobs
         if (userSub !== clinicUserSub) {
-            return {
-                statusCode: 403,
-                body: JSON.stringify({ error: 'Access denied - you can only update your own jobs' })
-            };
+            return json(403, { error: 'Access denied - you can only update your own jobs' });
         }
 
         // Prevent updates to completed jobs
         if (currentStatus === 'completed') {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: 'Cannot update completed jobs' })
-            };
+            return json(400, { error: 'Cannot update completed jobs' });
         }
 
         // --- Step 2: Validation ---
         
         // Validate professional role
         if (updateData.professional_role && !VALID_ROLE_VALUES.includes(updateData.professional_role)) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({
-                    error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES.join(', ')}`
-                })
-            };
+            return json(400, { error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES.join(', ')}` });
         }
 
         const now = new Date();
@@ -164,64 +143,59 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (jobType === 'temporary') {
             if (updateData.date) {
                 const jobDate = new Date(updateData.date);
-                // Check if date is not in the past
                 if (jobDate <= now) {
-                    return {
-                        statusCode: 400,
-                        body: JSON.stringify({ error: 'Job date must be in the future' })
-                    };
+                    return json(400, { error: 'Job date must be in the future' });
                 }
             }
             if (updateData.hours && (updateData.hours < 1 || updateData.hours > 12)) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Hours must be between 1 and 12' }) };
+                return json(400, { error: 'Hours must be between 1 and 12' });
             }
             if (updateData.hourly_rate && (updateData.hourly_rate < 10 || updateData.hourly_rate > 200)) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Hourly rate must be between $10 and $200' }) };
+                return json(400, { error: 'Hourly rate must be between $10 and $200' });
             }
         }
         else if (jobType === 'multi_day_consulting') {
             if (updateData.dates) {
                 if (!Array.isArray(updateData.dates) || updateData.dates.length === 0 || updateData.dates.length > 30) {
-                    return { statusCode: 400, body: JSON.stringify({ error: 'Dates array must have 1-30 entries' }) };
+                    return json(400, { error: 'Dates array must have 1-30 entries' });
                 }
                 // Validate all dates are in the future
                 const invalidDates = updateData.dates.filter(date => new Date(date) <= now);
                 if (invalidDates.length > 0) {
-                    return { statusCode: 400, body: JSON.stringify({ error: 'All dates must be in the future' }) };
+                    return json(400, { error: 'All dates must be in the future' });
                 }
                 // Recalculate total_days if dates are updated
                 updateData.total_days = updateData.dates.length;
             }
             if (updateData.hours_per_day && (updateData.hours_per_day < 1 || updateData.hours_per_day > 12)) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Hours per day must be between 1 and 12' }) };
+                return json(400, { error: 'Hours per day must be between 1 and 12' });
             }
             if (updateData.hourly_rate && (updateData.hourly_rate < 10 || updateData.hourly_rate > 300)) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Hourly rate must be between $10 and $300' }) };
+                return json(400, { error: 'Hourly rate must be between $10 and $300' });
             }
         }
         else if (jobType === 'permanent') {
             if (updateData.salary_min && (updateData.salary_min < 20000 || updateData.salary_min > 500000)) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Minimum salary must be between $20,000 and $500,000' }) };
+                return json(400, { error: 'Minimum salary must be between $20,000 and $500,000' });
             }
             if (updateData.salary_max && updateData.salary_min && updateData.salary_max <= updateData.salary_min) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Maximum salary must be greater than minimum salary' }) };
+                return json(400, { error: 'Maximum salary must be greater than minimum salary' });
             }
             if (updateData.vacation_days && (updateData.vacation_days < 0 || updateData.vacation_days > 50)) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Vacation days must be between 0 and 50' }) };
+                return json(400, { error: 'Vacation days must be between 0 and 50' });
             }
             if (updateData.employment_type && !['full_time', 'part_time'].includes(updateData.employment_type)) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Employment type must be full_time or part_time' }) };
+                return json(400, { error: 'Employment type must be full_time or part_time' });
             }
-            // benefits validation (assuming it's a string set, checking for array type is sufficient)
             if (updateData.benefits && !Array.isArray(updateData.benefits)) {
-                 return { statusCode: 400, body: JSON.stringify({ error: 'Benefits must be an array of strings' }) };
+                 return json(400, { error: 'Benefits must be an array of strings' });
             }
         }
 
         // --- Step 3: Build Update Expression ---
         const updateExpressions: string[] = [];
         const expressionAttributeNames: Record<string, string> = {};
-        const expressionAttributeValues: Record<string, AttributeValue> = {};
+        const expressionAttributeValues: Record<string, any> = {}; // any because DocumentClient handles marshalling
         let fieldsUpdatedCount = 0;
 
         // Helper function to add a field to the update expression
@@ -234,21 +208,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                  updateExpressions.push(`${attrKey} = :${attrName}`);
                  expressionAttributeNames[attrKey] = dbName;
                  
-                 // Type conversion for DynamoDB AttributeValue
-                 if (type === 'S') {
-                     expressionAttributeValues[`:${attrName}`] = { S: value as string };
-                 } else if (type === 'N') {
-                     expressionAttributeValues[`:${attrName}`] = { N: String(value) };
-                 } else if (type === 'BOOL') {
-                     expressionAttributeValues[`:${attrName}`] = { BOOL: value as boolean };
-                 } else if (type === 'SS') {
-                    // For string set (SS) or list (L - which is typically preferred but SS was in original logic for 'dates' and 'benefits')
-                    if (Array.isArray(value)) {
-                       expressionAttributeValues[`:${attrName}`] = { SS: value as string[] };
-                    } else {
-                       console.warn(`Attempted to save non-array value for SS field ${dbName}`);
-                       return; // Skip if type doesn't match
-                    }
+                 // For String Sets (SS), DocumentClient marshalls JavaScript Sets.
+                 // If we pass an array, it might be marshalled as a List (L) by default.
+                 // To strictly adhere to the 'SS' type intent, we convert arrays to Sets.
+                 if (type === 'SS' && Array.isArray(value)) {
+                     expressionAttributeValues[`:${attrName}`] = new Set(value);
+                 } else {
+                     expressionAttributeValues[`:${attrName}`] = value;
                  }
                  fieldsUpdatedCount++;
              }
@@ -267,8 +233,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             addUpdateField('hourly_rate', 'hourly_rate', 'N', 'hr');
         }
         else if (jobType === 'multi_day_consulting') {
-            // Note: Dates is treated as SS (String Set) which may have limitations in DynamoDB, 
-            // but matching original logic. If dates are large/order matters, L (List) should be used.
             addUpdateField('dates', 'dates', 'SS'); 
             addUpdateField('total_days', 'total_days', 'N', 'td');
             addUpdateField('hours_per_day', 'hours_per_day', 'N', 'hpd');
@@ -279,54 +243,44 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             addUpdateField('employment_type', 'employment_type', 'S', 'et');
             addUpdateField('salary_min', 'salary_min', 'N', 'smin');
             addUpdateField('salary_max', 'salary_max', 'N', 'smax');
-            addUpdateField('benefits', 'benefits', 'SS'); // Matching original SS logic
+            addUpdateField('benefits', 'benefits', 'SS'); 
             addUpdateField('vacation_days', 'vacation_days', 'N', 'vd');
             addUpdateField('work_schedule', 'work_schedule', 'S', 'ws');
             addUpdateField('start_date', 'start_date', 'S', 'sd');
         }
         
         if (fieldsUpdatedCount === 0) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: 'No valid fields to update' })
-            };
+            return json(400, { error: 'No valid fields to update' });
         }
 
         // Add updated timestamp
         const updatedTimestamp: string = now.toISOString();
-        updateExpressions.push('updated_at = :updated_at');
-        expressionAttributeValues[':updated_at'] = { S: updatedTimestamp };
+        updateExpressions.push('#updated_at = :updated_at');
+        expressionAttributeNames['#updated_at'] = 'updated_at';
+        expressionAttributeValues[':updated_at'] = updatedTimestamp;
 
         // --- Step 4: Update the job ---
-        const updateCommand: UpdateItemCommandInput = {
+        const updateCommand: UpdateCommandInput = {
             TableName: JOB_POSTINGS_TABLE,
-            Key: {
-                jobId: { S: jobId }
-            },
+            Key: { jobId: jobId },
             UpdateExpression: `SET ${updateExpressions.join(', ')}`,
-            ExpressionAttributeNames: Object.keys(expressionAttributeNames).length > 0 ? expressionAttributeNames : undefined,
+            ExpressionAttributeNames: expressionAttributeNames,
             ExpressionAttributeValues: expressionAttributeValues,
             ReturnValues: 'ALL_NEW'
         };
 
-        const result = await dynamodb.send(new UpdateItemCommand(updateCommand));
+        const result = await ddbDoc.send(new UpdateCommand(updateCommand));
 
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                message: 'Job updated successfully',
-                jobId,
-                updatedAt: updatedTimestamp,
-                fieldsUpdated: Object.keys(updateData).filter(key => updateData[key as keyof UpdateJobPostingBody] !== undefined),
-                updatedJob: result.Attributes
-            })
-        };
+        return json(200, {
+            message: 'Job updated successfully',
+            jobId,
+            updatedAt: updatedTimestamp,
+            fieldsUpdated: Object.keys(updateData).filter(key => updateData[key as keyof UpdateJobPostingBody] !== undefined),
+            updatedJob: result.Attributes
+        });
     }
     catch (error) {
         console.error('Error updating job posting:', error);
-        return {
-            statusCode: 500,
-            body: JSON.stringify({ error: 'Internal server error', details: (error as Error).message })
-        };
+        return json(500, { error: 'Internal server error', details: (error as Error).message });
     }
 };

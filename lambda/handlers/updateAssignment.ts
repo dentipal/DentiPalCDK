@@ -1,6 +1,8 @@
 import { DynamoDBClient, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { isRoot } from "./utils"; // Assuming utils.ts exports isRoot
+import { validateToken, isRoot } from "./utils";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -18,41 +20,52 @@ const USER_CLINIC_ASSIGNMENTS_TABLE: string | undefined = process.env.USER_CLINI
 
 const dynamoClient = new DynamoDBClient({ region: REGION });
 
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: JSON.stringify(bodyObj)
+});
+
 // --- Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // CORS Preflight
+    if (event.httpMethod === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
-        // 1. Authorization Check (Root User)
+        // 1. Authentication & Authorization Check (Root User)
+        await validateToken(event);
+
         const groupsString: string | undefined = event.requestContext.authorizer?.claims?.['cognito:groups'];
         const groups: string[] = groupsString?.split(',') || [];
         
         if (!isRoot(groups)) {
-            return {
-                statusCode: 403,
-                body: JSON.stringify({ error: "Only Root users can update assignments" })
-            };
+            return json(403, { error: "Only Root users can update assignments" });
         }
 
         if (!event.body) {
-             return { statusCode: 400, body: JSON.stringify({ error: "Missing request body" }) };
+             return json(400, { error: "Missing request body" });
         }
         
         // 2. Parse and Validate Body
         const { userSub, clinicId, accessLevel }: UpdateAssignmentBody = JSON.parse(event.body);
         
         if (!userSub || !clinicId || !accessLevel) {
-            return { statusCode: 400, body: JSON.stringify({ error: "Missing required fields (userSub, clinicId, or accessLevel)" }) };
+            return json(400, { error: "Missing required fields (userSub, clinicId, or accessLevel)" });
         }
         
         const validAccessLevels: ReadonlyArray<string> = ['ClinicAdmin', 'ClinicManager', 'ClinicViewer', 'Professional'];
         
         if (!validAccessLevels.includes(accessLevel)) {
-            return { statusCode: 400, body: JSON.stringify({ error: "Invalid access level" }) };
+            return json(400, { error: "Invalid access level" });
         }
 
         if (!USER_CLINIC_ASSIGNMENTS_TABLE) {
              console.error("Environment variable USER_CLINIC_ASSIGNMENTS_TABLE is not set.");
-             return { statusCode: 500, body: JSON.stringify({ error: "Server configuration error." }) };
+             return json(500, { error: "Server configuration error." });
         }
 
         // 3. Update DynamoDB Item
@@ -74,22 +87,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamoClient.send(command);
 
         // 4. Success Response
-        return {
-            statusCode: 200,
-            body: JSON.stringify({ status: "success", message: "Assignment updated successfully" }),
-        };
+        return json(200, { status: "success", message: "Assignment updated successfully" });
+
     } catch (err) {
         const error = err as Error;
         console.error("Error updating assignment:", error);
         
         // Check for specific DynamoDB error if needed (e.g., ConditionalCheckFailedException from the ConditionExpression)
         if (error.name === "ConditionalCheckFailedException") {
-             return { statusCode: 404, body: JSON.stringify({ error: "The assignment to be updated was not found." }) };
+             return json(404, { error: "The assignment to be updated was not found." });
         }
 
-        return { 
-            statusCode: 500, // Changed from 400 to 500 for generic server/DB errors
-            body: JSON.stringify({ error: `Failed to update assignment: ${error.message}` }) 
-        };
+        return json(500, { error: `Failed to update assignment: ${error.message}` });
     }
 };

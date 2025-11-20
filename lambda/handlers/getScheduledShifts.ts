@@ -8,14 +8,9 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils";
-
+import { CORS_HEADERS } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-const CORS_HEADERS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  "Access-Control-Allow-Methods": "OPTIONS, GET, POST, PUT, DELETE",
-};
 
 /* ─────────────────────────────────────────────────────────────────────────────
    ADD #1: Helper to normalize DynamoDB date attributes to string[]

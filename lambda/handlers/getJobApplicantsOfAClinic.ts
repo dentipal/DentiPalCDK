@@ -25,12 +25,7 @@ const NEGOTIATION_HASH_KEY = "applicationId";
 
 const dynamodb = new DynamoDBClient({ region: REGION });
 
-// ---------- helpers ----------
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "OPTIONS,GET,POST,PUT,DELETE",
-  "Access-Control-Allow-Headers": "Content-Type,Authorization",
-};
+import { CORS_HEADERS } from "./corsHeaders";
 
 async function getTableSchema(tableName: string) {
   try {
@@ -232,7 +227,7 @@ export const handler = async (
     if (!clinicId) {
       return {
         statusCode: 400,
-        headers: corsHeaders,
+        headers: CORS_HEADERS,
         body: JSON.stringify({ error: "clinicId is required in the path" }),
       };
     }
@@ -260,7 +255,7 @@ export const handler = async (
     if (!applications.length) {
       return {
         statusCode: 200,
-        headers: corsHeaders,
+        headers: CORS_HEADERS,
         body: JSON.stringify({
           clinicId,
           totalApplications: 0,
@@ -379,7 +374,7 @@ export const handler = async (
 
     return {
       statusCode: 200,
-      headers: corsHeaders,
+      headers: CORS_HEADERS,
       body: JSON.stringify(
         {
           clinicId,
@@ -395,7 +390,7 @@ export const handler = async (
     console.error("❌ handler error:", error);
     return {
       statusCode: 500,
-      headers: corsHeaders,
+      headers: CORS_HEADERS,
       body: JSON.stringify({
         error: "Failed to fetch applicants",
         details: error.message,

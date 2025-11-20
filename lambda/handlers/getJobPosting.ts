@@ -6,7 +6,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { validateToken } from "./utils";
-
+import { CORS_HEADERS } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // ----------------------
@@ -18,10 +18,6 @@ interface DynamoItem {
 }
 
 // Define CORS headers
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Content-Type": "application/json",
-};
 
 // ----------------------
 // Fetch job details

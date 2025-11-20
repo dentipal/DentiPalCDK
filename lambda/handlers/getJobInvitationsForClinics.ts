@@ -12,20 +12,21 @@ import {
 
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 /* AWS Client */
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-/* CORS */
-const CORS_HEADERS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type,Authorization",
-  "Access-Control-Allow-Methods": "GET,OPTIONS",
-  // "Access-Control-Allow-Credentials": "true",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: JSON.stringify(bodyObj),
+});
 
 /* ===========================
-    Helper Types
+   Helper Types
 =========================== */
 interface ProfessionalName {
   first_name: string;
@@ -124,9 +125,10 @@ export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
   try {
+    // CORS Preflight
     if (event?.httpMethod === "OPTIONS") {
       return {
-        statusCode: 204,
+        statusCode: 200,
         headers: CORS_HEADERS,
         body: "",
       };
@@ -137,14 +139,13 @@ export const handler = async (
     console.log("PROFESSIONAL_PROFILES_TABLE:", process.env.PROFESSIONAL_PROFILES_TABLE);
 
     if (!process.env.JOB_INVITATIONS_TABLE || !process.env.JOB_POSTINGS_TABLE) {
-      return {
-        statusCode: 500,
-        headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          error: "Table names are missing from the environment variables",
-        }),
-      };
+      return json(500, {
+        error: "Table names are missing from the environment variables",
+      });
     }
+
+    // --- FIX: Add Validation Here ---
+    await validateToken(event);
 
     const fullPath = event.pathParameters?.proxy;
     const clinicId = fullPath ? fullPath.split("/")[1] : null;
@@ -152,11 +153,7 @@ export const handler = async (
     console.log("Extracted clinicId:", clinicId);
 
     if (!clinicId) {
-      return {
-        statusCode: 400,
-        headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-        body: JSON.stringify({ error: "clinicId is required in the path" }),
-      };
+      return json(400, { error: "clinicId is required in the path" });
     }
 
     const queryParams = event.queryStringParameters ?? {};
@@ -267,28 +264,21 @@ export const handler = async (
       (a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime()
     );
 
-    return {
-      statusCode: 200,
-      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message: "Invitations fetched successfully.",
-        invitations,
-        totalCount: invitations.length,
-        filters: {
-          status: invitationStatus || "all",
-          limit,
-        },
-      }),
-    };
+    return json(200, {
+      message: "Invitations fetched successfully.",
+      invitations,
+      totalCount: invitations.length,
+      filters: {
+        status: invitationStatus || "all",
+        limit,
+      },
+    });
+
   } catch (error: any) {
     console.error("Error fetching invitations:", error);
-    return {
-      statusCode: 500,
-      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        error: "Failed to retrieve invitations.",
-        details: error?.message,
-      }),
-    };
+    return json(500, {
+      error: "Failed to retrieve invitations.",
+      details: error?.message,
+    });
   }
 };

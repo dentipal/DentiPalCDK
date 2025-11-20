@@ -5,7 +5,7 @@ import {
     AdminGetUserCommand,
     AttributeType
 } from "@aws-sdk/client-cognito-identity-provider";
-
+import { CORS_HEADERS } from "./corsHeaders";
 // Initialize AWS SDK v2 for DynamoDB DocumentClient
 const dynamodb = new DynamoDB.DocumentClient();
 
@@ -21,13 +21,7 @@ const getAttribute = (attributes: AttributeType[] = [], name: string): string | 
 };
 
 // Common CORS Headers
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "http://localhost:5173",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers":
-        "Content-Type, Authorization, X-Amz-Date, X-Api-Key, X-Amz-Security-Token",
-    "Access-Control-Allow-Credentials": true
-};
+
 
 export const handler = async (
     event: APIGatewayProxyEvent

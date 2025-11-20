@@ -8,16 +8,11 @@ import {
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { validateToken } from "./utils";
-
+import { CORS_HEADERS } from "./corsHeaders";
 export const dynamodb = new DynamoDBClient({
   region: process.env.REGION,
 });
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
 
 // -------- Helper: Pick Latest Negotiation --------
 function pickLatestNegotiation(items: Record<string, AttributeValue>[]) {
