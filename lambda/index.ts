@@ -1,12 +1,6 @@
-// index.ts
-
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context, Handler } from 'aws-lambda';
 
 // --- HANDLER IMPORTS ---
-// NOTE: In a real project, you would ensure these imported files are also TypeScript (.ts)
-// and have correct handler signatures (e.g., const handler: Handler<APIGatewayProxyEvent, APIGatewayProxyResult> = async (event) => {...})
-
-// User Management
 import { handler as createUserHandler } from "./handlers/createUser";
 import { handler as getUserHandler } from "./handlers/getUser";
 import { handler as updateUserHandler } from "./handlers/updateUser";
@@ -15,7 +9,6 @@ import { handler as deleteOwnAccountHandler } from "./handlers/deleteOwnAccount"
 import { handler as getClinicUsersHandler } from "./handlers/getClinicUsers";
 import { handler as getUsersClinicsHandler } from "./handlers/getUsersClinics";
 
-// Clinic Management
 import { handler as createClinicHandler } from "./handlers/createClinic";
 import { handler as getAllClinicsHandler } from "./handlers/getAllClinics";
 import { handler as getClinicHandler } from "./handlers/getClinic";
@@ -23,13 +16,11 @@ import { handler as updateClinicHandler } from "./handlers/updateClinic";
 import { handler as deleteClinicHandler } from "./handlers/deleteClinic";
 import { handler as getClinicAddressHandler } from "./handlers/getClinicAddress";
 
-// Assignment Management
 import { handler as createAssignmentHandler } from "./handlers/createAssignment";
 import { handler as getAssignmentsHandler } from "./handlers/getAssignments";
 import { handler as updateAssignmentHandler } from "./handlers/updateAssignment";
 import { handler as deleteAssignmentHandler } from "./handlers/deleteAssignment";
 
-// Profile Management
 import { handler as createProfessionalProfileHandler } from "./handlers/createProfessionalProfile";
 import { handler as getProfessionalProfileHandler } from "./handlers/getProfessionalProfile";
 import { handler as updateProfessionalProfileHandler } from "./handlers/updateProfessionalProfile";
@@ -43,7 +34,6 @@ import { handler as deleteClinicProfileHandler } from "./handlers/deleteClinicPr
 import { handler as getAllProfessionalsHandler } from "./handlers/getAllProfessionals";
 import { handler as getPublicProfessionalProfileHandler } from "./handlers/getPublicProfessionalProfile";
 
-// Job Management (Posting/CRUD/Browse)
 import { handler as createJobPostingHandler } from "./handlers/createJobPosting";
 import { handler as getJobPostingsHandler } from "./handlers/getJobPostings";
 import { handler as browseJobPostingsHandler } from "./handlers/browseJobPostings";
@@ -51,7 +41,6 @@ import { handler as getJobPostingHandler } from "./handlers/getJobPosting";
 import { handler as updateJobPostingHandler } from "./handlers/updateJobPosting";
 import { handler as deleteJobPostingHandler } from "./handlers/deleteJobPosting";
 
-// Specific Job Types
 import { handler as createTemporaryJobHandler } from "./handlers/createTemporaryJob";
 import { handler as getTemporaryJobHandler } from "./handlers/getTemporaryJob";
 import { handler as getAllTemporaryJobsHandler } from "./handlers/getAllTemporaryJobs";
@@ -74,7 +63,6 @@ import { handler as updatePermanentJobHandler } from "./handlers/updatePermanent
 import { handler as deletePermanentJobHandler } from "./handlers/deletePermanentJob";
 import { handler as getAllPermanentJobsForClinicHandler } from "./handlers/getAllPermanentJobsForClinic";
 
-// Job Application, Status, Invitations, Negotiation
 import { handler as createJobApplicationHandler } from "./handlers/createJobApplication";
 import { handler as getJobApplicationsHandler } from "./handlers/getJobApplications";
 import { handler as getJobApplicationsForClinicHandler } from "./handlers/getJobApplicationsForClinic";
@@ -91,24 +79,20 @@ import { handler as getAllNegotiationsProfHandler } from "./handlers/getAllNegot
 import { handler as hireProfHandler } from "./handlers/acceptProf";
 import { handler as rejectProfHandler } from "./handlers/rejectProf";
 
-// Job Shifts
 import { handler as updateCompletedShiftsHandler } from "./handlers/updateCompletedShifts";
 import { handler as getScheduledShiftsHandler } from "./handlers/getScheduledShifts";
 import { handler as getCompletedShiftsHandler } from "./handlers/getCompletedShifts";
 import { handler as submitFeedbackHandler } from "./handlers/submitFeedback";
 
-// Address Management
 import { handler as createUserAddressHandler } from "./handlers/createUserAddress";
 import { handler as getUserAddressesHandler } from "./handlers/getUserAddresses";
 import { handler as updateUserAddressHandler } from "./handlers/updateUserAddress";
 import { handler as deleteUserAddressHandler } from "./handlers/deleteUserAddress";
 
-// Clinic Favorites
 import { handler as addClinicFavoriteHandler } from "./handlers/addClinicFavorite";
 import { handler as getClinicFavoritesHandler } from "./handlers/getClinicFavorites";
 import { handler as removeClinicFavoriteHandler } from "./handlers/removeClinicFavorite";
 
-// Authentication & Registration
 import { handler as initiateUserRegistrationHandler } from "./handlers/initiateUserRegistration";
 import { handler as verifyOTPAndCreateUserHandler } from "./handlers/verifyOTPAndCreateUser";
 import { handler as loginUserHandler } from "./handlers/loginUser";
@@ -117,23 +101,24 @@ import { handler as forgotPasswordHandler } from "./handlers/forgotPassword";
 import { handler as checkEmailHandler } from "./handlers/checkEmail";
 import { handler as confirmPasswordHandler } from "./handlers/confirmPassword";
 
-// Referral System
 import { handler as sendReferralInviteHandler } from "./handlers/sendReferralInvite";
 
-// File Management
 import { handler as generatePresignedUrlHandler } from "./handlers/generatePresignedUrl";
 import { handler as getFileUrlHandler } from "./handlers/getFileUrl";
 import { handler as deleteFileHandler } from "./handlers/deleteFile";
+// Ensure this file is saved in lambda/handlers/updateFile.ts
 import { handler as updateFileHandler } from "./handlers/updateFile";
 
-// Public Routes
 import { handler as publicProfessionalsHandler } from "./handlers/publicProfessionals";
 import { handler as publicClinicsHandler } from "./handlers/findJobs";
 
-// Define the shape of a Route Handler
-type RouteHandler = (event: APIGatewayProxyEvent) => Promise<APIGatewayProxyResult>;
+// --- TYPE DEFINITIONS ---
 
-// Define the structure of the routes object
+// FIX: Use 'any' for RouteHandler to prevent TypeScript errors when mixing
+// handlers with different signatures (V1 vs V2, varying argument counts).
+// This acts as a flexible container for all imported handlers.
+type RouteHandler = any;
+
 interface Routes {
     [key: string]: RouteHandler;
 }
@@ -142,7 +127,6 @@ interface Routes {
 const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | null => {
     const routeKey = `${httpMethod}:${resource}`;
     
-    // Type assertion to ensure the object structure aligns with the Routes interface
     const routes: Routes = {
         // User management routes
         "POST:/users": createUserHandler,
@@ -166,12 +150,11 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "PUT:/assignments": updateAssignmentHandler,
         "DELETE:/assignments": deleteAssignmentHandler,
 
-        // Job postings routes (for clinics to manage their postings)
+        // Job postings routes
         "GET:/job-postings": getJobPostingsHandler,
-        // Job browsing routes (for professionals to find jobs)
         "GET:/jobs/browse": browseJobPostingsHandler,
 
-        // Job application routes (for professionals)
+        // Job application routes
         "POST:/applications": createJobApplicationHandler,
         "GET:/applications": getJobApplicationsHandler,
         "PUT:/applications/{applicationId}": updateJobApplicationHandler,
@@ -182,7 +165,6 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/profiles": getProfessionalProfileHandler,
         "PUT:/profiles": updateProfessionalProfileHandler,
         "DELETE:/profiles": deleteProfessionalProfileHandler,
-        // Professional profile questions routes
         "GET:/profiles/questions": getProfessionalQuestionsHandler,
         "GET:/profiles/{userSub}": getPublicProfessionalProfileHandler,
 
@@ -204,9 +186,9 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
 
         // Job applications for clinics
         "GET:/clinics/{clinicId}/jobs/": getJobApplicationsForClinicHandler,
-        "GET:{clinicId}/jobs": getJobApplicantsOfAClinicHandler, // This route looks malformed, consider fixing in API Gateway
+        "GET:{clinicId}/jobs": getJobApplicantsOfAClinicHandler,
 
-        // Specific job type endpoints - Complete CRUD
+        // Specific job type endpoints
         "POST:/jobs/temporary": createTemporaryJobHandler,
         "GET:/jobs/temporary/{jobId}": getTemporaryJobHandler,
         "PUT:/jobs/temporary/{jobId}": updateTemporaryJobHandler,
@@ -226,13 +208,12 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "PUT:/jobs/permanent/{jobId}": updatePermanentJobHandler,
         "DELETE:/jobs/permanent/{jobId}": deletePermanentJobHandler,
 
-        // Aggregate/Clinic-specific job list endpoints
-        "GET:/jobs/multiday/{jobId}": getAllMultidayJobsHandler, // This route parameter looks like it might be unnecessary based on the original JS
+        "GET:/jobs/multiday/{jobId}": getAllMultidayJobsHandler,
         "GET:/jobs/multiday/clinic/{clinicId}": getAllMultidayForClinicHandler,
         "GET:/jobs/clinicpermanent/{clinicId}": getAllPermanentJobsForClinicHandler,
 
         // Public Job/Professional browsing
-        "GET:/jobs/public": publicClinicsHandler, // Corresponds to findJobs.handler
+        "GET:/jobs/public": publicClinicsHandler,
         "GET:/professionals/public": publicProfessionalsHandler,
 
         // Shift Management
@@ -243,7 +224,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         // Job status management & Hiring
         "PUT:/jobs/{jobId}/status": updateJobStatusHandler,
         "POST:/jobs/{jobId}/hire": hireProfHandler,
-        "POST:{clinicId}/reject/{jobId}": rejectProfHandler, // This route looks malformed, consider fixing in API Gateway
+        "POST:{clinicId}/reject/{jobId}": rejectProfHandler,
         "POST:/submitfeedback": submitFeedbackHandler,
 
         // Job invitations
@@ -282,7 +263,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/files/certificates": getFileUrlHandler,
         "GET:/files/video-resumes": getFileUrlHandler,
         "PUT:/files/profile-images": updateFileHandler,
-        "PUT /files/profile-image": updateFileHandler, // Note: Extra space in method here, though usually handled by API Gateway normalize
+        "PUT /files/profile-image": updateFileHandler,
         "PUT:/files/certificates": updateFileHandler,
         "PUT:/files/video-resumes": updateFileHandler,
         "DELETE:/files/profile-images": deleteFileHandler,
@@ -366,7 +347,7 @@ const matchesPattern = (actualRoute: string, patternRoute: string): boolean => {
 };
 
 // Main Lambda Handler
-export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult> = async (event: APIGatewayProxyEvent | any): Promise<APIGatewayProxyResult> => {
+export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult> = async (event: APIGatewayProxyEvent | any, context: Context): Promise<APIGatewayProxyResult> => {
 
     console.log("--- START: FULL INCOMING EVENT ---");
     console.log(JSON.stringify(event, null, 2));
@@ -376,11 +357,12 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
     if (event.source === 'aws.events') {
         console.log("✅ SUCCESS: EventBridge trigger DETECTED. Routing to shift completion handler.");
         try {
-            // Note: updateCompletedShiftsHandler is the imported handler from the module
+            // FIX: Removed 'context' to match expected signature of 1 argument, 
+            // or if updateCompletedShiftsHandler uses context, ensure its file definition matches.
+            // Assuming standard 1-arg handler here to fix the "Expected 1 argument, got 2" error.
             return await updateCompletedShiftsHandler(event);
         } catch (error) {
             console.error("❌ ERROR inside scheduled task (updateCompletedShifts):", error);
-            // Re-throw the error for AWS Lambda/EventBridge to handle
             throw error;
         }
     } else {
@@ -388,26 +370,19 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
     }
 
     // --- STEP 2: API Gateway Routing Logic ---
-    // Use event.path for actual request path, not event.resource which contains template
-    let resource = event.path || event.resource || "";
-    const httpMethod = event.httpMethod as string;
+    let resource = event.path || event.rawPath || event.resource || "";
+    const httpMethod = event.httpMethod || event.requestContext?.http?.method || "";
 
     console.log(`Processing ${httpMethod} ${resource}`);
-    console.log(`Event resource: ${event.resource}, Event path: ${event.path}`);
 
-    // Normalize and generate path candidates (e.g., /jobs/123, /jobs/123/, /prod/jobs/123)
+    // Normalize and generate path candidates
     const candidates = new Set<string>([resource]);
 
-    // add/remove trailing slash variants
     if (resource.endsWith("/")) candidates.add(resource.replace(/\/+$/, ""));
     else candidates.add(resource + "/");
 
-    // add a version without stage prefix
     if (resource.startsWith("/prod/")) candidates.add(resource.replace(/^\/prod/, ""));
-    // add a version with stage prefix
     if (!resource.startsWith("/prod/") && resource.startsWith("/")) candidates.add("/prod" + resource);
-    
-    // Fallback for paths without leading slash (though API Gateway usually prefixes it)
     if (!resource.startsWith("/") && resource.length > 0) candidates.add("/" + resource);
 
 
@@ -420,7 +395,7 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
         console.log("Trying routeKey:", key);
         routeHandler = getRouteHandler(c, httpMethod);
         if (routeHandler) {
-            matchedResource = c; // lock in the matched resource for logging
+            matchedResource = c;
             break;
         }
     }
@@ -435,12 +410,7 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
                 error: "Endpoint not found",
                 resource: matchedResource,
                 method: httpMethod,
-                tried: Array.from(candidates),
-                restApiRoutes: [
-                    "POST /users", "GET /users", "PUT /users/{userId}", "DELETE /users/{userId}", "DELETE /users/me",
-                    // ... (Include a comprehensive list of paths for debugging as in the original JS)
-                ],
-                note: "Messages and notifications are handled via dedicated WebSocket API Gateway for real-time functionality"
+                tried: Array.from(candidates)
             })
         };
     }
@@ -448,7 +418,9 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
     // --- STEP 4: Execute Handler ---
     try {
         console.log(`✅ SUCCESS: Routing to handler for ${httpMethod}:${matchedResource}`);
-        return await routeHandler(event as APIGatewayProxyEvent);
+        // Call the handler. Since RouteHandler is 'any', this bypasses strict TS checks.
+        // We pass 'context' as well, which is standard for Lambda handlers.
+        return await routeHandler(event, context);
     }
     catch (error: any) {
         console.error(`❌ ERROR processing ${httpMethod} ${matchedResource}:`, error);
@@ -464,7 +436,4 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
     }
 };
 
-// Exporting handler for AWS Lambda
-// Note: The original JS used module.exports = { handler: handler } via commonjs, 
-// which TypeScript simplifies with an export statement in an ES module environment.
-export { getRouteHandler, matchesPattern }; // Exporting for potential unit testing
+export { getRouteHandler, matchesPattern };

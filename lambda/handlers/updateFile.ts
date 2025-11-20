@@ -1,216 +1,117 @@
-import { 
-    S3Client, 
-    PutObjectCommand, 
-    PutObjectCommandInput // Explicitly importing for type definition
-} from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from "aws-lambda";
+import {
+    DynamoDBClient,
+    UpdateItemCommand,
+    UpdateItemCommandInput,
+    AttributeValue
+} from "@aws-sdk/client-dynamodb";
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+import { validateToken } from "./utils";
 
-// --- 1. AWS and Environment Setup ---
+// Initialize DynamoDB Client
+const client = new DynamoDBClient({ region: process.env.REGION });
+const PROFESSIONAL_PROFILES_TABLE = process.env.PROFESSIONAL_PROFILES_TABLE!;
 
-// Set up S3 Client, assuming REGION is defined in the environment
-const REGION: string = process.env.REGION || 'us-east-1';
-const s3Client: S3Client = new S3Client({ region: REGION });
-
-// --- 2. Type Definitions ---
-
-/** Interface for the configuration object passed to createUploadHandler */
-interface UploadConfig {
-    fileType: string;
-    bucketEnvVar: string;
-    maxSize: number;
-    allowedContentTypes: string[];
-}
-
-/** Interface for the expected incoming request body */
-interface RequestBody {
-    fileName?: string;
-    contentType?: string;
-    fileSize?: number;
-}
-
-/** Interface for a standard Lambda result body (for success and error responses) */
-interface ResponseBody {
-    message?: string;
-    error?: string;
-    presignedUrl?: string;
-    objectKey?: string;
-    bucket?: string;
-    fileType?: string;
-    expiresIn?: number;
-    uploadInstructions?: {
-        method: string;
-        headers: { "Content-Type": string };
-    };
-    [key: string]: any;
-}
-
-/** Interface for the Cognito claims, assuming APIGatewayProxyEventV1 structure. */
-interface CognitoClaims {
-    sub?: string;
-    email?: string;
-    [key: string]: any;
-}
-
-// --- 3. Shared Helper Functions ---
-
-const CORS: Record<string, string> = {
+// CORS Headers
+const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Amz-Date,X-Amz-Security-Token",
-    "Access-Control-Allow-Methods": "OPTIONS,PUT",
-    "Content-Type": "application/json",
+    "Access-Control-Allow-Headers": "Content-Type,Authorization",
+    "Access-Control-Allow-Methods": "OPTIONS,PUT"
 };
 
-const ok = (body: ResponseBody, code: number = 200): APIGatewayProxyResult => ({
-    statusCode: code,
-    headers: CORS,
-    body: JSON.stringify(body),
-});
+interface UpdateFileBody {
+    objectKey: string; // The S3 key of the uploaded file
+    [key: string]: any;
+}
 
-const bad = (msg: string, code: number = 400, extra: Record<string, any> = {}): APIGatewayProxyResult => ({
-    statusCode: code,
-    headers: CORS,
-    body: JSON.stringify({ error: msg, ...extra }),
-});
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // 1. Handle CORS Preflight
+    // Cast to any to handle both V1 and V2 requestContext structures safely
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
 
-// --- 4. Handler Factory ---
-
-type LambdaHandler = (event: APIGatewayProxyEvent, context: Context) => Promise<APIGatewayProxyResult>;
-
-/**
- * Creates a Lambda handler function that generates an S3 presigned PUT URL.
- * @param config - Configuration object specifying file type, bucket, size limit, and content types.
- * @returns A fully functional AWS Lambda handler.
- */
-const createUploadHandler = (config: UploadConfig): LambdaHandler => {
-    const { fileType, bucketEnvVar, maxSize, allowedContentTypes } = config;
-
-    return async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-        // Determine HTTP method from V1 or V2 context structure
-        const method: string | undefined = event.requestContext.httpMethod || event.httpMethod;
-        let path: string | undefined = event.path;
-
-        if (!path) {
-            return bad("Request path is missing.", 400);
+    try {
+        // 2. Authentication
+        const userSub = await validateToken(event as any);
+        
+        // 3. Parse Body
+        if (!event.body) {
+            return {
+                statusCode: 400,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({ error: "Request body is required" })
+            };
+        }
+        const body: UpdateFileBody = JSON.parse(event.body);
+        if (!body.objectKey) {
+            return {
+                statusCode: 400,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({ error: "objectKey is required" })
+            };
         }
 
-        console.log("Request path before processing:", path); 
+        // 4. Determine Update Target based on Path
+        const path = event.path || (event as any).rawPath || "";
+        let updateExpression = "";
+        let attributeValues: Record<string, AttributeValue> = {};
 
-        // Remove API Gateway stage from the path, e.g., '/prod'
-        path = path.replace("/prod", "");
-
-        console.log("Processed path:", path);
-
-        // CORS preflight check for OPTIONS method
-        if (method === "OPTIONS") return { statusCode: 204, headers: CORS, body: "" };
-
-        // Ensure only PUT requests are processed
-        if (method !== "PUT") return bad("Method not allowed", 405);
-
-        // Auth (Cognito authorizer claims from request context)
-        const claims: CognitoClaims = (event.requestContext.authorizer?.claims || event.requestContext.authorizer || {}) as CognitoClaims;
-        const userSub: string | undefined = claims.sub;
-        const userEmail: string | undefined = claims.email;
-
-        if (!userSub) return bad("Unauthorized: Missing 'sub' claim in token.", 401);
-
-        if (!event.body) return bad("Request body is required", 400);
-
-        // Get the bucket name from environment variables
-        const bucketName: string | undefined = process.env[bucketEnvVar];
-        if (!bucketName) {
-            console.error(`Missing env var: ${bucketEnvVar}`);
-            return bad("Internal server configuration error: Missing S3 bucket environment variable.", 500);
+        if (path.includes("profile-image") || path.includes("profile-images")) {
+            updateExpression = "SET profileImageKey = :key, updatedAt = :ts";
+            attributeValues = {
+                ":key": { S: body.objectKey },
+                ":ts": { S: new Date().toISOString() }
+            };
+        } else if (path.includes("certificate") || path.includes("certificates")) {
+            // For certificates, we might append to a list or set
+            // Here we assume appending to a list 'certificateKeys'
+            updateExpression = "SET certificateKeys = list_append(if_not_exists(certificateKeys, :empty_list), :key), updatedAt = :ts";
+            attributeValues = {
+                ":key": { L: [{ S: body.objectKey }] },
+                ":empty_list": { L: [] },
+                ":ts": { S: new Date().toISOString() }
+            };
+        } else if (path.includes("video-resume") || path.includes("video-resumes")) {
+            updateExpression = "SET videoResumeKey = :key, updatedAt = :ts";
+            attributeValues = {
+                ":key": { S: body.objectKey },
+                ":ts": { S: new Date().toISOString() }
+            };
+        } else {
+            return {
+                statusCode: 400,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({ error: "Invalid file update path" })
+            };
         }
 
-        // Parse the incoming body to extract file details
-        let requestBody: RequestBody;
-        try {
-            requestBody = JSON.parse(event.body);
-        } catch (e) {
-            return bad("Invalid JSON in request body.", 400);
-        }
-
-        const { fileName, contentType, fileSize } = requestBody;
-
-        // 1. Validate file size
-        if (!fileSize || typeof fileSize !== 'number' || fileSize <= 0 || fileSize > maxSize) {
-            return bad(
-                `Invalid or excessive file size. Limit is ${maxSize / (1024 * 1024)}MB for ${fileType}.`,
-                400
-            );
-        }
-
-        // 2. Validate content type
-        if (!contentType || !allowedContentTypes.includes(contentType)) {
-            return bad(
-                `Invalid content type for ${fileType}. Allowed: ${allowedContentTypes.join(", ")}`,
-                400
-            );
-        }
-
-        // 3. Create the S3 key
-        const sanitizedFileName: string = String(fileName || "file").replace(/[^a-zA-Z0-9.\-_]/g, "_");
-        const objectKey: string = `${userSub}/${fileType}/${Date.now()}-${sanitizedFileName}`;
-
-        // 4. Create the presigned PUT URL parameters
-        const putObjectParams: PutObjectCommandInput = {
-            Bucket: bucketName,
-            Key: objectKey,
-            ContentType: contentType,
-            ContentLength: fileSize,
-            Metadata: {
-                "uploaded-by": userSub,
-                "user-email": userEmail || "unknown",
-                "upload-timestamp": new Date().toISOString(),
-                "original-filename": fileName || "unknown",
-            },
+        // 5. Update DynamoDB
+        const params: UpdateItemCommandInput = {
+            TableName: PROFESSIONAL_PROFILES_TABLE,
+            Key: { userSub: { S: userSub } },
+            UpdateExpression: updateExpression,
+            ExpressionAttributeValues: attributeValues,
+            ReturnValues: "UPDATED_NEW"
         };
 
-        const command = new PutObjectCommand(putObjectParams);
-        
-        // 5. Generate the presigned URL (expires in 1 hour)
-        const expiresInSeconds: number = 3600;
-        const presignedUrl: string = await getSignedUrl(s3Client, command, { expiresIn: expiresInSeconds });
+        await client.send(new UpdateItemCommand(params));
 
-        // 6. Return success response
-        return ok({
-            message: "Presigned URL generated successfully",
-            presignedUrl,
-            objectKey,
-            bucket: bucketName,
-            fileType: fileType,
-            expiresIn: expiresInSeconds,
-            uploadInstructions: {
-                method: "PUT",
-                headers: { "Content-Type": contentType },
-            },
-        });
-    };
+        return {
+            statusCode: 200,
+            headers: CORS_HEADERS,
+            body: JSON.stringify({ 
+                message: "File metadata updated successfully", 
+                objectKey: body.objectKey 
+            })
+        };
+
+    } catch (error) {
+        console.error("Error updating file metadata:", error);
+        return {
+            statusCode: 500,
+            headers: CORS_HEADERS,
+            body: JSON.stringify({ error: (error as Error).message || "Internal Server Error" })
+        };
+    }
 };
-
-// --- 5. Exported Handlers (Created using the factory) ---
-
-/** Handler for generating a presigned URL to upload a Professional Profile Image. */
-export const profileImageHandler: LambdaHandler = createUploadHandler({
-    fileType: "profile-image",
-    bucketEnvVar: "PROFILE_IMAGES_BUCKET",
-    maxSize: 5 * 1024 * 1024, // 5MB
-    allowedContentTypes: ["image/jpeg", "image/png", "image/gif", "image/webp"],
-});
-
-/** Handler for generating a presigned URL to upload a Professional Certificate. */
-export const certificateHandler: LambdaHandler = createUploadHandler({
-    fileType: "certificate",
-    bucketEnvVar: "CERTIFICATES_BUCKET",
-    maxSize: 10 * 1024 * 1024, // 10MB
-    allowedContentTypes: ["application/pdf", "image/jpeg", "image/png"],
-});
-
-/** Handler for generating a presigned URL to upload a Video Resume. */
-export const videoResumeHandler: LambdaHandler = createUploadHandler({
-    fileType: "video-resume",
-    bucketEnvVar: "VIDEO_RESUMES_BUCKET",
-    maxSize: 100 * 1024 * 1024, // 100MB
-    allowedContentTypes: ["video/mp4", "video/webm", "video/ogg", "video/avi", "video/mov"],
-});

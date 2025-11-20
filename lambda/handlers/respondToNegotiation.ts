@@ -9,7 +9,7 @@ import {
 import {
     APIGatewayProxyEventV2,
     APIGatewayProxyResultV2,
-    APIGatewayProxyEvent, // Include V1 for broader compatibility if path parsing logic assumes V1
+    APIGatewayProxyEvent, 
 } from "aws-lambda";
 
 // Assuming this utility file exports the validateToken function
@@ -102,11 +102,14 @@ const getAppProposedRate = (appItem: DynamoDBItem | undefined): number | null =>
 
 
 // --- Main Handler Function ---
-export const handler = async (event: APIGatewayProxyEventV2): Promise<HandlerResponse> => {
+export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEvent): Promise<HandlerResponse> => {
     const headers = getCorsHeaders(event);
 
     // Handle CORS preflight
-    if (event.requestContext.http.method === "OPTIONS") {
+    // Safe access for HTTP Method across V1 and V2 events
+    const method = (event as APIGatewayProxyEventV2).requestContext?.http?.method || (event as APIGatewayProxyEvent).httpMethod;
+
+    if (method === "OPTIONS") {
         return { statusCode: 200, headers, body: "" };
     }
 
@@ -116,11 +119,12 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<HandlerRes
         const userSub: string = await validateToken(event as any); 
         const body: NegotiationResponsePayload = JSON.parse(event.body || "{}");
 
-        // 2. Path Parsing (Note: Using event.path as per original JS, even if V2 uses rawPath)
-        // path: /applications/{applicationId}/negotiations/{negotiationId}/response
-        const path: string = event.path || "";
-        const parts: string[] = path.split("/"); 
+        // 2. Path Parsing 
+        // FIX: Safely access path for V1 (event.path) or V2 (event.rawPath)
+        const rawPath = (event as APIGatewayProxyEvent).path || (event as APIGatewayProxyEventV2).rawPath || "";
+        const parts: string[] = rawPath.split("/"); 
         
+        // path: /applications/{applicationId}/negotiations/{negotiationId}/response
         // This relies on the path structure being exactly what's expected by the API Gateway configuration
         const applicationId: string | undefined = parts[2];
         const negotiationId: string | undefined = parts[4]; 

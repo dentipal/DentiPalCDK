@@ -9,6 +9,4 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["**/*.ts", "handlers/utils.js", "handlers/utils.js", "handlers/getJobApplicationsForClinic.ts"],
-  "exclude": ["node_modules"]
 }

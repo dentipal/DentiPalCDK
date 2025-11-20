@@ -5,68 +5,49 @@ import {
     ScanCommandInput,
     UpdateItemCommandInput,
     AttributeValue,
-    GetItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import {
     EventBridgeClient,
     PutEventsCommand,
     PutEventsCommandInput,
 } from "@aws-sdk/client-eventbridge";
-import { APIGatewayProxyEventV2, APIGatewayProxyResult } from "aws-lambda";
-
-// Assuming utils.ts contains a definition for validateToken
-// The actual file is not provided, so we'll use a placeholder function signature.
-// declare function validateToken(event: any): Promise<string>;
-// To make the code compile without the actual file, we'll import it from a placeholder:
+import { APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils";
-
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Initialization ---
 
-// Use AWS_REGION if available, else REGION, else default
 const REGION: string = process.env.AWS_REGION || process.env.REGION || "us-east-1";
 
 const dynamo = new DynamoDBClient({ region: REGION });
 const eb = new EventBridgeClient({ region: REGION });
 
-// Define the type for CORS headers for reuse
-type CorsHeaders = { [header: string]: string | number | boolean };
-
-// Reusable CORS headers
-const corsHeaders: CorsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers":
-        "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token",
-    "Access-Control-Allow-Methods": "OPTIONS,GET,POST,PUT,PATCH,DELETE",
-    "Content-Type": "application/json"
-};
-
-// Helper to build JSON responses with CORS
+// Helper to build JSON responses with shared CORS
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: corsHeaders,
+    headers: CORS_HEADERS,
     body: JSON.stringify(bodyObj)
 });
 
 // --- Helper Functions ---
 
-// Define a type for the Cognito claims structure
 type CognitoClaims = {
     "cognito:groups"?: string;
     "custom:clinicId"?: string;
-    [key: string]: any; // Allow other properties
+    [key: string]: any; 
 };
 
 // Helper to read Cognito groups
 function getCognitoGroups(event: any): string[] {
-    // REST API (Lambda proxy) -> event.requestContext.authorizer.claims['cognito:groups']
+    // REST API (Lambda proxy)
     const claimsV1 = event?.requestContext?.authorizer?.claims as CognitoClaims;
     let groups: string =
         (typeof claimsV1?.["cognito:groups"] === "string"
             ? claimsV1["cognito:groups"]
             : "") || "";
 
-    // HTTP API v2 -> event.requestContext.authorizer.jwt.claims['cognito:groups']
+    // HTTP API v2
     if (!groups) {
         const claimsV2 = event?.requestContext?.authorizer?.jwt?.claims as CognitoClaims;
         if (typeof claimsV2?.["cognito:groups"] === "string") {
@@ -74,13 +55,12 @@ function getCognitoGroups(event: any): string[] {
         }
     }
 
-    // Groups come as comma-separated string when present
     return groups
         ? groups.split(",").map((g) => g.trim()).filter(Boolean)
         : [];
 }
 
-// NEW: helper to get clinicId from Cognito claims
+// Helper to get clinicId from Cognito claims
 function getClinicIdFromEvent(event: any): string | null {
     // REST API v1
     const claimsV1 = event?.requestContext?.authorizer?.claims as CognitoClaims;
@@ -109,12 +89,12 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
     try {
         console.log("Received event:", JSON.stringify(event));
 
-        // --- CORS preflight (supports REST API and HTTP API v2) ---
+        // --- CORS preflight ---
         const method: string =
             event.httpMethod || event.requestContext?.http?.method || "GET";
+            
         if (method === "OPTIONS") {
-            // No body for preflight
-            return { statusCode: 204, headers: corsHeaders, body: "" };
+            return { statusCode: 200, headers: CORS_HEADERS, body: "" };
         }
 
         // Step 1: Authenticate Clinic
@@ -125,15 +105,12 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
         const groups: string[] = getCognitoGroups(event);
         console.log("Caller groups:", groups);
 
-        // Allow only Root, ClinicAdmin, ClinicManager
         const ALLOWED: Set<string> = new Set(["Root", "ClinicAdmin", "ClinicManager"]);
         const isAllowed: boolean = groups.some((g) => ALLOWED.has(g));
 
         if (!isAllowed) {
-            // Explicit denial message for ClinicViewer or any other group
             return json(403, {
-                error:
-                    "Access denied: Only Root, ClinicAdmin, or ClinicManager can accept a professional."
+                error: "Access denied: Only Root, ClinicAdmin, or ClinicManager can accept a professional."
             });
         }
 
@@ -207,8 +184,8 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
         const clinicIdFromClaims: string | null = getClinicIdFromEvent(event);
         const clinicId: string | null =
             clinicIdFromClaims ||
-            body.clinicId || // fallback if you ever send clinicId in body
-            matchingItem.clinicId?.S || null; // fallback if stored on the application
+            body.clinicId || 
+            matchingItem.clinicId?.S || null;
 
         if (!clinicId) {
             console.warn(
@@ -239,7 +216,7 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
                         Source: "denti-pal.api",
                         DetailType: "ShiftEvent",
                         Detail: JSON.stringify({
-                            eventType: "shift-scheduled", // 👈 system-message lambda listens for this
+                            eventType: "shift-scheduled", 
                             clinicId,
                             professionalSub: professionalUserSub,
                             shiftDetails
