@@ -2,6 +2,9 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { DynamoDBClient, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
 import { isRoot } from './utils'; // Assumed dependency
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // --- Initialization ---
 
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
@@ -15,6 +18,11 @@ interface DeleteAssignmentRequestBody {
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // ✅ ADDED PREFLIGHT CHECK
+    if (event.httpMethod === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // 1. Authorization Check (Root User Only)
         // Extract groups from the Authorizer claims
@@ -27,6 +35,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn(`[AUTH] User groups [${groups.join(', ')}] is not Root. Access denied.`);
             return {
                 statusCode: 403,
+                headers: CORS_HEADERS, // ✅ Added headers
                 body: JSON.stringify({ error: "Only Root users can delete assignments" })
             };
         }
@@ -38,6 +47,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("[VALIDATION] Missing required fields: userSub or clinicId.");
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added headers
                 body: JSON.stringify({ error: "Missing required fields" })
             };
         }
@@ -59,6 +69,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 4. Success Response
         return {
             statusCode: 200,
+            headers: CORS_HEADERS, // ✅ Added headers
             body: JSON.stringify({ status: "success", message: "Assignment deleted successfully" }),
         };
 
@@ -69,6 +80,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Use 500 for unexpected errors, preserving the error message detail
         return {
             statusCode: 500,
+            headers: CORS_HEADERS, // ✅ Added headers
             body: JSON.stringify({ error: `Failed to delete assignment: ${err.message}` })
         };
     }

@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     QueryCommand,
@@ -10,6 +9,9 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { validateToken } from "./utils"; 
+
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -77,15 +79,6 @@ interface ResponseBody {
     };
 }
 
-/* === CORS Headers === */
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*", // Replace with your frontend origin in production
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization,x-api-key",
-    "Access-Control-Allow-Credentials": "true",
-    "Content-Type": "application/json",
-};
-
 /**
  * AWS Lambda handler to retrieve a clinic's list of favorited professionals, 
  * enriched with profile and address details.
@@ -95,6 +88,7 @@ const CORS_HEADERS = {
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     // Preflight
     if (event && event.httpMethod === "OPTIONS") {
+        // ✅ Uses imported headers
         return { statusCode: 204, headers: CORS_HEADERS, body: "" };
     }
 
@@ -125,7 +119,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (rawFavorites.length === 0) {
             return {
                 statusCode: 200,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     message: "No favorites found",
                     favorites: [],
@@ -225,7 +219,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 9. Final Response
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Favorites retrieved successfully",
                 favorites: filteredFavorites,
@@ -243,7 +237,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error getting clinic favorites:", error);
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({ error: error.message })
         };
     }

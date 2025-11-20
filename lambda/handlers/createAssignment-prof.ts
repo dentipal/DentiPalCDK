@@ -12,6 +12,9 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuid } from "uuid"; // Import v4 for UUID generation
 import { validateToken } from "./utils"; // Import validateToken function (assuming it's in utils.ts)
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
@@ -46,6 +49,11 @@ interface ClinicInfo {
 
 // Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // ✅ ADDED PREFLIGHT CHECK
+    if (event.httpMethod === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // Log the received event for debugging
         console.log("Received event:", JSON.stringify(event));
@@ -60,6 +68,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("jobId is missing in the path parameters");
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({
                     error: "jobId is required in the path parameters"
                 })
@@ -79,6 +88,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (Object.keys(applicationData).length === 0 && !event.body) {
              return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({
                     error: "Application data is missing"
                 })
@@ -98,6 +108,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!jobExists.Item) {
             return {
                 statusCode: 404,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({
                     error: "Job posting not found"
                 })
@@ -111,6 +122,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!clinicIdFromJob) {
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({
                     error: "Clinic ID (clinicUserSub) not found in job posting"
                 })
@@ -124,6 +136,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (jobStatus !== 'active') {
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({
                     error: `Cannot apply to ${jobStatus} job posting`
                 })
@@ -152,6 +165,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.log("User has already applied to this job.");
             return {
                 statusCode: 409,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({
                     error: "You have already applied to this job"
                 })
@@ -249,6 +263,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("Job application submitted successfully.");
         return {
             statusCode: 201,
+            headers: CORS_HEADERS, // ✅ Added CORS
             body: JSON.stringify({
                 message: "Job application submitted successfully",
                 applicationId,
@@ -265,6 +280,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error creating job application:", err);
         return {
             statusCode: 500,
+            headers: CORS_HEADERS, // ✅ Added CORS
             body: JSON.stringify({
                 error: "Failed to submit job application. Please try again.",
                 details: err.message

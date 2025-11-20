@@ -1,16 +1,15 @@
-// index.ts
 import {
     DynamoDBClient,
     QueryCommand,
     QueryCommandInput, // Import the input type
     QueryCommandOutput,
     AttributeValue,
-    GetItemCommand,
-    ScanCommand,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { validateToken } from "./utils"; 
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -19,6 +18,13 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE as string;
 const CLINIC_JOBS_POSTED_TABLE = process.env.CLINIC_JOBS_POSTED_TABLE as string;
 const CLINICS_JOBS_COMPLETED_TABLE = process.env.CLINICS_JOBS_COMPLETED_TABLE as string;
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // --- Type Definitions ---
 
@@ -102,31 +108,24 @@ interface EnrichedClinicProfile extends ClinicProfileBase {
     totalPaid: number;
 }
 
-
-/* === CORS Headers === */
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*", // Replace with your frontend origin in production
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization,x-api-key",
-    "Access-Control-Allow-Credentials": "true",
-    "Content-Type": "application/json",
-};
-
 /**
  * AWS Lambda handler to fetch a clinic user's profiles and enrich them with job statistics.
  * @param event The API Gateway event object.
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    /* Preflight */
-    if (event && event.httpMethod === "OPTIONS") {
-        return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
         // Step 1: Validate the JWT token
         // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = await validateToken(event);
+        const userSub: string = await validateToken(event as any);
         console.log("Extracted userSub:", userSub);
 
         // Step 2: Fetch clinic profiles
@@ -141,11 +140,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const result: QueryCommandOutput = await dynamodb.send(new QueryCommand(queryParams));
 
         if (!result.Items || result.Items.length === 0) {
-            return {
-                statusCode: 404,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "No clinic profiles found" }),
-            };
+            return json(404, { error: "No clinic profiles found" });
         }
 
         // Unmarshal the main clinic profiles (full version)
@@ -255,22 +250,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // -----------------------------------------------------------------
         // STEP 4: Final Response
         // -----------------------------------------------------------------
-        return {
-            statusCode: 200,
-            headers: CORS_HEADERS,
-            body: JSON.stringify({
-                message: "Clinic profiles retrieved successfully",
-                profiles: enrichedProfiles,
-            }),
-        };
+        return json(200, {
+            message: "Clinic profiles retrieved successfully",
+            profiles: enrichedProfiles,
+        });
     } catch (error: any) {
         // Log detailed error for debugging
         console.error("DETAILED ERROR:", error); 
         console.error("Error retrieving clinic profiles:", error);
-        return {
-            statusCode: 500,
-            headers: CORS_HEADERS,
-            body: JSON.stringify({ error: "Failed to retrieve clinic profiles" }),
-        };
+        return json(500, { error: "Failed to retrieve clinic profiles" });
     }
 };

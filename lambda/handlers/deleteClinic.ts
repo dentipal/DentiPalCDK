@@ -6,30 +6,29 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken, isRoot } from "./utils"; // Assuming isRoot and validateToken are in utils.ts
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
 
-// Define shared CORS headers for the response
-const CORS_HEADERS: Record<string, string> = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "OPTIONS,DELETE",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Content-Type": "application/json",
-};
-
-// Helper for constructing responses
-const resp = (statusCode: number, data: any): APIGatewayProxyResult => ({
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
     headers: CORS_HEADERS,
-    body: JSON.stringify(data),
+    body: JSON.stringify(bodyObj)
 });
 
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // Handle OPTIONS preflight
-    if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
 
     try {
         // Step 1: Authenticate user
@@ -37,7 +36,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const userSub: string = await validateToken(event as any);
 
         // Step 2: Get user groups and clinic ID
-        // Groups are often passed as a comma-separated string in claims, matching the original JS logic:
+        // Groups are often passed as a comma-separated string in claims
         const rawGroups: string | undefined = event.requestContext?.authorizer?.claims?.['cognito:groups'];
         const groups: string[] = rawGroups ? rawGroups.split(',').map(g => g.trim()).filter(Boolean) : [];
         
@@ -46,13 +45,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("Extracted clinicId:", clinicId);
 
         if (!clinicId) {
-            return resp(400, { error: "Clinic ID is required in path parameters" });
+            return json(400, { error: "Clinic ID is required in path parameters" });
         }
 
         // Step 3: Authorization check
         // Note: isRoot(groups) is an external utility function assumed to be imported from './utils'.
         if (!isRoot(groups)) {
-            return resp(403, { error: "Only Root users can delete clinics" });
+            return json(403, { error: "Only Root users can delete clinics" });
         }
         
         // Step 4: Execute DeleteItemCommand
@@ -65,16 +64,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamoClient.send(command);
 
         // Step 5: Return success response
-        return resp(200, { status: "success", message: "Clinic deleted successfully" });
+        return json(200, { status: "success", message: "Clinic deleted successfully" });
         
     } catch (error) {
         const err = error as Error & { message?: string; name?: string };
         console.error("Error deleting clinic:", err);
 
         // Handle specific case where the item might not have existed (although DynamoDB delete is idempotent)
-        // If you were using a ConditionExpression like `attribute_exists(clinicId)`, you might handle ConditionalCheckFailedException here.
-        
-        return resp(500, { error: `Failed to delete clinic: ${err.message || "Internal Server Error"}` });
+        return json(500, { 
+            error: `Failed to delete clinic: ${err.message || "Internal Server Error"}` 
+        });
     }
 };
 

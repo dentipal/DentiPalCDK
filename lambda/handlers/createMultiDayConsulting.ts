@@ -11,25 +11,25 @@ import { v4 as uuidv4 } from "uuid";
 
 // Assuming these modules exist and export the correct functions/values
 import { validateToken } from "./utils";
+import { VALID_ROLE_VALUES } from "./professionalRoles"; 
 
-// We must assume the type based on usage if not imported directly:
-declare const VALID_ROLE_VALUES: string[];
-// import { VALID_ROLE_VALUES } from "./professionalRoles"; 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client
 const REGION: string = process.env.REGION || process.env.AWS_REGION || "us-east-1";
 const dynamodb = new DynamoDBClient({ region: REGION });
 
-// Define the type for CORS headers
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 type CorsHeaders = Record<string, string>;
-
-// ---------- CORS helpers ----------
 const CORS_HEADERS: CorsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token",
     "Access-Control-Allow-Methods": "OPTIONS,GET,POST,PUT,DELETE",
     "Content-Type": "application/json",
 };
+*/
 
 /**
  * Helper to construct the API Gateway response object.
@@ -39,7 +39,7 @@ const CORS_HEADERS: CorsHeaders = {
  */
 const resp = (statusCode: number, data: any): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: CORS_HEADERS, // ✅ Uses imported headers
     body: typeof data === "string" ? data : JSON.stringify(data),
 });
 
@@ -165,6 +165,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // APIGatewayProxyEvent is strictly for REST API (v1), hence the type error without the cast.
     const method = event.httpMethod || (event.requestContext as any)?.http?.method;
     
+    // ✅ Uses imported headers
     if (method === "OPTIONS") return { statusCode: 204, headers: CORS_HEADERS, body: "" };
 
     try {
@@ -203,7 +204,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Professional role validation
-        // NOTE: VALID_ROLE_VALUES is assumed to be defined externally (like in the original JS)
         if (typeof VALID_ROLE_VALUES === 'undefined' || !VALID_ROLE_VALUES.includes(jobData.professional_role)) {
             return resp(400, { error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES ? VALID_ROLE_VALUES.join(", ") : "Unknown"}` });
         }

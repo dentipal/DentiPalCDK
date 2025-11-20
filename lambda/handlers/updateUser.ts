@@ -1,34 +1,43 @@
 import { 
-    CognitoIdentityProviderClient,
-    AdminUpdateUserAttributesCommand,
-    AdminListGroupsForUserCommand,
-    AdminRemoveUserFromGroupCommand,
-    AdminAddUserToGroupCommand,
-    ListUsersCommand,
-    AdminGetUserCommand,
-    AttributeType, // Type for user attributes in V3 SDK
+    CognitoIdentityProviderClient, 
+    AdminUpdateUserAttributesCommand, 
+    AdminListGroupsForUserCommand, 
+    AdminRemoveUserFromGroupCommand, 
+    AdminAddUserToGroupCommand, 
+    ListUsersCommand, 
+    AdminGetUserCommand, 
+    AttributeType,
     ListUsersCommandOutput,
     AdminGetUserCommandOutput,
     AdminListGroupsForUserCommandOutput
 } from "@aws-sdk/client-cognito-identity-provider";
-import { DynamoDB } from "aws-sdk"; // Using V2 DynamoDB DocumentClient
+import { 
+    DynamoDBClient, 
+    UpdateItemCommand, 
+    UpdateItemCommandInput,
+    GetItemCommand,
+    GetItemCommandInput
+} from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
 const USER_POOL_ID: string = process.env.USER_POOL_ID!; // Non-null assertion for env var
+const CLINICS_TABLE_NAME: string = process.env.CLINICS_TABLE || "DentiPal-Clinics";
 
-const cognito: CognitoIdentityProviderClient = new CognitoIdentityProviderClient({ region: REGION });
-const dynamodb = new DynamoDB.DocumentClient(); // DynamoDB DocumentClient uses simpler JS objects
+const cognito = new CognitoIdentityProviderClient({ region: REGION });
+const dynamodb = new DynamoDBClient({ region: REGION });
 
-const corsHeaders: Record<string, string> = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "OPTIONS,PUT",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 const VALID_SUBGROUPS: string[] = ["ClinicAdmin", "ClinicManager", "ClinicViewer"];
-const CLINICS_TABLE_NAME: string = "DentiPal-Clinics"; // Hardcoded table name
 
 // --- 2. Type Definitions ---
 
@@ -39,15 +48,6 @@ interface RequestBody {
     subgroup?: string;
     clinicIds?: string[]; // Array of clinic IDs to associate
     email?: string;
-}
-
-interface CognitoClaims {
-    'cognito:groups'?: string | string[];
-    [key: string]: any;
-}
-
-interface DDBUpdateKey {
-    clinicId: string;
 }
 
 // --- 3. Utility Functions ---
@@ -127,28 +127,31 @@ async function removeFromClinicSubgroups(username: string): Promise<void> {
 /**
  * Updates the DentiPal-Clinics table to ensure the userSub is listed in the AssociatedUsers array.
  * Uses a conditional update to append the userSub only if it's not already present.
+ * Migrated to AWS SDK v3 syntax (using AttributeValues like { S: string }, { L: list }).
  * @param clinicId - The ID of the clinic to update.
  * @param userSub - The 'sub' (User ID) of the user to associate.
  */
 async function upsertUserIntoClinic(clinicId: string, userSub: string): Promise<void> {
-    const params: DynamoDB.DocumentClient.UpdateItemInput = {
+    const params: UpdateItemCommandInput = {
         TableName: CLINICS_TABLE_NAME,
-        Key: { clinicId } as DDBUpdateKey, // PK is clinicId
+        Key: { clinicId: { S: clinicId } },
+        // Use list_append to add the userSub to the AssociatedUsers list
         UpdateExpression: "SET AssociatedUsers = list_append(if_not_exists(AssociatedUsers, :empty), :toAdd)",
+        // Only update if the user is NOT already in the list
         ConditionExpression: "attribute_not_exists(AssociatedUsers) OR NOT contains(AssociatedUsers, :userSub)",
         ExpressionAttributeValues: {
-            ":empty": [],
-            ":toAdd": [userSub],
-            ":userSub": userSub
+            ":empty": { L: [] }, // Empty list for initialization
+            ":toAdd": { L: [{ S: userSub }] }, // List containing the new userSub
+            ":userSub": { S: userSub } // String value for the contains check
         },
         ReturnValues: "UPDATED_NEW",
     };
     
     try {
-        await dynamodb.update(params).promise();
-    } catch (err) {
+        await dynamodb.send(new UpdateItemCommand(params));
+    } catch (err: any) {
         // Ignore ConditionalCheckFailedException if userSub is already associated
-        if ((err as AWS.AWSError)?.code !== "ConditionalCheckFailedException") {
+        if (err.name !== "ConditionalCheckFailedException") {
             throw err;
         }
     }
@@ -173,7 +176,7 @@ function extractUsername(event: APIGatewayProxyEvent, bodyEmail: string | undefi
     }
 
     // 3. Check full path via regex (e.g., /staging/users/jane@example.com)
-    const path: string = event.path || event.requestContext?.path || "";
+    const path: string = event.path || (event.requestContext as any)?.path || "";
     const m = path.match(/\/users\/([^\/\?]+)/i);
     if (m?.[1]) return decodeURIComponent(m[1]);
 
@@ -186,24 +189,30 @@ function extractUsername(event: APIGatewayProxyEvent, bodyEmail: string | undefi
 // --- 4. Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    try {
-        if (event.httpMethod === "OPTIONS") {
-            return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({}) };
-        }
-        
-        if (event.httpMethod !== "PUT") {
-             return { statusCode: 405, headers: corsHeaders, body: JSON.stringify({ error: "Method not allowed. Only PUT is supported." }) };
-        }
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+    
+    if (method !== "PUT") {
+         return json(405, { error: "Method not allowed. Only PUT is supported." });
+    }
+
+    try {
         // Auth: Check if user is Root or ClinicAdmin
-        const groupsClaim: string | string[] = event.requestContext?.authorizer?.claims?.['cognito:groups'] || "";
+        // Handle various structures of claims
+        const claims = (event.requestContext.authorizer as any)?.claims;
+        const groupsClaim: string | string[] = claims?.['cognito:groups'] || "";
         const groups: string[] = Array.isArray(groupsClaim) ? groupsClaim : String(groupsClaim).split(",").filter(g => g.trim().length > 0);
         
-        const isRoot: boolean = groups.includes("Root");
+        const isRootUser: boolean = groups.includes("Root");
         const isClinicAdmin: boolean = groups.includes("ClinicAdmin");
         
-        if (!isRoot && !isClinicAdmin) {
-            return { statusCode: 403, headers: corsHeaders, body: JSON.stringify({ error: "Only Root or ClinicAdmin can update users" }) };
+        if (!isRootUser && !isClinicAdmin) {
+            return json(403, { error: "Only Root or ClinicAdmin can update users" });
         }
 
         const body: RequestBody = JSON.parse(event.body || "{}");
@@ -212,31 +221,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const username: string | null = extractUsername(event, email);
         
         if (!username) {
-            return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: "Missing username/email in path or body. Expected PUT /users/{email}" }) };
+            return json(400, { error: "Missing username/email in path or body. Expected PUT /users/{email}" });
         }
 
         // Ensure user exists (throws if not found)
         try {
             await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
         } catch (e) {
-            return { statusCode: 404, headers: corsHeaders, body: JSON.stringify({ error: `User does not exist: ${username}` }) };
+            return json(404, { error: `User does not exist: ${username}` });
         }
 
         // 1. Validate subgroup
         if (subgroup && !VALID_SUBGROUPS.includes(subgroup)) {
-            return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: `Invalid subgroup: ${subgroup}. Valid groups are: ${VALID_SUBGROUPS.join(", ")}` }) };
+            return json(400, { error: `Invalid subgroup: ${subgroup}. Valid groups are: ${VALID_SUBGROUPS.join(", ")}` });
         }
 
         // 2. Build user attributes array for Cognito update
         const attrs: AttributeType[] = [];
         if (firstName) attrs.push({ Name: "given_name", Value: firstName });
-        if (lastName)  attrs.push({ Name: "family_name", Value: lastName });
+        if (lastName)  attrs.push({ Name: "family_name", Value: lastName });
         
-        let e164: string | null = null;
         if (phoneNumber) {
-            e164 = toE164(phoneNumber);
+            const e164 = toE164(phoneNumber);
             if (!e164) {
-                return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: "Invalid phone number format. Use E.164 like +919876543210." }) };
+                return json(400, { error: "Invalid phone number format. Use E.164 like +919876543210." });
             }
             attrs.push({ Name: "phone_number", Value: e164 });
         }
@@ -268,12 +276,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userSub: string | null = await getUserSubByUsername(username);
             
             if (!userSub) {
-                return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: "Could not resolve user sub required for DynamoDB association" }) };
+                return json(400, { error: "Could not resolve user sub required for DynamoDB association" });
             }
             
             for (const cid of clinicIds) {
                 // Optionally verify clinic existence before upserting
-                const getRes = await dynamodb.get({ TableName: CLINICS_TABLE_NAME, Key: { clinicId: cid } }).promise();
+                const getParams: GetItemCommandInput = {
+                    TableName: CLINICS_TABLE_NAME,
+                    Key: { clinicId: { S: cid } }
+                };
+                const getRes = await dynamodb.send(new GetItemCommand(getParams));
+
                 if (!getRes.Item) {
                     console.warn(`Skipping association for clinicId: ${cid}. Clinic not found.`);
                     continue; 
@@ -283,15 +296,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
-        return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ status: "success", message: "User updated successfully", username }) };
+        return json(200, { status: "success", message: "User updated successfully", username });
     } catch (error) {
         console.error("Error updating user:", error);
-        return { 
-            statusCode: 500, 
-            headers: corsHeaders, 
-            body: JSON.stringify({ 
-                error: (error as Error)?.message || "Failed to update user due to an unexpected server error." 
-            }) 
-        };
+        return json(500, { 
+            error: (error as Error)?.message || "Failed to update user due to an unexpected server error." 
+        });
     }
 };

@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     ScanCommand,
@@ -13,9 +12,14 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { validateToken } from "./utils";
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
+// ❌ REMOVED INLINE CORS DEFINITION & HELPERS
+/*
 // Define CORS headers helper
 const getCorsHeaders = (event: APIGatewayProxyEvent): Record<string, string> => {
     const origin = event?.headers?.origin || event?.headers?.Origin || "";
@@ -30,6 +34,7 @@ const getCorsHeaders = (event: APIGatewayProxyEvent): Record<string, string> => 
 
 // Define the content type header specific to the final response
 const JSON_CONTENT_HEADER = { "Content-Type": "application/json" };
+*/
 
 // ---------- Type Definitions ----------
 
@@ -92,7 +97,7 @@ interface EnrichedNegotiation {
 
 const str = (v: any): string => (typeof v === "string" ? v.trim() : "");
 const TABLE_NEGS: string = process.env.JOB_NEGOTIATIONS_TABLE || "DentiPal-JobNegotiations";
-const TABLE_CLINICS: string = "DentiPal-ClinicProfiles";
+const TABLE_CLINICS: string = process.env.CLINIC_PROFILES_TABLE || "DentiPal-ClinicProfiles";
 const TABLE_JOBS: string = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings"; // has jobId-index GSI
 
 // ---------- Fetch helpers tailored to your indexes ----------
@@ -260,7 +265,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     try {
         // Preflight
         if (event.httpMethod === "OPTIONS") {
-            return { statusCode: 204, headers: getCorsHeaders(event), body: "" };
+            // ✅ Uses imported headers
+            return { statusCode: 200, headers: CORS_HEADERS, body: "" };
         }
 
         const qs = event.queryStringParameters || {};
@@ -285,14 +291,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (!raw) {
                 return {
                     statusCode: 404,
-                    headers: { ...getCorsHeaders(event), ...JSON_CONTENT_HEADER },
+                    headers: CORS_HEADERS, // ✅ Uses imported headers
                     body: JSON.stringify({ error: "No negotiations found for this applicationId" }),
                 };
             }
             const item = await enrichWithClinicAndJob(raw);
             return {
                 statusCode: 200,
-                headers: { ...getCorsHeaders(event), ...JSON_CONTENT_HEADER },
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ item }),
             };
         }
@@ -303,7 +309,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (!raw) {
                 return {
                     statusCode: 404,
-                    headers: { ...getCorsHeaders(event), ...JSON_CONTENT_HEADER },
+                    headers: CORS_HEADERS, // ✅ Uses imported headers
                     body: JSON.stringify({
                         error: "No negotiation found for the given jobId and professionalUserSub",
                     }),
@@ -312,7 +318,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const item = await enrichWithClinicAndJob(raw);
             return {
                 statusCode: 200,
-                headers: { ...getCorsHeaders(event), ...JSON_CONTENT_HEADER },
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ item }),
             };
         }
@@ -321,7 +327,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!professionalUserSub) {
             return {
                 statusCode: 400,
-                headers: { ...getCorsHeaders(event), ...JSON_CONTENT_HEADER },
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ error: "Missing authenticated user" }),
             };
         }
@@ -338,7 +344,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: { ...getCorsHeaders(event), ...JSON_CONTENT_HEADER },
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Negotiations retrieved successfully",
                 negotiations,
@@ -350,7 +356,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error fetching negotiations:", error);
         return {
             statusCode: 500,
-            headers: { ...getCorsHeaders(event), ...JSON_CONTENT_HEADER },
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 error: "Failed to retrieve negotiations",
                 details: error.message,

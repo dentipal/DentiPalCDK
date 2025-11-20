@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     ScanCommand,
@@ -6,19 +5,24 @@ import {
     AttributeValue,
     QueryCommandOutput,
     ScanCommandOutput,
+    ScanCommandInput,
+    QueryCommandInput
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { validateToken } from "./utils"; 
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-const CORS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // --- Type Definitions ---
 
@@ -119,14 +123,16 @@ async function getAppliedJobIdsForUser(userSub: string): Promise<Set<string>> {
     let ExclusiveStartKey: Record<string, AttributeValue> | undefined;
 
     do {
-        const resp: QueryCommandOutput = await dynamodb.send(new QueryCommand({
+        const queryInput: QueryCommandInput = {
             TableName: table,
             IndexName: index,
             KeyConditionExpression: "professionalUserSub = :sub",
             ProjectionExpression: "jobId",
             ExpressionAttributeValues: { ":sub": { S: userSub } },
             ExclusiveStartKey,
-        }));
+        };
+        
+        const resp: QueryCommandOutput = await dynamodb.send(new QueryCommand(queryInput));
         
         // Extract jobId strings from items
         (resp.Items || []).forEach(it => it.jobId?.S && ids.add(it.jobId.S!));
@@ -166,47 +172,47 @@ function toStrArr(attr: AttributeValue | undefined): string[] {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    try {
-        // FIX: Safely determine HTTP method using type cast for context compatibility
-        const method = (event?.requestContext as any)?.http?.method || event?.httpMethod || "GET";
-        if (method === "OPTIONS") return { statusCode: 204, headers: CORS, body: "" };
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
+    try {
         // 1. Validate token and get the actual user sub
-        // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = await validateToken(event);
+        const userSub: string = await validateToken(event as any);
 
         // 2. Get all multi-day consulting jobs (SCAN)
-        const jobsCommand = new ScanCommand({
+        const scanInput: ScanCommandInput = {
             TableName: process.env.JOB_POSTINGS_TABLE,
             FilterExpression: "job_type = :jobType",
             ExpressionAttributeValues: {
                 ":jobType": { S: "multi_day_consulting" }
             }
-        });
+        };
+        
+        const jobsCommand = new ScanCommand(scanInput);
         const jobResponse: ScanCommandOutput = await dynamodb.send(jobsCommand);
         const items: DynamoDBJobItem[] = (jobResponse.Items as DynamoDBJobItem[] || []);
 
         if (items.length === 0) {
-            return {
-                statusCode: 200,
-                headers: CORS,
-                body: JSON.stringify({
-                    message: "Multi-day consulting jobs retrieved successfully",
-                    excludedCount: 0,
-                    jobs: []
-                }),
-            };
+            return json(200, {
+                message: "Multi-day consulting jobs retrieved successfully",
+                excludedCount: 0,
+                jobs: []
+            });
         }
 
         // 3. Exclude jobs already applied by this professional
         const appliedJobIds = await getAppliedJobIdsForUser(userSub);
         
-        // FIX: Only check for applied jobs if jobId is present.
+        // Only check for applied jobs if jobId is present.
         const visibleItems = items.filter(it => {
             const jobId = it.jobId?.S;
             return jobId ? !appliedJobIds.has(jobId) : true;
         });
-
 
         // 4. Map the visible items to the final response structure
         const jobs: JobResponseItem[] = visibleItems.map(job => {
@@ -267,24 +273,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
 
         // 5. Success Response
-        return {
-            statusCode: 200,
-            headers: CORS,
-            body: JSON.stringify({
-                message: "Multi-day consulting jobs retrieved successfully",
-                excludedCount: appliedJobIds.size,
-                jobs
-            }),
-        };
+        return json(200, {
+            message: "Multi-day consulting jobs retrieved successfully",
+            excludedCount: appliedJobIds.size,
+            jobs
+        });
+
     } catch (error: any) {
         console.error("Error retrieving multi-day consulting jobs:", error);
-        return {
-            statusCode: 500,
-            headers: CORS,
-            body: JSON.stringify({
-                error: "Failed to retrieve multi-day consulting jobs. Please try again.",
-                details: error?.message || String(error)
-            }),
-        };
+        return json(500, {
+            error: "Failed to retrieve multi-day consulting jobs. Please try again.",
+            details: error?.message || String(error)
+        });
     }
 };

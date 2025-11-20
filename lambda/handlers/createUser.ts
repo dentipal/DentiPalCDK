@@ -20,6 +20,9 @@ import {
 } from "@aws-sdk/client-ses";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // --- Initialization (using V3 clients) ---
 const REGION: string = process.env.REGION || process.env.AWS_REGION || "us-east-1";
 
@@ -27,6 +30,8 @@ const cognitoClient = new CognitoIdentityProviderClient({ region: REGION });
 const dynamodbClient = new DynamoDBClient({ region: REGION }); 
 const sesClient = new SESClient({ region: REGION }); 
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 // Define shared CORS headers
 const corsHeaders: Record<string, string> = {
     "Access-Control-Allow-Origin": "*",
@@ -34,6 +39,7 @@ const corsHeaders: Record<string, string> = {
     "Access-Control-Allow-Headers": "Content-Type,Authorization",
     "Content-Type": "application/json",
 };
+*/
 
 // Define the expected structure for the request body
 interface RequestBody {
@@ -56,9 +62,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Handle preflight CORS request
         if (event.httpMethod === "OPTIONS") {
+            // ✅ Uses imported headers
             return {
                 statusCode: 200,
-                headers: corsHeaders,
+                headers: CORS_HEADERS,
                 body: JSON.stringify({}),
             };
         }
@@ -79,7 +86,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("Unauthorized user tried to add new user:", groupsArray);
             return {
                 statusCode: 403,
-                headers: corsHeaders,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ error: "Unauthorized: Only Root users can add new users" }),
             };
         }
@@ -96,7 +103,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("Passwords do not match");
             return {
                 statusCode: 400,
-                headers: corsHeaders,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ error: "Passwords do not match" }),
             };
         }
@@ -106,7 +113,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("Missing required fields:", { firstName, lastName, phoneNumber, email, password, subgroup, clinicIds });
             return {
                 statusCode: 400,
-                headers: corsHeaders,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ error: "Missing required fields" }),
             };
         }
@@ -117,7 +124,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("Invalid subgroup:", subgroup);
             return {
                 statusCode: 400,
-                headers: corsHeaders,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ error: "Invalid subgroup" }),
             };
         }
@@ -239,7 +246,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: corsHeaders,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 status: "success",
                 message: "User created successfully and associated with clinic(s).",
@@ -269,7 +276,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: statusCode,
-            headers: corsHeaders,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({ error: errorMessage }),
         };
     }

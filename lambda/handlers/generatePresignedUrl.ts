@@ -1,4 +1,3 @@
-// index.ts
 import {
     S3Client,
     PutObjectCommand,
@@ -6,9 +5,18 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the S3 client (AWS SDK v3)
 const s3Client = new S3Client({ region: process.env.REGION });
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // Type aliases for defined file types
 type FileType = "profile-image" | "certificate" | "video-resume";
@@ -21,74 +29,35 @@ interface RequestBody {
     fileSize: number; // in bytes
 }
 
-// Define Response Body interface for successful response
-interface SuccessBody {
-    message: string;
-    presignedUrl: string;
-    objectKey: string;
-    bucket: string;
-    fileType: FileType;
-    expiresIn: number;
-    uploadInstructions: {
-        method: "PUT";
-        headers: { "Content-Type": string };
-    };
-}
-
-// Define Error Body interface
-interface ErrorBody {
-    error: string;
-    [key: string]: any;
-}
-
-// Environment variables
-const ALLOWED_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:5173";
-
-const CORS = {
-    "Access-Control-Allow-Origin": "*", // Keeping '*' as in original, despite ALLOWED_ORIGIN variable
-    "Access-Control-Allow-Headers":
-        "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token",
-    "Access-Control-Allow-Methods": "OPTIONS,POST",
-    "Content-Type": "application/json",
-};
-
-// --- Helper Functions ---
-
-const ok = (body: SuccessBody, code: number = 200): APIGatewayProxyResult => ({
-    statusCode: code,
-    headers: CORS,
-    body: JSON.stringify(body),
-});
-
-const bad = (msg: string, code: number = 400, extra: Record<string, any> = {}): APIGatewayProxyResult => ({
-    statusCode: code,
-    headers: CORS,
-    body: JSON.stringify({ error: msg, ...extra } as ErrorBody),
-});
-
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // Determine HTTP method
-    // FIX: Cast event.requestContext to 'any' to safely access the 'http' property 
-    // which is common in API Gateway v2 but sometimes missing in v1 typings.
-    const method = (event?.requestContext as any)?.http?.method || event?.httpMethod;
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
-    // CORS preflight
-    if (method === "OPTIONS") return { statusCode: 204, headers: CORS, body: "" };
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
 
     try {
         // Auth (Cognito authorizer)
-        // Access claims via event.requestContext.authorizer structure
-        const claims = (event.requestContext.authorizer as any)?.claims;
+        const claims = event.requestContext?.authorizer?.claims;
+        // Cast claims to any to access properties safely if types aren't strict
         const userSub: string | undefined = claims?.sub;
         const userEmail: string | undefined = claims?.email;
 
-        if (!userSub) return bad("Unauthorized", 401);
+        if (!userSub) {
+            return json(401, { error: "Unauthorized" });
+        }
 
-        if (method !== "POST") return bad("Method not allowed", 405);
+        if (method !== "POST") {
+            return json(405, { error: "Method not allowed" });
+        }
 
-        if (!event.body) return bad("Request body is required", 400);
+        if (!event.body) {
+            return json(400, { error: "Request body is required" });
+        }
 
         // Parse and destructure body
         const { fileType, fileName, contentType, fileSize }: RequestBody = JSON.parse(event.body);
@@ -97,7 +66,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 1. Validate fileType
         const types: FileType[] = ["profile-image", "certificate", "video-resume"];
-        if (!types.includes(fileType)) return bad("Invalid file type", 400);
+        if (!types.includes(fileType)) {
+            return json(400, { error: "Invalid file type" });
+        }
 
         // 2. Size limits (match your policy)
         const maxSizes: Record<FileType, number> = {
@@ -105,11 +76,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             certificate: 10 * 1024 * 1024,      // 10MB
             "video-resume": 100 * 1024 * 1024   // 100MB
         };
+        
         if (fileSize && fileSize > maxSizes[fileType]) {
-            return bad(
-                `File size exceeds limit of ${maxSizes[fileType] / (1024 * 1024)}MB for ${fileType}`,
-                400
-            );
+            return json(400, { 
+                error: `File size exceeds limit of ${maxSizes[fileType] / (1024 * 1024)}MB for ${fileType}` 
+            });
         }
 
         // 3. Validate content types
@@ -128,10 +99,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
 
         if (!allowedContentTypes[fileType].includes(contentType)) {
-            return bad(
-                `Invalid content type for ${fileType}. Allowed: ${allowedContentTypes[fileType].join(", ")}`,
-                400
-            );
+            return json(400, { 
+                error: `Invalid content type for ${fileType}. Allowed: ${allowedContentTypes[fileType].join(", ")}` 
+            });
         }
 
         // 4. Check Bucket Configuration
@@ -144,7 +114,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!bucketName) {
             console.error(`Bucket environment variable for ${fileType} is missing.`);
-            return bad("Server configuration error: Missing bucket name.", 500);
+            return json(500, { error: "Server configuration error: Missing bucket name." });
         }
 
         // --- S3 Object Key Generation ---
@@ -177,7 +147,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // --- Success Response ---
 
-        return ok({
+        return json(200, {
             message: "Presigned URL generated successfully",
             presignedUrl,
             objectKey,
@@ -188,10 +158,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 method: "PUT",
                 headers: { "Content-Type": contentType }, // Must match the Content-Type used in the signing
             },
-        } as SuccessBody); 
+        });
 
     } catch (error) {
-        console.error("Error generating presigned URL:", error);
-        return bad("Internal server error", 500);
+        const err = error as Error;
+        console.error("Error generating presigned URL:", err);
+        return json(500, { error: "Internal server error" });
     }
 };

@@ -1,7 +1,11 @@
-// index.ts
-import { DynamoDB } from "aws-sdk"; // AWS SDK v2 for DocumentClient (older, but common)
-
-// AWS SDK v3 for Cognito
+import {
+    DynamoDBClient,
+    ScanCommand,
+    ScanCommandInput,
+    UpdateItemCommand,
+    UpdateItemCommandInput,
+    AttributeValue,
+} from "@aws-sdk/client-dynamodb";
 import {
     CognitoIdentityProviderClient,
     AdminDeleteUserCommand,
@@ -14,32 +18,33 @@ import {
     APIGatewayProxyResult,
     Context,
 } from "aws-lambda";
+// Import shared utils and headers
+import { isRoot } from "./utils";
+import { CORS_HEADERS } from "./corsHeaders";
 
-// Extend the Item interface from aws-sdk/lib/dynamodb/document_client
-interface ClinicItem extends DynamoDB.DocumentClient.AttributeMap {
-    clinicId: string;
-    AssociatedUsers?: string[] | DynamoDB.DocumentClient.StringSet;
-    // Add other clinic properties as needed
-}
+// --- Initialization ---
 
-// Initialize the DynamoDB DocumentClient (AWS SDK v2)
-const dynamodb = new DynamoDB.DocumentClient({ region: process.env.REGION });
-// Initialize the Cognito Client (AWS SDK v3)
+const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "OPTIONS,DELETE",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Content-Type": "application/json",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
+// --- Interfaces ---
+
+interface ResolvedUser {
+    username: string;
+    sub: string | null;
+}
 
 // --- Helper Functions ---
 
 /**
  * Extracts the user identifier (email or sub) from the API Gateway path.
- * @param event The Lambda event object.
- * @returns The user ID string or null.
  */
 function getPathId(event: APIGatewayProxyEvent): string | null {
     // 1. Prefer pathParameters.userId
@@ -57,53 +62,16 @@ function getPathId(event: APIGatewayProxyEvent): string | null {
         }
     }
 
-    // 3. Fallback: try regex on raw path
-    // rawPath is generally preferred in V2, path in V1
-    const raw = event.path || (event as any).rawPath || "";
-    const m = raw.match(/\/users\/([^/]+)(?:\/|$)/i);
-    if (m && m[1]) {
-        return decodeURIComponent(m[1]);
-    }
-
     return null;
 }
 
 /**
- * Checks if the caller belongs to the 'Root' Cognito group.
- * @param event The Lambda event object.
- * @returns true if the user is in the 'Root' group.
- */
-function isRootGroup(event: APIGatewayProxyEvent): boolean {
-    const claims = event?.requestContext?.authorizer?.claims || {};
-    let raw: string | string[] = claims["cognito:groups"] ?? claims["cognito:Groups"] ?? "";
-
-    if (Array.isArray(raw)) {
-        return raw.includes("Root");
-    }
-
-    if (typeof raw === "string") {
-        if (raw.trim() === "Root") return true;
-        // Handle CSV case
-        return raw.split(",").map(s => s.trim()).includes("Root");
-    }
-
-    return false;
-}
-
-interface ResolvedUser {
-    username: string;
-    sub: string | null;
-}
-
-/**
- * Resolves a Cognito user's username and sub given an ID (which can be username/email or sub).
- * @param idOrSub The user identifier provided in the path.
- * @returns An object containing the username and sub, or null if not found by sub.
+ * Resolves a Cognito user's username and sub given an ID.
  */
 async function resolveCognitoUser(idOrSub: string): Promise<ResolvedUser | null> {
     // If looks like email (often used as the Username), use directly.
     if (idOrSub.includes("@")) {
-        // We can't guarantee the sub without a lookup, so we set it to null.
+        // We can't guarantee the sub without a lookup, so we set it to null initially.
         return { username: idOrSub, sub: null };
     }
 
@@ -131,80 +99,84 @@ async function resolveCognitoUser(idOrSub: string): Promise<ResolvedUser | null>
 
 /**
  * Removes a user's sub from the AssociatedUsers list/set in all clinics they belong to.
- * @param userSub The sub ID of the user to remove.
+ * Rewritten for AWS SDK v3.
  */
 async function removeUserFromClinics(userSub: string): Promise<void> {
-    const tableName = "DentiPal-Clinics";
-    let ExclusiveStartKey: DynamoDB.DocumentClient.Key | undefined;
-    const toProcess: ClinicItem[] = [];
+    const tableName = "DentiPal-Clinics"; // Or process.env.CLINICS_TABLE
+    let lastEvaluatedKey: Record<string, AttributeValue> | undefined;
+    const itemsToUpdate: Record<string, AttributeValue>[] = [];
 
+    // 1. Scan to find clinics where user is associated
     do {
-        // NOTE: Scan is inefficient. If table grows large, consider a GSI on a field
-        // indicating membership, or a separate reverse index table.
-        const page = await dynamodb
-            .scan({
-                TableName: tableName,
-                // Filter for items that *might* contain the sub or have the attribute at all.
-                // The contains() function only works on Lists (L) or Sets (SS/NS/BS) in DynamoDB.
-                FilterExpression: "contains(AssociatedUsers, :sub) OR attribute_exists(AssociatedUsers)",
-                ExpressionAttributeValues: { ":sub": userSub },
-                ExclusiveStartKey,
-            })
-            .promise();
+        const scanInput: ScanCommandInput = {
+            TableName: tableName,
+            // Filter for items that might contain the sub.
+            FilterExpression: "contains(AssociatedUsers, :sub) OR attribute_exists(AssociatedUsers)",
+            ExpressionAttributeValues: { ":sub": { S: userSub } },
+            ExclusiveStartKey: lastEvaluatedKey,
+        };
 
-        for (const item of page.Items as ClinicItem[] || []) {
-            const au = item.AssociatedUsers;
-            let contains = false;
+        const command = new ScanCommand(scanInput);
+        const response = await dynamodb.send(command);
 
-            if (Array.isArray(au)) { // Handles List type
-                contains = au.includes(userSub);
-            } else if (au && typeof au === "object" && (au as any).wrapperName === "Set") {
-                // Handles String Set (SS) type via DocumentClient wrapper
-                contains = ((au as any).values || []).includes(userSub);
-            }
+        if (response.Items) {
+            for (const item of response.Items) {
+                // Double check logic in memory because 'contains' works on string sets and lists
+                const au = item.AssociatedUsers;
+                let contains = false;
 
-            if (contains) {
-                toProcess.push(item);
+                if (au?.L) {
+                    // List of Attributes
+                    contains = au.L.some(attr => attr.S === userSub);
+                } else if (au?.SS) {
+                    // String Set
+                    contains = au.SS.includes(userSub);
+                }
+
+                if (contains) {
+                    itemsToUpdate.push(item);
+                }
             }
         }
+        lastEvaluatedKey = response.LastEvaluatedKey;
+    } while (lastEvaluatedKey);
 
-        ExclusiveStartKey = page.LastEvaluatedKey;
-    } while (ExclusiveStartKey);
-
-    // Concurrently update each clinic to remove the user
-    await Promise.all(toProcess.map(async (clinic) => {
-        const clinicId = clinic.clinicId;
+    // 2. Update each clinic
+    await Promise.all(itemsToUpdate.map(async (clinic) => {
+        const clinicId = clinic.clinicId?.S;
         if (!clinicId) return;
 
         const au = clinic.AssociatedUsers;
-
         try {
-            if (Array.isArray(au)) { // Case 1: List (L)
-                const newList = au.filter((s) => s !== userSub);
-                await dynamodb
-                    .update({
-                        TableName: tableName,
-                        Key: { clinicId },
-                        UpdateExpression: "SET AssociatedUsers = :list",
-                        ExpressionAttributeValues: { ":list": newList },
-                    })
-                    .promise();
-            } else if (au && typeof au === "object" && (au as any).wrapperName === "Set") { // Case 2: String Set (SS)
-                // Use a DELETE update on the set for efficiency
-                await dynamodb
-                    .update({
-                        TableName: tableName,
-                        Key: { clinicId },
-                        UpdateExpression: "DELETE AssociatedUsers :toDel",
-                        ExpressionAttributeValues: {
-                            ":toDel": dynamodb.createSet([userSub]) as DynamoDB.DocumentClient.StringSet,
-                        },
-                    })
-                    .promise();
+            if (au?.L) {
+                // Case 1: List (L) - Filter and Set
+                // SDK v3 List is array of AttributeValue objects
+                const newList = au.L.filter((attr) => attr.S !== userSub);
+                
+                const updateInput: UpdateItemCommandInput = {
+                    TableName: tableName,
+                    Key: { clinicId: { S: clinicId } },
+                    UpdateExpression: "SET AssociatedUsers = :list",
+                    ExpressionAttributeValues: {
+                        ":list": { L: newList }
+                    }
+                };
+                await dynamodb.send(new UpdateItemCommand(updateInput));
+
+            } else if (au?.SS) {
+                // Case 2: String Set (SS) - Use DELETE operator
+                const updateInput: UpdateItemCommandInput = {
+                    TableName: tableName,
+                    Key: { clinicId: { S: clinicId } },
+                    UpdateExpression: "DELETE AssociatedUsers :toDel",
+                    ExpressionAttributeValues: {
+                        ":toDel": { SS: [userSub] }
+                    }
+                };
+                await dynamodb.send(new UpdateItemCommand(updateInput));
             }
         } catch (e) {
             console.warn(`Failed to update clinic ${clinicId} on user removal:`, e);
-            // Continue to the next clinic (best-effort cleanup)
         }
     }));
 }
@@ -212,28 +184,27 @@ async function removeUserFromClinics(userSub: string): Promise<void> {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent, context: Context): Promise<APIGatewayProxyResult> => {
-    try {
-        // CORS preflight
-        if (event.httpMethod === "OPTIONS") {
-            return { statusCode: 204, headers: CORS_HEADERS, body: "" };
-        }
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
+    try {
         // 1. Authorization Check (Root Group)
-        if (!isRootGroup(event)) {
-            return {
-                statusCode: 403,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Unauthorized: Only Root users can delete users" }),
-            };
+        // Using shared isRoot utility from ./utils
+        const rawGroups = event.requestContext?.authorizer?.claims?.['cognito:groups'];
+        const groups = typeof rawGroups === 'string' ? rawGroups.split(',') : [];
+        
+        if (!isRoot(groups)) {
+             return json(403, { error: "Unauthorized: Only Root users can delete users" });
         }
 
         const idOrSub = getPathId(event);
         if (!idOrSub) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "User identifier is required in path (/users/{email-or-sub})" }),
-            };
+            return json(400, { error: "User identifier is required in path (/users/{email-or-sub})" });
         }
 
         // 2. Resolve Cognito Username
@@ -241,17 +212,13 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
         const isSubLookup = !idOrSub.includes("@");
 
         if (isSubLookup && !resolved) {
-            return {
-                statusCode: 404,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "User not found in Cognito (by sub)" }),
-            };
+            return json(404, { error: "User not found in Cognito (by sub)" });
         }
         
         // If they passed an email, resolved.sub will be null, but we still have the username.
         const username = resolved?.username || idOrSub;
 
-        // 3. Optional: Verify User Existence (Gives better 404 error than AdminDeleteUserCommand)
+        // 3. Optional: Verify User Existence
         try {
             await cognito.send(
                 new AdminGetUserCommand({
@@ -261,11 +228,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
             );
         } catch (e: any) {
             if (e?.name === "UserNotFoundException") {
-                return {
-                    statusCode: 404,
-                    headers: CORS_HEADERS,
-                    body: JSON.stringify({ error: "User does not exist in Cognito" }),
-                };
+                return json(404, { error: "User does not exist in Cognito" });
             }
             throw e;
         }
@@ -306,20 +269,13 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
         }
 
         // 6. Success Response
-        return {
-            statusCode: 200,
-            headers: CORS_HEADERS,
-            body: JSON.stringify({
-                status: "success",
-                message: "User deleted from Cognito and disassociated from clinics",
-            }),
-        };
+        return json(200, {
+            status: "success",
+            message: "User deleted from Cognito and disassociated from clinics",
+        });
+
     } catch (error: any) {
         console.error("Error deleting user:", error);
-        return {
-            statusCode: 400,
-            headers: CORS_HEADERS,
-            body: JSON.stringify({ error: error?.message || "Failed to delete user" }),
-        };
+        return json(400, { error: error?.message || "Failed to delete user" });
     }
 };

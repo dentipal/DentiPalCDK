@@ -12,6 +12,9 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils"; 
 import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles"; 
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
 const dynamodb: DynamoDBClient = new DynamoDBClient({ region: REGION });
@@ -19,11 +22,14 @@ const PROFESSIONAL_PROFILES_TABLE: string = process.env.PROFESSIONAL_PROFILES_TA
 
 // --- 2. Constants and Type Definitions ---
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 const corsHeaders: Record<string, string> = {
     "Access-Control-Allow-Origin": process.env.CORS_ALLOWED_ORIGIN || "http://localhost:5173",
     "Access-Control-Allow-Headers": "Content-Type,Authorization",
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
 };
+*/
 
 /** Interface for the data expected in the request body */
 interface UpdateProfileBody {
@@ -38,12 +44,17 @@ interface UpdateProfileBody {
 // --- 3. Handler Function ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // ✅ ADDED PREFLIGHT CHECK
+    if (event.httpMethod === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // Validate the token
         const userSub: string = await validateToken(event); 
 
         if (!event.body) {
-             return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: "Request body is required." }) };
+             return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Request body is required." }) };
         }
         
         const updateData: UpdateProfileBody = JSON.parse(event.body);
@@ -56,7 +67,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             
             return {
                 statusCode: 400,
-                headers: corsHeaders,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: `Invalid role value provided. Valid options: ${validDisplayRoles}`
                 })
@@ -74,7 +85,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!existingProfile.Item) {
             return {
                 statusCode: 404,
-                headers: corsHeaders,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ error: "Professional profile not found" })
             };
         }
@@ -127,7 +138,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (fieldsUpdatedCount === 0) {
             return {
                 statusCode: 400,
-                headers: corsHeaders,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ error: "No fields to update" })
             };
         }
@@ -151,7 +162,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Step 4: Return success response ---
         return {
             statusCode: 200,
-            headers: corsHeaders,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Professional profile updated successfully",
                 profile: {
@@ -170,7 +181,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: isAuthError ? 401 : 500,
-            headers: corsHeaders,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 error: isAuthError ? err.message : "Failed to update professional profile. Please try again.",
                 details: isAuthError ? undefined : err.message

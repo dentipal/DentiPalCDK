@@ -8,10 +8,23 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming validateToken exists in a local utility file
-import { validateToken } from "./utils"; 
+import { validateToken } from "./utils";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
+
+// --- Initialization ---
 
 // Initialize the DynamoDB client
-const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+const dynamodb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
+// --- Interfaces ---
 
 // Define the structure for the job object that will be returned
 interface JobPosting {
@@ -70,11 +83,24 @@ interface JobPosting {
     };
 }
 
+// --- Handler ---
+
+// Define the Lambda handler function
 // Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     try {
+        // --- CORS preflight ---
+        // FIX: Cast event to 'any' to access .http (HTTP API v2) property without TS error
+        const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+        if (method === "OPTIONS") {
+            return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        }
+
         // Step 1: Authenticate user
         const userSub: string = await validateToken(event as any);
+        
+        // ... rest of your code remains the same ...
         const queryParams = event.queryStringParameters || {};
 
         // Step 2: Extract and type query parameters
@@ -83,20 +109,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const shiftSpeciality: string | undefined = queryParams.speciality; // general_dentistry, oral_surgeon, etc.
         const minRate: number | undefined = queryParams.minRate ? parseFloat(queryParams.minRate) : undefined;
         const maxRate: number | undefined = queryParams.maxRate ? parseFloat(queryParams.maxRate) : undefined;
-        const dateFrom: string | undefined = queryParams.dateFrom; // ISO date string (not used in current filters, but extracted)
-        const dateTo: string | undefined = queryParams.dateTo; // ISO date string (not used in current filters, but extracted)
+        const dateFrom: string | undefined = queryParams.dateFrom; // ISO date string
+        const dateTo: string | undefined = queryParams.dateTo; // ISO date string
         const assistedHygiene: boolean = queryParams.assistedHygiene === 'true';
         const limit: number = queryParams.limit ? parseInt(queryParams.limit) : 50;
 
         // Validate professional role if provided
         const VALID_ROLES = ['dentist', 'hygienist', 'assistant'];
         if (professionalRole && !VALID_ROLES.includes(professionalRole)) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({
-                    error: `Invalid professional role. Valid options: ${VALID_ROLES.join(', ')}`
-                })
-            };
+            return json(400, {
+                error: `Invalid professional role. Valid options: ${VALID_ROLES.join(', ')}`
+            });
         }
 
         // Step 3: Build filter expression for DynamoDB Scan
@@ -129,18 +152,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             expressionAttributeValues[":assistedHygiene"] = { BOOL: assistedHygiene };
         }
 
-        // Note: Rate and Date filters are NOT implemented as native DynamoDB filters 
-        // in the original JS code, so they rely on the post-scan limit * 2 logic.
-        // We strictly adhere to the original implementation which omits them from the FilterExpression.
-
         const scanCommandInput: ScanCommandInput = {
             TableName: process.env.JOB_POSTINGS_TABLE,
             FilterExpression: filterExpressions.join(" AND "),
             ExpressionAttributeNames: expressionAttributeNames,
             ExpressionAttributeValues: expressionAttributeValues,
-            // Get more items than required to account for rate/date filtering that happens later (if implemented)
-            // or simply to ensure the limit is met if any items fail the secondary filtering (which is currently missing).
-            Limit: limit * 2 
+            Limit: limit * 2
         };
 
         const scanCommand = new ScanCommand(scanCommandInput);
@@ -153,7 +170,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 const job: JobPosting = {
                     jobId: item.jobId?.S || '',
                     clinicUserSub: item.clinicUserSub?.S || '',
-                    clinicId: item.clinicId?.S || '', 
+                    clinicId: item.clinicId?.S || '',
                     jobType: item.job_type?.S || '',
                     professionalRole: item.professional_role?.S || '',
                     shiftSpeciality: item.shift_speciality?.S || '',
@@ -164,7 +181,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     updatedAt: item.updatedAt?.S || '',
                     jobTitle: item.job_title?.S || '',
                     jobDescription: item.job_description?.S || '',
-                    // Parse numeric types safely
                     hourlyRate: item.hourly_rate?.N ? parseFloat(item.hourly_rate.N) : 0,
                     salaryMin: item.salary_min?.N ? parseFloat(item.salary_min.N) : 0,
                     salaryMax: item.salary_max?.N ? parseFloat(item.salary_max.N) : 0,
@@ -236,35 +252,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         jobPostings.sort((a, b) => new Date(b.postedAt).getTime() - new Date(a.postedAt).getTime());
 
         // Step 5: Return results
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                message: "Job postings retrieved successfully",
-                jobPostings,
-                totalCount: jobPostings.length,
-                filters: {
-                    jobType: jobType || 'all',
-                    professionalRole: professionalRole || 'all',
-                    shiftSpeciality: shiftSpeciality || 'all',
-                    minRate,
-                    maxRate,
-                    dateFrom,
-                    dateTo,
-                    assistedHygiene: assistedHygiene || false,
-                    limit
-                }
-            })
-        };
+        return json(200, {
+            message: "Job postings retrieved successfully",
+            jobPostings,
+            totalCount: jobPostings.length,
+            filters: {
+                jobType: jobType || 'all',
+                professionalRole: professionalRole || 'all',
+                shiftSpeciality: shiftSpeciality || 'all',
+                minRate,
+                maxRate,
+                dateFrom,
+                dateTo,
+                assistedHygiene: assistedHygiene || false,
+                limit
+            }
+        });
+
     } catch (error) {
         const err = error as Error;
         console.error("Error browsing job postings:", err);
-        return {
-            statusCode: 500,
-            body: JSON.stringify({
-                error: "Failed to retrieve job postings. Please try again.",
-                details: err.message
-            })
-        };
+        return json(500, {
+            error: "Failed to retrieve job postings. Please try again.",
+            details: err.message
+        });
     }
 };
 

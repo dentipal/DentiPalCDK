@@ -2,23 +2,28 @@ import {
     AdminDeleteUserCommand,
     CognitoIdentityProviderClient,
 } from "@aws-sdk/client-cognito-identity-provider";
-
 import {
     DynamoDBClient,
     QueryCommand,
     DeleteItemCommand,
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
-
-// Assuming 'utils' is in the same directory or accessible path
-// You will need to create a TypeScript type definition for validateToken
-// Example: type ValidateToken = (event: any) => Promise<string | null>;
-const { validateToken } = require("./utils"); // ✅ Import your token utility
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
+// Import validation utility
+import { validateToken } from "./utils";
 
 // --- AWS SDK Clients Initialization ---
-// Ensure process.env.REGION is defined, e.g., 'us-east-1'
 const cognitoClient = new CognitoIdentityProviderClient({ region: process.env.REGION });
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // Define the structure of an item returned from the DynamoDB Query for type safety
 interface UserClinicAssignmentItem {
@@ -33,16 +38,22 @@ interface UserClinicAssignmentItem {
  * @param event The Lambda event (e.g., API Gateway event containing auth token).
  * @returns An API Gateway-compatible response object.
  */
-export const handler = async (event: any): Promise<any> => {
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // ✅ Get userSub using shared token validator
-        // Assuming validateToken returns the userSub string or null/undefined
-        const userSub: string | null = await validateToken(event);
+        // Cast event to 'any' to match the signature expected by validateToken if strictly typed elsewhere
+        const userSub: string = await validateToken(event as any);
+        
         if (!userSub) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "UserSub is required" })
-            };
+            return json(400, { error: "UserSub is required" });
         }
 
         // 🧹 Clean up clinic assignments
@@ -56,7 +67,7 @@ export const handler = async (event: any): Promise<any> => {
 
         // Use a type assertion to help TypeScript understand the structure of the returned items
         const assignments = await dynamoClient.send(cleanupCommand);
-        const assignmentItems: UserClinicAssignmentItem[] = (assignments.Items as UserClinicAssignmentItem[] | undefined) || [];
+        const assignmentItems = (assignments.Items as UserClinicAssignmentItem[] | undefined) || [];
 
         for (const item of assignmentItems) {
             if (item.clinicId?.S) {
@@ -77,21 +88,16 @@ export const handler = async (event: any): Promise<any> => {
             Username: userSub // The 'Username' in Cognito for AdminDeleteUser is the userSub/UUID
         }));
 
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                status: "success",
-                message: "Account deleted successfully"
-            })
-        };
+        return json(200, {
+            status: "success",
+            message: "Account deleted successfully"
+        });
 
-    } catch (error: any) { // Catch block should type the error for better handling
-        console.error("Error deleting account:", error);
-        return {
-            statusCode: 400,
-            body: JSON.stringify({
-                error: `Failed to delete account: ${error.message}`
-            })
-        };
+    } catch (error) {
+        const err = error as Error;
+        console.error("Error deleting account:", err);
+        return json(500, {
+            error: `Failed to delete account: ${err.message}`
+        });
     }
 };

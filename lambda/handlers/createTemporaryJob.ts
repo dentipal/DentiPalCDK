@@ -10,6 +10,8 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import { validateToken } from "./utils"; 
 import { VALID_ROLE_VALUES } from "./professionalRoles"; 
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -23,28 +25,23 @@ interface MultiJobData {
     hourly_rate: number;
     start_time: string;
     end_time: string;
-    meal_break?: string; // Stored as string in original JS (should probably be boolean)
+    meal_break?: string; // Stored as string in original JS
     job_title?: string;
     job_description?: string;
     requirements?: string[]; // Array of strings
     assisted_hygiene?: boolean;
 }
 
-// Type for CORS headers
-interface CorsHeaders {
-    [header: string]: string;
-}
-
 // --- Initialization ---
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-const CORS_HEADERS: CorsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token",
-    "Access-Control-Allow-Methods": "OPTIONS,GET,POST,PUT,DELETE",
-    "Content-Type": "application/json",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 /* ----------------- group helpers ----------------- */
 
@@ -92,17 +89,17 @@ async function getClinicProfileByUser(clinicId: string, userSub: string): Promis
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
-    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
-    // Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
         // 1. Authorization
-        const userSub: string = await validateToken(event); // This should be a clinic user
+        const userSub: string = await validateToken(event as any); // This should be a clinic user
 
         // ---- Group authorization (Root, ClinicAdmin, ClinicManager only) ----
         const rawGroups = parseGroupsFromAuthorizer(event);
@@ -111,11 +108,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         if (!isAllowed) {
             console.warn(`[AUTH] User ${userSub} is not in an allowed group. Groups: [${rawGroups.join(', ')}]`);
-            return {
-                statusCode: 403,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs" }),
-            };
+            return json(403, { error: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs" });
         }
         // --------------------------------------------------------------------
 
@@ -135,14 +128,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             !jobData.end_time
         ) {
             console.warn("[VALIDATION] Missing required fields in body.");
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    error:
-                        "Required fields: clinicIds (array), professional_role, date, shift_speciality, hours, hourly_rate, start_time, end_time",
-                }),
-            };
+            return json(400, {
+                error: "Required fields: clinicIds (array), professional_role, date, shift_speciality, hours, hourly_rate, start_time, end_time"
+            });
         }
 
         // 3. Validate Data Integrity
@@ -150,48 +138,28 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate professional role
         if (!VALID_ROLE_VALUES.includes(jobData.professional_role)) {
             console.warn(`[VALIDATION] Invalid professional_role: ${jobData.professional_role}`);
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES.join(", ")}`,
-                }),
-            };
+            return json(400, {
+                error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES.join(", ")}`
+            });
         }
 
         // Validate date format and future
         const jobDate = new Date(jobData.date);
         if (isNaN(jobDate.getTime())) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Invalid date format. Use ISO date string." }),
-            };
+            return json(400, { error: "Invalid date format. Use ISO date string." });
         }
         const today = new Date();
         today.setHours(0, 0, 0, 0); 
         if (jobDate < today) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Job date must be today or in the future" }),
-            };
+            return json(400, { error: "Job date must be today or in the future" });
         }
 
         // Validate hours and rate
         if (jobData.hours < 1 || jobData.hours > 12) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Hours must be between 1 and 12" }),
-            };
+            return json(400, { error: "Hours must be between 1 and 12" });
         }
         if (jobData.hourly_rate < 10 || jobData.hourly_rate > 200) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Hourly rate must be between $10 and $200" }),
-            };
+            return json(400, { error: "Hourly rate must be between $10 and $200" });
         }
 
         const timestamp = new Date().toISOString();
@@ -223,9 +191,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const pincode = clinic.pincode?.S || "";
             const clinicOwnerSub = clinic.createdBy?.S;
             
-            const fullAddress = clinic.address?.S || 
-                `${addressLine1} ${addressLine2} ${addressLine3}`.replace(/\s+/g, " ").trim();
-
             // 5. Fetch profile details (for job metadata)
             // Try current user's profile first, then fall back to clinic owner's profile
             let profileItem = await getClinicProfileByUser(clinicId, userSub);
@@ -313,28 +278,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 8. Final success response
         const totalPay = jobData.hours * jobData.hourly_rate;
 
-        return {
-            statusCode: 201,
-            headers: CORS_HEADERS,
-            body: JSON.stringify({
-                message: "Temporary job postings created successfully for multiple clinics",
-                jobIds,
-                job_type: "temporary",
-                professional_role: jobData.professional_role,
-                date: jobData.date,
-                hours: jobData.hours,
-                hourly_rate: jobData.hourly_rate,
-                total_pay: `$${totalPay.toFixed(2)}`,
-            }),
-        };
+        return json(201, {
+            message: "Temporary job postings created successfully for multiple clinics",
+            jobIds,
+            job_type: "temporary",
+            professional_role: jobData.professional_role,
+            date: jobData.date,
+            hours: jobData.hours,
+            hourly_rate: jobData.hourly_rate,
+            total_pay: `$${totalPay.toFixed(2)}`,
+        });
 
     } catch (error) {
         const err = error as Error;
         console.error("Error creating temporary job postings:", err);
-        return {
-            statusCode: 500,
-            headers: CORS_HEADERS,
-            body: JSON.stringify({ error: err.message || "An unexpected error occurred" }),
-        };
+        return json(500, { error: err.message || "An unexpected error occurred" });
     }
 };

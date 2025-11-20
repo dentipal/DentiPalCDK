@@ -5,16 +5,24 @@ import {
     AttributeValue,
     GetItemCommandOutput,
     UpdateItemCommandInput
-    // Removed 'AttributeValueList' as it does not exist in v3
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming 'validateToken' is defined in './utils' and returns the userSub string.
 import { validateToken } from "./utils"; 
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
 const dynamodb: DynamoDBClient = new DynamoDBClient({ region: REGION });
-const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; // Non-null assertion for environment variable
+const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; 
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // --- 2. Type Definitions ---
 
@@ -55,40 +63,38 @@ interface JobItem {
  * valid state transitions.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // --- CORS preflight ---
+    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // Assume validateToken returns the verified userSub (clinic owner) and throws on failure
-        const userSub: string = await validateToken(event); 
+        const userSub: string = await validateToken(event as any); 
         
         const jobId: string | undefined = event.pathParameters?.jobId;
         
         if (!event.body) {
-             return { statusCode: 400, body: JSON.stringify({ error: "Request body is required." }) };
+             return json(400, { error: "Request body is required." });
         }
 
         const statusData: UpdateStatusBody = JSON.parse(event.body);
 
         if (!jobId) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "jobId is required in path" })
-            };
+            return json(400, { error: "jobId is required in path" });
         }
         
         if (!statusData.status) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "status is required" })
-            };
+            return json(400, { error: "status is required" });
         }
 
         // Validate that the new status is a recognized value
         if (!(VALID_STATUSES as string[]).includes(statusData.status)) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({
-                    error: `Invalid status. Valid options: ${VALID_STATUSES.join(', ')}`
-                })
-            };
+            return json(400, {
+                error: `Invalid status. Valid options: ${VALID_STATUSES.join(', ')}`
+            });
         }
 
         // --- Step 1: Get current job to verify ownership and current status ---
@@ -105,16 +111,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const currentJobItem: JobItem | undefined = currentJobResponse.Item as JobItem | undefined;
 
         if (!currentJobItem) {
-            return {
-                statusCode: 404,
-                body: JSON.stringify({ error: "Job not found or you don't have permission to update it" })
-            };
+            return json(404, { error: "Job not found or you don't have permission to update it" });
         }
         
         // Ensure job is properly structured before continuing
         if (!currentJobItem.clinicUserSub?.S || currentJobItem.clinicUserSub.S !== userSub) {
-             // This is mostly redundant due to the GetItem key, but good for defensive coding
-             return { statusCode: 403, body: JSON.stringify({ error: "Access denied - ownership mismatch." }) };
+             return json(403, { error: "Access denied - ownership mismatch." });
         }
 
         const currentStatus: JobStatus = (currentJobItem.status?.S || 'open') as JobStatus;
@@ -123,27 +125,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Step 2: Validate status transition ---
         const validTransitions: JobStatus[] = VALID_STATUS_TRANSITIONS[currentStatus];
         if (!validTransitions || !validTransitions.includes(newStatus)) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({
-                    error: `Invalid status transition: Cannot transition from ${currentStatus} to ${newStatus}. Valid next states: ${validTransitions.join(', ')}`
-                })
-            };
+            return json(400, {
+                error: `Invalid status transition: Cannot transition from ${currentStatus} to ${newStatus}. Valid next states: ${validTransitions.join(', ')}`
+            });
         }
 
         // --- Step 3: Validate required fields for specific statuses ---
         if (newStatus === 'scheduled') {
             if (!statusData.acceptedProfessionalUserSub) {
-                return {
-                    statusCode: 400,
-                    body: JSON.stringify({ error: "acceptedProfessionalUserSub is required for scheduled status" })
-                };
+                return json(400, { error: "acceptedProfessionalUserSub is required for scheduled status" });
             }
             if (!statusData.scheduledDate) {
-                return {
-                    statusCode: 400,
-                    body: JSON.stringify({ error: "scheduledDate is required for scheduled status" })
-                };
+                return json(400, { error: "scheduledDate is required for scheduled status" });
             }
         }
         
@@ -220,35 +213,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             UpdateExpression: updateExpression,
             ExpressionAttributeNames: expressionAttributeNames,
             ExpressionAttributeValues: expressionAttributeValues,
-            ReturnValues: 'NONE' // ReturnValues is not required to be 'ALL_NEW' for this handler
+            ReturnValues: 'NONE'
         };
         
         await dynamodb.send(new UpdateItemCommand(updateParams));
 
         // --- Step 7: Return Success ---
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                message: "Job status updated successfully",
-                jobId,
-                previousStatus: currentStatus,
-                newStatus: newStatus,
-                updatedAt: timestamp,
-                acceptedProfessional: statusData.acceptedProfessionalUserSub || null,
-                scheduledDate: statusData.scheduledDate || null
-            })
-        };
-    }
-    catch (error) {
+        return json(200, {
+            message: "Job status updated successfully",
+            jobId,
+            previousStatus: currentStatus,
+            newStatus: newStatus,
+            updatedAt: timestamp,
+            acceptedProfessional: statusData.acceptedProfessionalUserSub || null,
+            scheduledDate: statusData.scheduledDate || null
+        });
+
+    } catch (error) {
         const err = error as Error;
         console.error("Error updating job status:", err.message, err.stack);
         
-        // Use 401 for explicit authorization failures (from validateToken)
         const isAuthError = err.message.includes("Unauthorized") || err.message.includes("token");
 
-        return {
-            statusCode: isAuthError ? 401 : 500,
-            body: JSON.stringify({ error: err.message || "Internal server error" })
-        };
+        return json(isAuthError ? 401 : 500, {
+            error: err.message || "Internal server error"
+        });
     }
 };

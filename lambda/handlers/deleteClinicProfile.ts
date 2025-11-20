@@ -7,6 +7,9 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { Buffer } from 'buffer'; 
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // --- Type Definitions ---
 
 // Interface for the claims expected in the decoded JWT payload
@@ -36,6 +39,11 @@ function b64urlToUtf8(b64url: string): string {
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     console.info("🗑️ Starting deleteClinicAccountHandler");
 
+    // ✅ ADDED PREFLIGHT CHECK
+    if (event.httpMethod === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // Step 1: Decode JWT token manually
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
@@ -43,6 +51,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("❌ Missing or invalid Authorization header");
             return {
                 statusCode: 401,
+                headers: CORS_HEADERS, // ✅ Added headers
                 body: JSON.stringify({ error: "Missing or invalid Authorization header" }),
             };
         }
@@ -54,6 +63,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
              console.error("❌ Invalid JWT format");
              return {
                 statusCode: 401,
+                headers: CORS_HEADERS, // ✅ Added headers
                 body: JSON.stringify({ error: "Invalid token format" }),
             };
         }
@@ -79,6 +89,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!userSub) {
             return {
                 statusCode: 401,
+                headers: CORS_HEADERS, // ✅ Added headers
                 body: JSON.stringify({ error: "Missing userSub in token" }),
             };
         }
@@ -91,6 +102,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn(`❌ User ${userSub} denied access. Type: ${userType}, Groups: ${groups.join(', ')}`);
             return {
                 statusCode: 403,
+                headers: CORS_HEADERS, // ✅ Added headers
                 body: JSON.stringify({
                     error: "Access denied – only clinic or root users can delete a clinic profile",
                 }),
@@ -104,6 +116,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!clinicId || clinicId === 'clinic') { // Basic check for potentially incomplete path
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added headers
                 body: JSON.stringify({ error: "Missing or invalid clinicId in path" }),
             };
         }
@@ -125,6 +138,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!existing.Item) {
             return {
                 statusCode: 404,
+                headers: CORS_HEADERS, // ✅ Added headers
                 body: JSON.stringify({ error: "Clinic profile not found" }),
             };
         }
@@ -144,6 +158,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
+            headers: CORS_HEADERS, // ✅ Added headers
             body: JSON.stringify({
                 message: "Clinic profile deleted successfully",
                 clinicId,
@@ -155,6 +170,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("🔥 Error deleting clinic account:", err);
         return {
             statusCode: 500,
+            headers: CORS_HEADERS, // ✅ Added headers
             body: JSON.stringify({ error: err.message || "Failed to delete clinic account" }),
         };
     }

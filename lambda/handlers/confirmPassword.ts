@@ -7,19 +7,18 @@ import {
     UserType, // Type for ListUsersCommand output
 } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the Cognito Identity Provider Client
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 
-// Define the type for the CORS headers
-type CorsHeaders = Record<string, string>;
-
-const CORS: CorsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "OPTIONS,POST",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Content-Type": "application/json"
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // Define the expected structure for the request body
 interface RequestBody {
@@ -55,9 +54,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.log("[req] headers:", JSON.stringify(event?.headers || {}));
     console.log("[req] body:", event?.body);
 
-    // Handle CORS preflight request
-    if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS, body: "{}" };
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+    
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
@@ -70,11 +72,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Input validation
         if (!email || !code || !newPassword) {
             console.warn("[confirm] missing fields");
-            return {
-                statusCode: 400,
-                headers: CORS,
-                body: JSON.stringify({ error: "Required fields: email, code, newPassword" })
-            };
+            return json(400, { error: "Required fields: email, code, newPassword" });
         }
 
         const emailLower: string = String(email).toLowerCase();
@@ -85,11 +83,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userPoolId = process.env.USER_POOL_ID;
             if (!userPoolId) {
                 console.error("[confirm] Missing USER_POOL_ID for username lookup");
-                return {
-                    statusCode: 500,
-                    headers: CORS,
-                    body: JSON.stringify({ error: "Server misconfiguration (USER_POOL_ID)" })
-                };
+                return json(500, { error: "Server misconfiguration (USER_POOL_ID)" });
             }
             
             const foundUsername = await findUsernameByEmail(userPoolId, emailLower);
@@ -114,11 +108,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("[confirm] success for:", username);
 
         // Successful response
-        return {
-            statusCode: 200,
-            headers: CORS,
-            body: JSON.stringify({ message: "Password reset successful" })
-        };
+        return json(200, { message: "Password reset successful" });
+
     } catch (err) {
         // Explicitly type the error
         const error = err as Error & { name?: string };
@@ -158,10 +149,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Return error response
-        return {
-            statusCode: status,
-            headers: CORS,
-            body: JSON.stringify({ error: message, details: error?.message })
-        };
+        return json(status, { error: message, details: error?.message });
     }
 };
