@@ -11,8 +11,8 @@ import { v4 as uuidv4 } from "uuid";
 
 // Assuming these modules exist and export the correct functions/values
 import { validateToken } from "./utils";
-// Ensure that './professionalRoles' is a valid path to a file exporting an array of strings
-// We must assume the type based on usage:
+
+// We must assume the type based on usage if not imported directly:
 declare const VALID_ROLE_VALUES: string[];
 // import { VALID_ROLE_VALUES } from "./professionalRoles"; 
 
@@ -161,7 +161,10 @@ interface ProfileData {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    const method = event?.httpMethod || event?.requestContext?.http?.method;
+    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
+    // APIGatewayProxyEvent is strictly for REST API (v1), hence the type error without the cast.
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+    
     if (method === "OPTIONS") return { statusCode: 204, headers: CORS_HEADERS, body: "" };
 
     try {

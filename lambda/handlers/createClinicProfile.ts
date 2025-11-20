@@ -1,24 +1,17 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { DynamoDBClient, GetItemCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
+import { 
+    DynamoDBClient, 
+    GetItemCommand, 
+    PutItemCommand, 
+    AttributeValue // Import this from the SDK
+} from "@aws-sdk/client-dynamodb";
 // Assuming validateToken is a utility function in a local file
 import { validateToken } from "./utils";
 
 // --- Type Definitions ---
 
-// Type for DynamoDB AttributeValue structure (S, N, B, L, M, etc.)
-interface AttributeValue {
-    S?: string;
-    N?: string;
-    BOOL?: boolean;
-    L?: AttributeValue[];
-    SS?: string[];
-    // Include others as needed
-}
-
-// Interface for the DynamoDB Item structure used for PutItemCommand
-interface DynamoDBItem {
-    [key: string]: AttributeValue;
-}
+// DELETE THE MANUAL INTERFACE 'AttributeValue' HERE. 
+// We use the one imported from @aws-sdk/client-dynamodb instead.
 
 // Interface for the expected request body data structure
 interface ClinicProfileData {
@@ -34,7 +27,6 @@ interface ClinicProfileData {
     num_doctors?: number;
     booking_out_period?: string;
     free_parking_available?: boolean;
-    // Allow for other dynamic string/boolean/number/array fields
     [key: string]: any;
 }
 
@@ -63,9 +55,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     try {
         // 1. Authorization and Input Parsing
-        // validateToken must return the user's sub (string)
         const userSub: string = await validateToken(event);
-
         const profileData: ClinicProfileData = JSON.parse(event.body || '{}');
 
         // Required fields check
@@ -105,7 +95,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
-        // Check if userSub is in the AssociatedUsers list (L: list of strings)
+        // Check if userSub is in the AssociatedUsers list
         const associatedUsers = clinicItem.AssociatedUsers?.L?.map(u => u.S) || [];
         if (!associatedUsers.includes(userSub)) {
             console.warn(`[AUTH] User ${userSub} is not associated with clinic ${profileData.clinicId}.`);
@@ -116,8 +106,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
-        // 3. ✅ Build the item with composite key (clinicId + userSub)
-        const item: DynamoDBItem = {
+        // 3. ✅ Build the item using Record<string, AttributeValue>
+        // This ensures it matches the type expected by PutItemCommand
+        const item: Record<string, AttributeValue> = {
             clinicId: { S: profileData.clinicId },
             userSub: { S: userSub },
             practice_type: { S: profileData.practice_type },
@@ -125,27 +116,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             primary_contact_first_name: { S: profileData.primary_contact_first_name },
             primary_contact_last_name: { S: profileData.primary_contact_last_name },
 
-            // Boolean fields with defaults
             assisted_hygiene_available: { BOOL: profileData.assisted_hygiene_available ?? false },
             free_parking_available: { BOOL: profileData.free_parking_available ?? false },
 
-            // Number fields converted to DynamoDB string format with defaults
             number_of_operatories: { N: (profileData.number_of_operatories ?? 0).toString() },
             num_hygienists: { N: (profileData.num_hygienists ?? 0).toString() },
             num_assistants: { N: (profileData.num_assistants ?? 0).toString() },
             num_doctors: { N: (profileData.num_doctors ?? 0).toString() },
 
-            // String field with default
             booking_out_period: { S: profileData.booking_out_period ?? "immediate" },
 
-            // Metadata fields
             createdAt: { S: timestamp },
             updatedAt: { S: timestamp }
         };
 
-        // 4. ✅ Add optional dynamic fields (maintains original functionality)
+        // 4. ✅ Add optional dynamic fields
         Object.entries(profileData).forEach(([key, value]) => {
-            // Check if the key isn't already defined in the standard item and has a value
             if (!item[key] && value !== undefined) {
                 if (typeof value === "string") {
                     item[key] = { S: value };
@@ -154,12 +140,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 } else if (typeof value === "number") {
                     item[key] = { N: value.toString() };
                 } else if (Array.isArray(value)) {
-                    // Assuming all array elements are strings for SS (String Set)
-                    // If the array is empty, store a single empty string for safety (matching original logic)
                     const stringArray = value.filter(v => typeof v === 'string') as string[];
                     item[key] = { SS: stringArray.length > 0 ? stringArray : [""] };
                 }
-                // Ignore other types (objects, undefined, etc.)
             }
         });
 
@@ -167,7 +150,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamodb.send(new PutItemCommand({
             TableName: process.env.CLINIC_PROFILES_TABLE,
             Item: item,
-            // Condition to ensure profile creation is idempotent (only create if it doesn't exist)
             ConditionExpression: "attribute_not_exists(clinicId) AND attribute_not_exists(userSub)"
         }));
 
@@ -194,7 +176,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
-        // Generic error response
         return {
             statusCode: 500,
             headers: corsHeaders,

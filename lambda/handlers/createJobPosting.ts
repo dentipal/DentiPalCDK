@@ -7,15 +7,10 @@ import {
     GetItemCommandOutput
 } from "@aws-sdk/client-dynamodb";
 import { v4 as uuidv4 } from "uuid";
-import { validateToken } from "./utils"; // Assumed dependency
-import { VALID_ROLE_VALUES } from "./professionalRoles"; // Assumed dependency
+import { validateToken } from "./utils"; 
+import { VALID_ROLE_VALUES } from "./professionalRoles";
 
 // --- Type Definitions ---
-
-// Simplified type for the expected DynamoDB Item structure
-interface DynamoDBItem {
-    [key: string]: AttributeValue;
-}
 
 // 1. Base Job Interface (Common Fields)
 interface BaseJobData {
@@ -156,8 +151,7 @@ const validatePermanentJob = (jobData: PermanentJobData): string | null => {
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     try {
         // 1. Authorization and Parsing
-        const userSub: string = await validateToken(event); // This user should be a clinic user
-        // Cast the parsed body to the general JobData type for initial validation
+        const userSub: string = await validateToken(event); 
         const jobData: JobData = JSON.parse(event.body || '{}');
 
         // 2. Validate common required fields
@@ -244,18 +238,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const clinicAddress: ClinicAddress = {
             addressLine1: cItem.addressLine1.S,
-            addressLine2: cItem.addressLine2?.S || '', // Optional fields
-            addressLine3: cItem.addressLine3?.S || '', // Optional fields
+            addressLine2: cItem.addressLine2?.S ?? "", // Use nullish coalescing to ensure string
+            addressLine3: cItem.addressLine3?.S ?? "", // Use nullish coalescing to ensure string
             fullAddress: `${cItem.addressLine1.S} ${cItem.addressLine2?.S || ''} ${cItem.addressLine3?.S || ''}`.trim(),
             city: cItem.city.S,
             state: cItem.state.S,
             pincode: cItem.pincode.S
         };
 
-
         // 5. Fetch profile details from the CLINIC_PROFILES_TABLE
         const profileCommand = new GetItemCommand({
-            TableName: process.env.CLINIC_PROFILES_TABLE, // Table holds composite key (clinicId + userSub)
+            TableName: process.env.CLINIC_PROFILES_TABLE,
             Key: {
                 clinicId: { S: jobData.clinicId },
                 userSub: { S: userSub }
@@ -280,19 +273,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             primaryPracticeArea: clinicProfile.primary_practice_area?.S || "General Dentistry"
         };
 
-        // 6. Build base DynamoDB item (common fields)
-        const item: DynamoDBItem = {
+        // 6. Build base DynamoDB item using standard Record<string, AttributeValue>
+        const item: Record<string, AttributeValue> = {
             clinicUserSub: { S: userSub },
             jobId: { S: jobId },
             clinicId: { S: jobData.clinicId },
             job_type: { S: jobData.job_type },
             professional_role: { S: jobData.professional_role },
             shift_speciality: { S: jobData.shift_speciality },
-            assisted_hygiene: { BOOL: jobData.assisted_hygiene ?? false }, // Use nullish coalescing for default
+            assisted_hygiene: { BOOL: jobData.assisted_hygiene ?? false },
             status: { S: jobData.status || 'active' },
             createdAt: { S: timestamp },
             updatedAt: { S: timestamp },
-            // Address details
+            // Address details - explicitly safe because we initialized them above
             addressLine1: { S: clinicAddress.addressLine1 },
             addressLine2: { S: clinicAddress.addressLine2 },
             addressLine3: { S: clinicAddress.addressLine3 },
@@ -364,12 +357,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
             case 'permanent':
                 const permanentJob = jobData as PermanentJobData;
-                item.job_title = { S: permanentJob.job_title };
-                item.job_description = { S: permanentJob.job_description };
+                if (permanentJob.job_title) item.job_title = { S: permanentJob.job_title };
+                if (permanentJob.job_description) item.job_description = { S: permanentJob.job_description };
                 item.employment_type = { S: permanentJob.employment_type };
                 item.salary_min = { N: permanentJob.salary_min.toString() };
                 item.salary_max = { N: permanentJob.salary_max.toString() };
-                item.benefits = { SS: permanentJob.benefits }; // Benefits is guaranteed array by validation
+                item.benefits = { SS: permanentJob.benefits }; 
                 if (permanentJob.vacation_days !== undefined) {
                     item.vacation_days = { N: permanentJob.vacation_days.toString() };
                 }
@@ -393,7 +386,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 8. Save the job posting in DynamoDB
         await dynamodb.send(new PutItemCommand({
-            TableName: process.env.JOB_POSTINGS_TABLE, // Assumed ENV var
+            TableName: process.env.JOB_POSTINGS_TABLE,
             Item: item
         }));
 
@@ -403,7 +396,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             body: JSON.stringify(responseData),
             headers: {
                 'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*', // Add CORS to response
+                'Access-Control-Allow-Origin': '*',
             }
         };
 
