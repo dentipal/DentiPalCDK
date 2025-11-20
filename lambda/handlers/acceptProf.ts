@@ -12,7 +12,7 @@ import {
     PutEventsCommandInput,
 } from "@aws-sdk/client-eventbridge";
 import { APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils";
+import {  extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -97,20 +97,30 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
             return { statusCode: 200, headers: CORS_HEADERS, body: "" };
         }
 
-        // Step 1: Authenticate Clinic
-        const clinicUserSub: string = await validateToken(event);
-        console.log("Authenticated clinic:", clinicUserSub);
+        // Step 1: Authenticate Clinic - Extract access token from Authorization header
+        let clinicUserSub: string;
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            clinicUserSub = userInfo.sub;
+            console.log("Authenticated clinic:", clinicUserSub);
+            
+            // Step 1.5 — Authorize by Cognito group from token
+            const groups: string[] = userInfo.groups || [];
+            console.log("Caller groups:", groups);
 
-        // Step 1.5 — Authorize by Cognito group
-        const groups: string[] = getCognitoGroups(event);
-        console.log("Caller groups:", groups);
+            const ALLOWED: Set<string> = new Set(["Root", "ClinicAdmin", "ClinicManager"]);
+            const isAllowed: boolean = groups.some((g) => ALLOWED.has(g));
 
-        const ALLOWED: Set<string> = new Set(["Root", "ClinicAdmin", "ClinicManager"]);
-        const isAllowed: boolean = groups.some((g) => ALLOWED.has(g));
-
-        if (!isAllowed) {
-            return json(403, {
-                error: "Access denied: Only Root, ClinicAdmin, or ClinicManager can accept a professional."
+            if (!isAllowed) {
+                return json(403, {
+                    error: "Access denied: Only Root, ClinicAdmin, or ClinicManager can accept a professional."
+                });
+            }
+        } catch (authError: any) {
+            console.error("Authentication failed:", authError.message);
+            return json(401, {
+                error: authError.message || "Invalid access token"
             });
         }
 

@@ -5,7 +5,7 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils"; // Assuming validateToken is in utils.ts
+import { extractUserFromBearerToken } from "./utils"; // Assuming extractUserFromBearerToken is in utils.ts
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -41,9 +41,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Step 1: Authenticate and get user sub
-        // We cast event to 'any' for the validateToken utility
-        const userSub: string = await validateToken(event as any);
+        // Step 1: Authenticate and get user sub - Extract access token
+        let userSub: string;
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+        } catch (authError: any) {
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: authError.message || "Invalid access token"
+                })
+            };
+        }
         
         // Step 2: Parse body and validate required fields
         const addressData: AddressRequestBody = JSON.parse(event.body || "{}");

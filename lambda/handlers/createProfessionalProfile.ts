@@ -4,7 +4,7 @@ import {
     PutItemCommand,
     AttributeValue
 } from "@aws-sdk/client-dynamodb";
-import { validateToken } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils"; 
 import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles"; 
 
 // ✅ ADDED THIS LINE:
@@ -42,8 +42,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Authorization and Parsing
-        const userSub: string = await validateToken(event);
+        // 1. Authorization and Parsing - Extract access token
+        let userSub: string;
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+        } catch (authError: any) {
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: authError.message || "Invalid access token"
+                })
+            };
+        }
         const profileData: ProfessionalProfileData = JSON.parse(event.body || '{}');
 
         // 2. Validate required fields

@@ -10,7 +10,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuid } from "uuid"; // Import v4 for UUID generation
-import { validateToken } from "./utils"; // Import validateToken function (assuming it's in utils.ts)
+import { extractUserFromBearerToken } from "./utils"; // Import extractUserFromBearerToken function (assuming it's in utils.ts)
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -85,8 +85,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("Job ID extracted from path:", jobId);
 
         // Step 2: Extract and validate user token and parse application data
-        // We cast event to 'any' here because APIGatewayProxyEvent doesn't include the Cognito claims object by default.
-        const userSub: string = await validateToken(event as any); 
+        // Extract access token from Authorization header
+        let userSub: string;
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+        } catch (authError: any) {
+            return json(401, {
+                error: authError.message || "Invalid access token"
+            });
+        }
         const applicationData: ApplicationRequestBody = JSON.parse(event.body || "{}");
 
         console.log("Parsed application data:", applicationData);

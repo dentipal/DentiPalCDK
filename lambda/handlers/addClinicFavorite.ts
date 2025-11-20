@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -30,9 +30,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Step 1: Authenticate the clinic user
-        // We cast event to 'any' because APIGatewayProxyEvent doesn't include the Cognito claims object by default
-        const userSub: string = await validateToken(event as any); 
+        // Step 1: Authenticate the clinic user - Extract access token
+        let userSub: string;
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+        } catch (authError: any) {
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: authError.message || "Invalid access token"
+                })
+            };
+        }
 
         // Step 2: Parse the request body
         const favoriteData: FavoriteRequestBody = JSON.parse(event.body || "{}");

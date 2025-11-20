@@ -10,7 +10,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 
 // Assuming these modules exist and export the correct functions/values
-import { validateToken } from "./utils";
+import { validateToken, extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -162,7 +162,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        const userSub: string = await validateToken(event as any); // clinic user
+        let userSub: string;
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+        } catch (authError: any) {
+            return json(401, {
+                error: authError.message || "Invalid access token"
+            });
+        }
 
         // ---- Group authorization (Root, ClinicAdmin, ClinicManager only) ----
         const rawGroups: string[] = parseGroupsFromAuthorizer(event);

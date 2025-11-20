@@ -7,8 +7,8 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming validateToken exists in a local utility file
-import { validateToken } from "./utils";
+// Assuming extractUserFromBearerToken exists in a local utility file
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -97,8 +97,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return { statusCode: 200, headers: CORS_HEADERS, body: "" };
         }
 
-        // Step 1: Authenticate user
-        const userSub: string = await validateToken(event as any);
+        // Step 1: Authenticate user - Extract access token
+        let userSub: string;
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+        } catch (authError: any) {
+            return json(401, {
+                error: authError.message || "Invalid access token"
+            });
+        }
         
         // ... rest of your code remains the same ...
         const queryParams = event.queryStringParameters || {};
