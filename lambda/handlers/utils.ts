@@ -1,7 +1,7 @@
 import { 
     DynamoDBClient, 
     GetItemCommand, 
-    GetItemCommandInput,
+    GetItemCommandInput, 
     GetItemCommandOutput,
     AttributeValue
 } from "@aws-sdk/client-dynamodb";
@@ -64,22 +64,12 @@ export const isRoot = (groups: string[]): boolean => groups.includes('Root');
 /**
  * Checks if a user has access to a specific clinic and optionally verifies the required access level.
  * Access is granted if the user is 'Root' or if an entry exists in the USER_CLINIC_ASSIGNMENTS_TABLE.
- * * NOTE: The original JS implementation of `isRoot` passed an empty array to `isRoot`, 
- * which would incorrectly return `false`. I've assumed the intent was to check if the user 
- * in the context has 'Root' permissions if available, but since we don't have the context 
- * groups here, the function assumes the caller handles the global root check or that the 
- * empty array logic is sufficient for the original system's flow.
- * * For correct logic, the caller must pass the user's groups. Since this utility file doesn't 
- * have the groups globally, the caller must handle the root check externally or pass the groups.
- * The implementation below simplifies the original logic's structure.
  * * @param userSub - The user's unique identifier.
  * @param clinicId - The clinic's unique identifier.
- * @param requiredAccess - Optional access level (e.g., 'Admin').
+ * @param requiredAccess - Optional access level (e.g., 'ClinicAdmin').
  * @returns True if access is granted.
  */
 export const hasClinicAccess = async (userSub: string, clinicId: string, requiredAccess: AccessLevel | null = null): Promise<boolean> => {
-    // If we had groups here, we'd check: if (isRoot(userGroups)) return true;
-    
     const command: GetItemCommandInput = {
         TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
         Key: { 
@@ -89,28 +79,36 @@ export const hasClinicAccess = async (userSub: string, clinicId: string, require
         ProjectionExpression: requiredAccess ? "accessLevel" : undefined
     };
 
-    const response: GetItemCommandOutput = await dynamoClient.send(new GetItemCommand(command));
-    
-    if (!response.Item) {
+    try {
+        const response: GetItemCommandOutput = await dynamoClient.send(new GetItemCommand(command));
+        
+        if (!response.Item) {
+            return false;
+        }
+        
+        if (!requiredAccess) {
+            return true; // Item exists, access granted
+        }
+        
+        const accessLevel: string | undefined = response.Item.accessLevel?.S;
+        return accessLevel === requiredAccess;
+    } catch (error) {
+        console.error("Error checking clinic access:", error);
         return false;
     }
-    
-    if (!requiredAccess) {
-        return true; // Item exists, access granted
-    }
-    
-    const accessLevel: string | undefined = response.Item.accessLevel?.S;
-    return accessLevel === requiredAccess;
 };
 
 /**
  * Ensures the user is authenticated by checking for the 'sub' claim and throws an error if missing.
+ * Handles both REST API (claims) and HTTP API (jwt.claims) structures.
  * @param event - The Lambda event object.
  * @returns The user's unique identifier (userSub).
  * @throws {Error} if the user is not authenticated.
  */
 export const validateToken = (event: APIGatewayProxyEvent): string => {
-    const userSub: string | undefined = event.requestContext.authorizer?.claims?.sub;
+    // Cast to any to handle both REST Authorizer structure and HTTP API JWT structure
+    const authorizer = (event.requestContext as any).authorizer;
+    const userSub: string | undefined = authorizer?.claims?.sub || authorizer?.jwt?.claims?.sub;
     
     if (!userSub) {
         throw new Error("User not authenticated or token invalid");
@@ -125,7 +123,9 @@ export const validateToken = (event: APIGatewayProxyEvent): string => {
  * @returns A UserInfo object containing claims or null if not authenticated.
  */
 export const verifyToken = async (event: APIGatewayProxyEvent): Promise<UserInfo | null> => {
-    const claims: Record<string, any> | undefined = event.requestContext.authorizer?.claims;
+    // Cast to any to handle both REST Authorizer structure and HTTP API JWT structure
+    const authorizer = (event.requestContext as any).authorizer;
+    const claims: Record<string, any> | undefined = authorizer?.claims || authorizer?.jwt?.claims;
     
     if (!claims || !claims.sub) {
         return null;
@@ -133,7 +133,7 @@ export const verifyToken = async (event: APIGatewayProxyEvent): Promise<UserInfo
 
     const groupsClaim = claims['cognito:groups'];
     const groups: string[] = typeof groupsClaim === 'string'
-        ? groupsClaim.split(',').map(g => g.trim()).filter(g => g.length > 0)
+        ? groupsClaim.split(',').map((g: string) => g.trim()).filter((g: string) => g.length > 0)
         : Array.isArray(groupsClaim)
         ? groupsClaim
         : [];

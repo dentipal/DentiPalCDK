@@ -10,11 +10,20 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming 'validateToken' is defined in './utils' and returns the userSub string.
 import { validateToken } from "./utils"; 
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
 const dynamodb: DynamoDBClient = new DynamoDBClient({ region: REGION });
-const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; // Non-null assertion for environment variable
+const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; 
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // --- 2. Type Definitions ---
 
@@ -46,24 +55,33 @@ interface JobItem {
  * Enforces ownership and job type validation.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // Validate the token and get the userSub (clinic owner)
-        const userSub: string = await validateToken(event); 
+        const userSub: string = await validateToken(event as any); 
 
-        // Extract jobId from the proxy path (e.g., /.../jobs/temporary/{jobId}/...)
-        const pathParts: string[] | undefined = event.pathParameters?.proxy?.split('/'); 
-        // Assumes path is structured such that jobId is the third part of the proxy parameter (index 2)
-        const jobId: string | undefined = pathParts?.[2]; 
+        // Extract jobId. Support both standard path param and proxy path parsing.
+        let jobId: string | undefined = event.pathParameters?.jobId;
+        
+        if (!jobId && event.pathParameters?.proxy) {
+             // Assumes path is structured like /jobs/temporary/{jobId}/...
+             const pathParts = event.pathParameters.proxy.split('/'); 
+             jobId = pathParts[2]; 
+        }
 
         if (!jobId) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "jobId is required in path parameters" })
-            };
+            return json(400, { error: "jobId is required in path parameters" });
         }
 
         if (!event.body) {
-             return { statusCode: 400, body: JSON.stringify({ error: "Request body is required." }) };
+             return json(400, { error: "Request body is required." });
         }
 
         const updateData: UpdateTemporaryJobBody = JSON.parse(event.body);
@@ -72,29 +90,47 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const getParams: GetItemCommandInput = {
             TableName: JOB_POSTINGS_TABLE,
             Key: {
-                clinicUserSub: { S: userSub },
-                jobId: { S: jobId }
+                jobId: { S: jobId } // Use Global Secondary Index or if jobId is PK
+                // Note: If table uses composite key (clinicUserSub + jobId), we must provide both.
+                // Based on your provided code snippet, it used a composite key check.
+                // If jobId is unique globally (UUID), a simple GetItem might require the PK structure.
+                // Assuming standard DynamoDB GetItem requires full Primary Key.
+                // If your table PK is clinicUserSub and SK is jobId:
+                // clinicUserSub: { S: userSub },
+                // jobId: { S: jobId }
             }
         };
+        
+        // *CRITICAL FIX*: The previous snippet assumed a specific Key structure. 
+        // If your table's Primary Key is ONLY jobId, remove `clinicUserSub`.
+        // If it is `clinicId` + `jobId`, or `clinicUserSub` + `jobId`, you must supply both.
+        // Based on typical Single Table Design or standard UUID keys:
+        // I will attempt to use Scan or Query if the PK structure is uncertain, 
+        // OR proceed with the provided assumption that we know the PK.
+        // Reverting to the specific key structure used in your provided input code:
+        const getCommandInput: GetItemCommandInput = {
+             TableName: JOB_POSTINGS_TABLE,
+             Key: {
+                // Assuming Partition Key is 'jobId' for this table based on other deleteJob examples,
+                // OR adhering to the previous user input if they used composite keys.
+                // Your provided snippet used { clinicUserSub, jobId }. I will respect that.
+                clinicUserSub: { S: userSub },
+                jobId: { S: jobId }
+             }
+        };
 
-        const jobResponse: GetItemCommandOutput = await dynamodb.send(new GetItemCommand(getParams));
+        const jobResponse: GetItemCommandOutput = await dynamodb.send(new GetItemCommand(getCommandInput));
         const existingJob: JobItem | undefined = jobResponse.Item as JobItem | undefined;
 
         if (!existingJob) {
-            return {
-                statusCode: 404,
-                body: JSON.stringify({ error: "Temporary job not found or access denied" })
-            };
+            return json(404, { error: "Temporary job not found or access denied" });
         }
         
         // Verify it's the correct job type
         if (existingJob.job_type?.S !== 'temporary') {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({
-                    error: "This is not a temporary job. Use the appropriate endpoint for this job type."
-                })
-            };
+            return json(400, {
+                error: "This is not a temporary job. Use the appropriate endpoint for this job type."
+            });
         }
 
         // --- Step 2: Build update expression and attribute values ---
@@ -122,7 +158,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                      attributeValues[attrValueKey] = { BOOL: value as boolean };
                  } else if (type === 'SS') {
                     if (Array.isArray(value) && value.every(item => typeof item === 'string')) {
-                       attributeValues[attrValueKey] = { SS: value as string[] };
+                        // DynamoDB doesn't accept empty sets
+                        if (value.length > 0) {
+                            attributeValues[attrValueKey] = { SS: value as string[] };
+                        } else {
+                            // If empty array passed for SS, we might want to remove the attribute or ignore.
+                            // Here we ignore to prevent DB errors.
+                            return; 
+                        }
                     } else {
                        console.warn(`Skipping update: Invalid value provided for SS field ${dbName}.`);
                        return;
@@ -141,14 +184,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         addUpdateField('endTime', 'end_time', 'S');
         addUpdateField('hourlyRate', 'hourly_rate', 'N');
         addUpdateField('mealBreak', 'meal_break', 'BOOL');
-        // Note: professional_role and shift_speciality are often common fields but not included in original JS data mapping for temporary job.
 
         // Check if any fields were provided
         if (fieldsUpdatedCount === 0) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "No updateable fields provided in the request body." })
-            };
+            return json(400, { error: "No updateable fields provided in the request body." });
         }
         
         // Always update the timestamp
@@ -177,27 +216,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const updatedJob = updateResponse.Attributes;
 
         // --- Step 4: Return structured response ---
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                message: "Temporary job updated successfully",
-                job: {
-                    jobId: updatedJob?.jobId?.S || jobId,
-                    jobType: updatedJob?.job_type?.S || 'temporary',
-                    professionalRole: updatedJob?.professional_role?.S || '', // Assuming these exist from initial job creation
-                    jobTitle: updatedJob?.job_title?.S || '',
-                    description: updatedJob?.description?.S || '',
-                    requirements: updatedJob?.requirements?.SS || [],
-                    date: updatedJob?.date?.S || '',
-                    startTime: updatedJob?.start_time?.S || '',
-                    endTime: updatedJob?.end_time?.S || '',
-                    hourlyRate: updatedJob?.hourly_rate?.N ? parseFloat(updatedJob.hourly_rate.N) : 0,
-                    mealBreak: updatedJob?.meal_break?.BOOL || false,
-                    status: updatedJob?.status?.S || 'active',
-                    updatedAt: updatedTimestamp
-                }
-            })
-        };
+        return json(200, {
+            message: "Temporary job updated successfully",
+            job: {
+                jobId: updatedJob?.jobId?.S || jobId,
+                jobType: updatedJob?.job_type?.S || 'temporary',
+                professionalRole: updatedJob?.professional_role?.S || '', 
+                jobTitle: updatedJob?.job_title?.S || '',
+                description: updatedJob?.description?.S || '',
+                requirements: updatedJob?.requirements?.SS || [],
+                date: updatedJob?.date?.S || '',
+                startTime: updatedJob?.start_time?.S || '',
+                endTime: updatedJob?.end_time?.S || '',
+                hourlyRate: updatedJob?.hourly_rate?.N ? parseFloat(updatedJob.hourly_rate.N) : 0,
+                mealBreak: updatedJob?.meal_break?.BOOL || false,
+                status: updatedJob?.status?.S || 'active',
+                updatedAt: updatedTimestamp
+            }
+        });
     }
     catch (error) {
         const err = error as Error;
@@ -205,11 +241,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         const isAuthError = err.message.includes("Unauthorized") || err.message.includes("token");
 
-        return {
-            statusCode: isAuthError ? 401 : 500,
-            body: JSON.stringify({
-                error: err.message || "Failed to update temporary job due to an unexpected server error."
-            })
-        };
+        return json(isAuthError ? 401 : 500, {
+            error: err.message || "Failed to update temporary job due to an unexpected server error."
+        });
     }
 };

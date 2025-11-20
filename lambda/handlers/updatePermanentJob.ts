@@ -10,33 +10,41 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming 'validateToken' is defined in './utils' and returns the userSub string.
 import { validateToken } from "./utils"; 
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
 const dynamodb: DynamoDBClient = new DynamoDBClient({ region: REGION });
-const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; // Non-null assertion for environment variable
+const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; 
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // --- 2. Type Definitions ---
 
-/** Interface for the data expected in the request body (snake_case/camelCase mix from original JS) */
+/** Interface for the data expected in the request body (camelCase) */
 interface UpdatePermanentJobBody {
     // Common fields
-    professional_role?: string;
-    job_title?: string;
-    job_description?: string;
-    shift_speciality?: string;
+    professionalRole?: string;
+    jobTitle?: string;
+    jobDescription?: string;
+    shiftSpeciality?: string;
     requirements?: string[]; // Maps to SS
     
     // Permanent-specific fields
-    employment_type?: 'full_time' | 'part_time';
-    salary_min?: number; // Maps to N
-    salary_max?: number; // Maps to N
+    employmentType?: 'full_time' | 'part_time';
+    salaryMin?: number; // Maps to N
+    salaryMax?: number; // Maps to N
     benefits?: string[]; // Maps to SS
-    vacation_days?: number; // Maps to N
-    work_schedule?: string;
-    start_date?: string;
+    vacationDays?: number; // Maps to N
+    workSchedule?: string;
+    startDate?: string;
     
-    // Original JS uses snake_case here but camelCase in other handlers, normalizing field names
     [key: string]: any; 
 }
 
@@ -55,24 +63,33 @@ interface JobItem {
  * Enforces ownership and job type.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // Validate the token and get the userSub (clinic owner)
-        const userSub: string = validateToken(event); 
+        const userSub: string = await validateToken(event as any); 
 
-        // Extract jobId from the proxy path (e.g., /.../jobs/permanent/{jobId}/...)
-        const pathParts: string[] | undefined = event.pathParameters?.proxy?.split('/'); 
-        // Assumes path is structured such that jobId is the third part of the proxy parameter (index 2)
-        const jobId: string | undefined = pathParts?.[2]; 
+        // Extract jobId. Support both standard path param and proxy path parsing.
+        let jobId: string | undefined = event.pathParameters?.jobId;
+        
+        if (!jobId && event.pathParameters?.proxy) {
+             // Assumes path is structured like /jobs/permanent/{jobId}/...
+             const pathParts = event.pathParameters.proxy.split('/'); 
+             jobId = pathParts[2]; 
+        }
 
         if (!jobId) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "jobId is required in path parameters" })
-            };
+            return json(400, { error: "jobId is required in path parameters" });
         }
         
         if (!event.body) {
-             return { statusCode: 400, body: JSON.stringify({ error: "Request body is required." }) };
+             return json(400, { error: "Request body is required." });
         }
 
         const updateData: UpdatePermanentJobBody = JSON.parse(event.body);
@@ -81,7 +98,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const getParams: GetItemCommandInput = {
             TableName: JOB_POSTINGS_TABLE,
             Key: {
-                // Use clinicUserSub and jobId as the composite key for verified lookup
+                // Using composite key (clinicUserSub + jobId)
                 clinicUserSub: { S: userSub },
                 jobId: { S: jobId }
             }
@@ -91,20 +108,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existingJob: JobItem | undefined = jobResponse.Item as JobItem | undefined;
 
         if (!existingJob) {
-            return {
-                statusCode: 404,
-                body: JSON.stringify({ error: "Permanent job not found or access denied" })
-            };
+            return json(404, { error: "Permanent job not found or access denied" });
         }
         
         // Verify it's the correct job type
         if (existingJob.job_type?.S !== 'permanent') {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({
-                    error: "This is not a permanent job. Use the appropriate endpoint for this job type."
-                })
-            };
+            return json(400, {
+                error: "This is not a permanent job. Use the appropriate endpoint for this job type."
+            });
         }
 
         // --- Step 2: Build update expression and attribute values ---
@@ -114,11 +125,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         let fieldsUpdatedCount: number = 0;
 
         // Helper function for building dynamic updates
-        const addUpdateField = (dataKey: keyof UpdatePermanentJobBody, dbName: string, type: 'S' | 'N' | 'BOOL' | 'SS', expressionName?: string) => {
+        const addUpdateField = (dataKey: keyof UpdatePermanentJobBody, dbName: string, type: 'S' | 'N' | 'BOOL' | 'SS') => {
              const value = updateData[dataKey];
              if (value !== undefined && value !== null) {
                  const attrKey = `#${dbName}`;
-                 const attrValueKey = `:${expressionName || dbName}`;
+                 // Use the dataKey (camelCase) for the value placeholder to ensure uniqueness
+                 const attrValueKey = `:${String(dataKey)}`; 
                  
                  updateExpressions.push(`${attrKey} = ${attrValueKey}`);
                  attributeNames[attrKey] = dbName;
@@ -132,7 +144,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                      attributeValues[attrValueKey] = { BOOL: value as boolean };
                  } else if (type === 'SS') {
                     if (Array.isArray(value) && value.every(item => typeof item === 'string')) {
-                       attributeValues[attrValueKey] = { SS: value as string[] };
+                        if (value.length > 0) {
+                            attributeValues[attrValueKey] = { SS: value as string[] };
+                        } else {
+                            return; // Skip empty sets
+                        }
                     } else {
                        console.warn(`Skipping update: Invalid value provided for SS field ${dbName}.`);
                        return;
@@ -142,29 +158,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
              }
         };
 
-        // Fields to handle
-        addUpdateField('professional_role', 'professional_role', 'S', 'professionalRole');
-        addUpdateField('shift_speciality', 'shift_speciality', 'S', 'shiftSpeciality');
-        addUpdateField('employment_type', 'employment_type', 'S', 'employmentType');
-        addUpdateField('salary_min', 'salary_min', 'N', 'salaryMin');
-        addUpdateField('salary_max', 'salary_max', 'N', 'salaryMax');
+        // Fields to handle (Mapping camelCase Input -> snake_case DB)
+        addUpdateField('professionalRole', 'professional_role', 'S');
+        addUpdateField('shiftSpeciality', 'shift_speciality', 'S');
+        addUpdateField('employmentType', 'employment_type', 'S');
+        addUpdateField('salaryMin', 'salary_min', 'N');
+        addUpdateField('salaryMax', 'salary_max', 'N');
         addUpdateField('benefits', 'benefits', 'SS');
-        addUpdateField('vacation_days', 'vacation_days', 'N', 'vacationDays');
-        addUpdateField('work_schedule', 'work_schedule', 'S', 'workSchedule');
-        addUpdateField('start_date', 'start_date', 'S', 'startDate');
-        addUpdateField('job_title', 'job_title', 'S', 'jobTitle');
-        addUpdateField('job_description', 'job_description', 'S', 'jobDescription'); // Mapping description
+        addUpdateField('vacationDays', 'vacation_days', 'N');
+        addUpdateField('workSchedule', 'work_schedule', 'S');
+        addUpdateField('startDate', 'start_date', 'S');
+        addUpdateField('jobTitle', 'job_title', 'S');
+        addUpdateField('jobDescription', 'job_description', 'S');
         addUpdateField('requirements', 'requirements', 'SS');
 
-        // Check if any fields were provided other than the mandatory timestamp
+        // Check if any fields were provided
         if (fieldsUpdatedCount === 0) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "No updateable fields provided in the request body." })
-            };
+            return json(400, { error: "No updateable fields provided in the request body." });
         }
         
-        // Always update the timestamp (must be done after field check)
+        // Always update the timestamp
         const updatedTimestamp: string = new Date().toISOString();
         updateExpressions.push("#updatedAt = :updatedAt");
         attributeNames["#updatedAt"] = "updated_at";
@@ -178,7 +191,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 jobId: { S: jobId }
             },
             UpdateExpression: `SET ${updateExpressions.join(", ")}`,
-            // Only include ExpressionAttributeNames if needed (i.e., when using aliases like #updatedAt)
             ExpressionAttributeNames: attributeNames,
             ExpressionAttributeValues: attributeValues,
             ReturnValues: "ALL_NEW"
@@ -188,30 +200,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const updatedJob = updateResponse.Attributes;
 
         // --- Step 4: Return structured response ---
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                message: "Permanent job updated successfully",
-                job: {
-                    jobId: updatedJob?.jobId?.S || jobId,
-                    jobType: updatedJob?.job_type?.S || 'permanent',
-                    professionalRole: updatedJob?.professional_role?.S || '',
-                    jobTitle: updatedJob?.job_title?.S || '',
-                    shiftSpeciality: updatedJob?.shift_speciality?.S || '',
-                    employmentType: updatedJob?.employment_type?.S || '',
-                    // Safely parse number types for the response payload
-                    salaryMin: updatedJob?.salary_min?.N ? parseFloat(updatedJob.salary_min.N) : 0,
-                    salaryMax: updatedJob?.salary_max?.N ? parseFloat(updatedJob.salary_max.N) : 0,
-                    benefits: updatedJob?.benefits?.SS || [],
-                    vacationDays: updatedJob?.vacation_days?.N ? parseInt(updatedJob.vacation_days.N, 10) : 0,
-                    workSchedule: updatedJob?.work_schedule?.S || '',
-                    startDate: updatedJob?.start_date?.S || '',
-                    jobDescription: updatedJob?.job_description?.S || '',
-                    requirements: updatedJob?.requirements?.SS || [],
-                    updatedAt: updatedTimestamp
-                }
-            })
-        };
+        return json(200, {
+            message: "Permanent job updated successfully",
+            job: {
+                jobId: updatedJob?.jobId?.S || jobId,
+                jobType: updatedJob?.job_type?.S || 'permanent',
+                professionalRole: updatedJob?.professional_role?.S || '',
+                jobTitle: updatedJob?.job_title?.S || '',
+                shiftSpeciality: updatedJob?.shift_speciality?.S || '',
+                employmentType: updatedJob?.employment_type?.S || '',
+                salaryMin: updatedJob?.salary_min?.N ? parseFloat(updatedJob.salary_min.N) : 0,
+                salaryMax: updatedJob?.salary_max?.N ? parseFloat(updatedJob.salary_max.N) : 0,
+                benefits: updatedJob?.benefits?.SS || [],
+                vacationDays: updatedJob?.vacation_days?.N ? parseInt(updatedJob.vacation_days.N, 10) : 0,
+                workSchedule: updatedJob?.work_schedule?.S || '',
+                startDate: updatedJob?.start_date?.S || '',
+                jobDescription: updatedJob?.job_description?.S || '',
+                requirements: updatedJob?.requirements?.SS || [],
+                updatedAt: updatedTimestamp
+            }
+        });
 
     } catch (error) {
         const err = error as Error;
@@ -219,11 +227,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         const isAuthError = err.message.includes("Unauthorized") || err.message.includes("token");
 
-        return {
-            statusCode: isAuthError ? 401 : 500,
-            body: JSON.stringify({
-                error: err.message || "Failed to update permanent job due to an unexpected server error."
-            })
-        };
+        return json(isAuthError ? 401 : 500, {
+            error: err.message || "Failed to update permanent job due to an unexpected server error."
+        });
     }
 };

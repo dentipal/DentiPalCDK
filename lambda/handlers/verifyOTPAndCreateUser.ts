@@ -8,15 +8,18 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { 
     SESClient, 
-    SendEmailCommand,
+    SendEmailCommand, 
     SendEmailCommandInput
 } from "@aws-sdk/client-ses";
 import { 
     SNSClient, 
-    PublishCommand,
+    PublishCommand, 
     PublishCommandInput
 } from "@aws-sdk/client-sns";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -132,7 +135,7 @@ function createCongratulationsEmail(fullName: string, userType: string): EmailCo
     const featureListText: string = userType === 'professional' ? `
 What's Next:
 ✅ Complete your professional profile
-🔍 Browse available job opportunities  
+🔍 Browse available job opportunities 
 📧 Get notified about relevant positions
 💬 Connect with dental clinics
 👥 Refer friends and earn rewards
@@ -171,6 +174,8 @@ Welcome to the future of dental staffing!
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     console.log('📥 Received event:', JSON.stringify(event, null, 2));
     
+    // ❌ REMOVED INLINE CORS DEFINITION
+    /*
     // Pre-define CORS headers for all responses
     const responseHeaders: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -178,9 +183,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
+    */
 
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: responseHeaders, body: "" };
+        // ✅ Uses imported headers
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
     
     try {
@@ -195,7 +202,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error('❌ Failed to parse request body:', parseError);
             return {
                 statusCode: 400,
-                headers: responseHeaders,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Invalid JSON or missing fields in request body",
                     success: false
@@ -209,7 +216,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!verifyData.email || !verifyData.confirmationCode) {
             return {
                 statusCode: 400,
-                headers: responseHeaders,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Required fields: email, confirmationCode",
                     success: false
@@ -259,7 +266,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
             return {
                 statusCode,
-                headers: responseHeaders,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: errorMessage,
                     success: false,
@@ -376,7 +383,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 201,
-            headers: responseHeaders,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify(successResponse)
         };
 
@@ -385,7 +392,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         return {
             statusCode: 500,
-            headers: responseHeaders,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 error: "Internal server error during verification",
                 success: false,
