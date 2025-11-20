@@ -31,6 +31,13 @@ const NEGOTIATIONS_TABLE: string =
 
 const ddb = new DynamoDBClient({ region: REGION });
 
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): any => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
 
 
 // ---------- helpers ----------
@@ -211,13 +218,13 @@ export const handler = async (event: any) => {
   try {
     const clinicId = getClinicIdFromPath(event);
     if (!clinicId) {
-      return {
+      return json(400, {
+        error: "Bad Request",
         statusCode: 400,
-        headers: CORS_HEADERS,
-        body: JSON.stringify({
-          error: "clinicId is required (path: /{clinicId}/jobs)",
-        }),
-      };
+        message: "Clinic ID is required",
+        details: { pathFormat: "/{clinicId}/jobs" },
+        timestamp: new Date().toISOString()
+      });
     }
 
     const jobs = await listClinicJobs(clinicId);
@@ -294,28 +301,29 @@ export const handler = async (event: any) => {
     console.log(`Returning ${grouped.length} job buckets with applicants`);
     console.log("============= 🟩 getJobApplicationsForClinic END");
 
-    return {
+    return json(200, {
+      status: "success",
       statusCode: 200,
-      headers: CORS_HEADERS,
-      body: JSON.stringify({
-        clinicId,
+      message: "Clinic job applications retrieved successfully",
+      data: {
+        clinicId: clinicId,
         jobs: grouped,
         totalApplicants: grouped.reduce(
           (s: number, r: any) => s + (r.applicants?.length || 0),
           0
-        ),
-      }),
-    };
+        )
+      },
+      timestamp: new Date().toISOString()
+    });
   } catch (err: any) {
     console.error("❌ Handler error:", err);
     console.log("============= 🟥 getJobApplicationsForClinic END (ERROR)");
-    return {
+    return json(500, {
+      error: "Internal Server Error",
       statusCode: 500,
-      headers: CORS_HEADERS,
-      body: JSON.stringify({
-        error: "Failed to fetch clinic job applicants",
-        details: err.message,
-      }),
-    };
+      message: "Failed to fetch clinic job applicants",
+      details: { reason: err.message },
+      timestamp: new Date().toISOString()
+    });
   }
 };

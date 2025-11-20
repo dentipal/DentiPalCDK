@@ -54,22 +54,7 @@ interface JobPosting {
     [key: string]: any; // Allow other properties
 }
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Define CORS headers
-const headers = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent",
-    "Access-Control-Allow-Methods": "OPTIONS,GET",
-};
-*/
 
-/**
- * Helper to fetch clinic info given clinic userSub.
- * This is primarily for clinic name and contact.
- * @param clinicUserSub The userSub (Partition Key) of the clinic profile.
- * @returns ClinicInfo object or undefined.
- */
 async function fetchClinicInfo(clinicUserSub: string): Promise<ClinicInfo | undefined> {
     try {
         const clinicCommand = new GetItemCommand({

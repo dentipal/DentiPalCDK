@@ -16,18 +16,14 @@ import { CORS_HEADERS } from "./corsHeaders";
 // Initialize the DynamoDB client
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
 
-// ❌ REMOVED INLINE HEADERS DEFINITION
-/*
-type CorsHeaders = Record<string, string>;
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
-// Shared headers for the response
-const HEADERS: CorsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Content-Type": "application/json",
-};
-*/
+
 
 // Define the expected structure for the request body
 interface ClinicRequestBody {
@@ -112,11 +108,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const groups: string[] = parseGroupsFromAuthorizer(event);
 
         if (!canCreateClinic(groups)) {
-            return {
+            return json(403, {
+                error: "Forbidden",
                 statusCode: 403,
-                headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
-                body: JSON.stringify({ error: "Only Root or Clinic Admin can create clinics" }),
-            };
+                message: "Access denied",
+                details: { requiredGroups: ["Root", "ClinicAdmin"] },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Step 2: Input Validation and Parsing
@@ -124,13 +122,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const { name, addressLine1, addressLine2, addressLine3, city, state, pincode } = body;
 
         if (!name || !addressLine1 || !city || !state || !pincode) {
-            return {
+            return json(400, {
+                error: "Bad Request",
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
-                body: JSON.stringify({
-                    error: "Missing required fields: name, addressLine1, city, state, pincode",
-                }),
-            };
+                message: "Missing required fields",
+                details: { requiredFields: ["name", "addressLine1", "city", "state", "pincode"] },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Step 3: Prepare data
@@ -182,12 +180,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamoClient.send(new PutItemCommand(putItemInput));
 
         // Step 5: Return Success Response
-        return {
-            statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
-            body: JSON.stringify({
-                status: "success",
-                message: "Clinic created successfully",
+        return json(201, {
+            status: "success",
+            statusCode: 201,
+            message: "Clinic created successfully",
+            data: {
                 clinic: {
                     clinicId,
                     name,
@@ -201,24 +198,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     createdBy: userSub,
                     createdAt: timestamp,
                     updatedAt: timestamp,
-                    // Note: The response uses an array for associatedUsers, 
-                    // regardless of whether the DB stored it as L or SS.
-                    associatedUsers: [userSub], 
-                },
-            }),
-        };
+                    associatedUsers: [userSub]
+                }
+            },
+            timestamp: new Date().toISOString()
+        });
     } catch (error) {
         // Step 6: Handle Errors
-        const err = error as Error & { message?: string }; // Cast for message property access
+        const err = error as Error & { message?: string };
         console.error("Error creating clinic:", err);
-        return {
-            statusCode: 400,
-            headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
-            body: JSON.stringify({
-                error: "Failed to create clinic",
-                details: err.message || String(error),
-            }),
-        };
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to create clinic",
+            details: { reason: err.message || String(error) },
+            timestamp: new Date().toISOString()
+        });
     }
 };
 

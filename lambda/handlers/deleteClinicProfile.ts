@@ -26,6 +26,13 @@ interface Claims {
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE;
 
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
 // Utility function to handle Base64 URL decoding
 function b64urlToUtf8(b64url: string): string {
     // Support URL-safe base64: pad and replace characters
@@ -49,11 +56,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
         if (!authHeader || !authHeader.startsWith("Bearer ")) {
             console.error("❌ Missing or invalid Authorization header");
-            return {
+            return json(401, {
+                error: "Unauthorized",
                 statusCode: 401,
-                headers: CORS_HEADERS, // ✅ Added headers
-                body: JSON.stringify({ error: "Missing or invalid Authorization header" }),
-            };
+                message: "Missing or invalid Authorization header",
+                details: { reason: "Bearer token required" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const token = authHeader.split(" ")[1];
@@ -61,11 +70,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         if (tokenParts.length !== 3) {
              console.error("❌ Invalid JWT format");
-             return {
+             return json(401, {
+                error: "Unauthorized",
                 statusCode: 401,
-                headers: CORS_HEADERS, // ✅ Added headers
-                body: JSON.stringify({ error: "Invalid token format" }),
-            };
+                message: "Invalid token format",
+                details: { expected: "Valid JWT format" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const payload = tokenParts[1];
@@ -87,11 +98,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.info("📦 Decoded claims:", decodedClaims);
 
         if (!userSub) {
-            return {
+            return json(401, {
+                error: "Unauthorized",
                 statusCode: 401,
-                headers: CORS_HEADERS, // ✅ Added headers
-                body: JSON.stringify({ error: "Missing userSub in token" }),
-            };
+                message: "User identification missing",
+                details: { reason: "No userSub in token" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Authorization check: Must be a clinic user (either via userType or group) OR a root user.
@@ -100,13 +113,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         if (!isClinicUser && !isRootUser) {
             console.warn(`❌ User ${userSub} denied access. Type: ${userType}, Groups: ${groups.join(', ')}`);
-            return {
+            return json(403, {
+                error: "Forbidden",
                 statusCode: 403,
-                headers: CORS_HEADERS, // ✅ Added headers
-                body: JSON.stringify({
-                    error: "Access denied – only clinic or root users can delete a clinic profile",
-                }),
-            };
+                message: "Access denied",
+                details: { requiredUserTypes: ["clinic", "root"] },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Step 2: Extract clinicId from URL path (assuming /path/to/clinicId)
@@ -114,11 +127,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const clinicId = pathParts[pathParts.length - 1];
 
         if (!clinicId || clinicId === 'clinic') { // Basic check for potentially incomplete path
-            return {
+            return json(400, {
+                error: "Bad Request",
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added headers
-                body: JSON.stringify({ error: "Missing or invalid clinicId in path" }),
-            };
+                message: "Clinic ID is required",
+                details: { pathFormat: "/clinic-profiles/{clinicId}" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         console.info("📌 Deleting clinicId:", clinicId, "| userSub:", userSub);
@@ -136,11 +151,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existing = await dynamodb.send(new GetItemCommand(getParams));
 
         if (!existing.Item) {
-            return {
+            return json(404, {
+                error: "Not Found",
                 statusCode: 404,
-                headers: CORS_HEADERS, // ✅ Added headers
-                body: JSON.stringify({ error: "Clinic profile not found" }),
-            };
+                message: "Clinic profile not found",
+                details: { clinicId: clinicId },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Step 4: Delete profile (Standard Client DeleteItemCommand)
@@ -156,22 +173,25 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamodb.send(new DeleteItemCommand(deleteParams));
         console.info(`✅ Clinic account deleted for clinicId: ${clinicId}, userSub: ${userSub}`);
 
-        return {
+        return json(200, {
+            status: "success",
             statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Added headers
-            body: JSON.stringify({
-                message: "Clinic profile deleted successfully",
-                clinicId,
-                deletedAt: new Date().toISOString(),
-            }),
-        };
+            message: "Clinic profile deleted successfully",
+            data: {
+                clinicId: clinicId,
+                deletedAt: new Date().toISOString()
+            },
+            timestamp: new Date().toISOString()
+        });
     } catch (error) {
         const err = error as Error;
         console.error("🔥 Error deleting clinic account:", err);
-        return {
+        return json(500, {
+            error: "Internal Server Error",
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Added headers
-            body: JSON.stringify({ error: err.message || "Failed to delete clinic account" }),
-        };
+            message: "Failed to delete clinic profile",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

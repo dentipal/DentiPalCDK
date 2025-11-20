@@ -67,7 +67,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!applicationData.jobId) {
             console.warn("[VALIDATION] Missing required field: jobId");
-            return json(400, { error: "Required field: jobId" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Job ID is required",
+                details: { requiredFields: ["jobId"] },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const jobId = applicationData.jobId;
@@ -85,7 +91,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobQueryResult = await dynamodb.send(jobQuery);
         if (!jobQueryResult.Items || jobQueryResult.Items.length === 0) {
             console.warn(`[VALIDATION] Job posting not found for jobId: ${jobId}`);
-            return json(404, { error: "Job posting not found" });
+            return json(404, {
+                error: "Not Found",
+                statusCode: 404,
+                message: "Job posting not found",
+                details: { jobId },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const jobItem = jobQueryResult.Items[0];
@@ -94,12 +106,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!clinicId) {
             console.error(`[DATA_ERROR] Job posting ${jobId} is missing clinicId.`);
-            return json(400, { error: "Clinic ID not found in job posting" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Job posting is incomplete",
+                details: { missingField: "clinicId" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         if (jobStatus !== "active") {
             console.warn(`[VALIDATION] Job status is '${jobStatus}'. Cannot apply.`);
-            return json(400, { error: `Cannot apply to ${jobStatus} job posting` });
+            return json(409, {
+                error: "Conflict",
+                statusCode: 409,
+                message: "Cannot apply to this job",
+                details: { currentStatus: jobStatus, reason: "Job is not accepting applications" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 3. ✅ Check if application already exists (PK: jobId, SK: professionalUserSub assumed)
@@ -117,7 +141,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existingApplication = await dynamodb.send(existingApplicationCommand);
         if (existingApplication.Items && existingApplication.Items.length > 0) {
             console.warn(`[CONFLICT] User ${professionalUserSub} already applied to job ${jobId}.`);
-            return json(409, { error: "You have already applied to this job" });
+            return json(409, {
+                error: "Conflict",
+                statusCode: 409,
+                message: "Duplicate application",
+                details: { reason: "You have already applied to this job", jobId },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 4. ✅ Prepare application item
@@ -231,21 +261,29 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 9. ✅ Final response
         return json(201, {
+            status: "success",
+            statusCode: 201,
             message: "Job application submitted successfully",
-            applicationId,
-            jobId,
-            status: hasProposedRate ? "negotiating" : "pending",
-            appliedAt: timestamp,
-            job: jobInfo,
-            clinic: clinicInfo
+            data: {
+                applicationId,
+                jobId,
+                applicationStatus: hasProposedRate ? "negotiating" : "pending",
+                appliedAt: timestamp,
+                job: jobInfo,
+                clinic: clinicInfo
+            },
+            timestamp: new Date().toISOString()
         });
 
     } catch (error) {
         const err = error as Error;
         console.error("Error creating job application:", err);
         return json(500, {
-            error: "Failed to submit job application. Please try again.",
-            details: err.message
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to submit job application",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
         });
     }
 };

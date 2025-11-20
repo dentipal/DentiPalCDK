@@ -77,23 +77,45 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobId: string | undefined = event.pathParameters?.jobId;
         
         if (!event.body) {
-             return json(400, { error: "Request body is required." });
+             return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Request body is required",
+                details: { body: "empty" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const statusData: UpdateStatusBody = JSON.parse(event.body);
 
         if (!jobId) {
-            return json(400, { error: "jobId is required in path" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Job ID is required",
+                details: { location: "path parameters" },
+                timestamp: new Date().toISOString()
+            });
         }
         
         if (!statusData.status) {
-            return json(400, { error: "status is required" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Status is required",
+                details: { requiredField: "status" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Validate that the new status is a recognized value
         if (!(VALID_STATUSES as string[]).includes(statusData.status)) {
             return json(400, {
-                error: `Invalid status. Valid options: ${VALID_STATUSES.join(', ')}`
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid status",
+                details: { validStatuses: VALID_STATUSES, providedStatus: statusData.status },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -111,12 +133,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const currentJobItem: JobItem | undefined = currentJobResponse.Item as JobItem | undefined;
 
         if (!currentJobItem) {
-            return json(404, { error: "Job not found or you don't have permission to update it" });
+            return json(404, {
+                error: "Not Found",
+                statusCode: 404,
+                message: "Job not found",
+                details: { jobId, reason: "Job does not exist or you don't have permission to update it" },
+                timestamp: new Date().toISOString()
+            });
         }
         
         // Ensure job is properly structured before continuing
         if (!currentJobItem.clinicUserSub?.S || currentJobItem.clinicUserSub.S !== userSub) {
-             return json(403, { error: "Access denied - ownership mismatch." });
+             return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Access denied",
+                details: { reason: "Ownership mismatch" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const currentStatus: JobStatus = (currentJobItem.status?.S || 'open') as JobStatus;
@@ -126,17 +160,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const validTransitions: JobStatus[] = VALID_STATUS_TRANSITIONS[currentStatus];
         if (!validTransitions || !validTransitions.includes(newStatus)) {
             return json(400, {
-                error: `Invalid status transition: Cannot transition from ${currentStatus} to ${newStatus}. Valid next states: ${validTransitions.join(', ')}`
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid status transition",
+                details: {
+                    currentStatus,
+                    requestedStatus: newStatus,
+                    validNextStates: validTransitions
+                },
+                timestamp: new Date().toISOString()
             });
         }
 
         // --- Step 3: Validate required fields for specific statuses ---
         if (newStatus === 'scheduled') {
             if (!statusData.acceptedProfessionalUserSub) {
-                return json(400, { error: "acceptedProfessionalUserSub is required for scheduled status" });
+                return json(400, {
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Missing required field for scheduled status",
+                    details: { requiredField: "acceptedProfessionalUserSub", forStatus: "scheduled" },
+                    timestamp: new Date().toISOString()
+                });
             }
             if (!statusData.scheduledDate) {
-                return json(400, { error: "scheduledDate is required for scheduled status" });
+                return json(400, {
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Missing required field for scheduled status",
+                    details: { requiredField: "scheduledDate", forStatus: "scheduled" },
+                    timestamp: new Date().toISOString()
+                });
             }
         }
         
@@ -220,13 +274,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // --- Step 7: Return Success ---
         return json(200, {
+            status: "success",
+            statusCode: 200,
             message: "Job status updated successfully",
-            jobId,
-            previousStatus: currentStatus,
-            newStatus: newStatus,
-            updatedAt: timestamp,
-            acceptedProfessional: statusData.acceptedProfessionalUserSub || null,
-            scheduledDate: statusData.scheduledDate || null
+            data: {
+                jobId,
+                previousStatus: currentStatus,
+                newStatus: newStatus,
+                updatedAt: timestamp,
+                acceptedProfessional: statusData.acceptedProfessionalUserSub || null,
+                scheduledDate: statusData.scheduledDate || null
+            },
+            timestamp: new Date().toISOString()
         });
 
     } catch (error) {
@@ -236,7 +295,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isAuthError = err.message.includes("Unauthorized") || err.message.includes("token");
 
         return json(isAuthError ? 401 : 500, {
-            error: err.message || "Internal server error"
+            error: isAuthError ? "Unauthorized" : "Internal Server Error",
+            statusCode: isAuthError ? 401 : 500,
+            message: isAuthError ? "Authentication failed" : "Failed to update job status",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
         });
     }
 };

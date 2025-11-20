@@ -22,14 +22,6 @@ const PROFESSIONAL_PROFILES_TABLE: string = process.env.PROFESSIONAL_PROFILES_TA
 
 // --- 2. Constants and Type Definitions ---
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-const corsHeaders: Record<string, string> = {
-    "Access-Control-Allow-Origin": process.env.CORS_ALLOWED_ORIGIN || "http://localhost:5173",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-};
-*/
 
 /** Interface for the data expected in the request body */
 interface UpdateProfileBody {

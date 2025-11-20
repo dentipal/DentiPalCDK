@@ -26,20 +26,14 @@ interface ApplicationItem {
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Type for CORS headers
-interface CorsHeaders {
-    [header: string]: string;
-}
 
-// CORS headers
-const CORS: CorsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS"
-};
-*/
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // --- Lambda Handler ---
 
@@ -64,13 +58,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!applicationId) {
             console.warn("[VALIDATION] Missing applicationId in path parameters.");
-            return {
+            return json(400, {
+                error: "Bad Request",
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "applicationId is required in path parameters"
-                })
-            };
+                message: "Application ID is required",
+                details: { pathFormat: "/applications/{applicationId}" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 4. Find the application by scanning (preserving inefficient original logic)
@@ -87,13 +81,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!findResponse.Items || findResponse.Items.length === 0) {
             console.warn(`[DB] Application not found: ${applicationId}`);
-            return {
+            return json(404, {
+                error: "Not Found",
                 statusCode: 404,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "Job application not found"
-                })
-            };
+                message: "Job application not found",
+                details: { applicationId: applicationId },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const applicationFound = findResponse.Items[0] as ApplicationItem;
@@ -103,38 +97,38 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 5. Ensure the application belongs to the requesting user
         if (professionalUserSubFound !== userSub) {
             console.warn(`[AUTH] User ${userSub} attempted to delete application belonging to ${professionalUserSubFound}`);
-            return {
+            return json(403, {
+                error: "Forbidden",
                 statusCode: 403,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "You can only delete your own job applications"
-                })
-            };
+                message: "Access denied",
+                details: { reason: "Can only delete own applications" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 6. Prevent withdrawal of accepted jobs
         const currentStatus = applicationFound.applicationStatus?.S || "pending";
         if (currentStatus === "accepted") {
             console.warn(`[VALIDATION] Cannot withdraw accepted application ${applicationId}`);
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "Cannot withdraw an accepted job application. Please contact the clinic directly."
-                })
-            };
+            return json(409, {
+                error: "Conflict",
+                statusCode: 409,
+                message: "Cannot withdraw accepted application",
+                details: { currentStatus: currentStatus, suggestion: "Contact clinic directly" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // We need both PK (jobId) and SK (professionalUserSub) for DeleteItem
         if (!jobIdFound) {
             console.error(`[DATA_ERROR] Application item ${applicationId} is missing jobId.`);
-            return {
+            return json(500, {
+                error: "Internal Server Error",
                 statusCode: 500,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "Internal data error: Application record is incomplete."
-                })
-            };
+                message: "Application record incomplete",
+                details: { missingField: "jobId" },
+                timestamp: new Date().toISOString()
+            });
         }
 
 
@@ -156,37 +150,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamodb.send(deleteCommand);
 
         // 8. Success Response
-        return {
+        return json(200, {
+            status: "success",
             statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: JSON.stringify({
-                message: "Job application withdrawn successfully",
-                applicationId,
+            message: "Job application withdrawn successfully",
+            data: {
+                applicationId: applicationId,
                 jobId: jobIdFound,
                 withdrawnAt: new Date().toISOString()
-            })
-        };
+            },
+            timestamp: new Date().toISOString()
+        });
     } catch (error) {
         const err = error as Error;
         console.error("Error deleting job application:", err);
 
         if (err.name === "ConditionalCheckFailedException") {
-            return {
+            return json(404, {
+                error: "Not Found",
                 statusCode: 404,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "Job application not found or already deleted"
-                })
-            };
+                message: "Job application not found or already deleted",
+                details: { reason: "Conditional check failed" },
+                timestamp: new Date().toISOString()
+            });
         }
 
-        return {
+        return json(500, {
+            error: "Internal Server Error",
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: JSON.stringify({
-                error: "Failed to withdraw job application. Please try again.",
-                details: err.message
-            })
-        };
+            message: "Failed to withdraw job application",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

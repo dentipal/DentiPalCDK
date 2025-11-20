@@ -49,15 +49,6 @@ interface ClinicResponse {
     updatedAt: string;
 }
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Define common headers
-const HEADERS = {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*", // Allow cross-origin requests
-};
-*/
-
 /**
  * AWS Lambda handler to retrieve details for a specific clinic, subject to access control.
  * @param event The API Gateway event object.
@@ -95,8 +86,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!clinicId) {
             return { 
                 statusCode: 400, 
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "Clinic ID is required in path parameters" }) 
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Clinic ID is required",
+                    details: { pathFormat: "/clinics/{clinicId}" },
+                    timestamp: new Date().toISOString()
+                })
             };
         }
 
@@ -105,8 +102,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!isRoot(groups) && !(await hasClinicAccess(userSub, clinicId))) {
             return { 
                 statusCode: 403, 
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "Access denied to clinic" }) 
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Forbidden",
+                    statusCode: 403,
+                    message: "Access denied to clinic",
+                    details: { clinicId: clinicId, requiredAccess: "clinic-owner" },
+                    timestamp: new Date().toISOString()
+                })
             };
         }
 
@@ -124,8 +127,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!item) {
             return { 
                 statusCode: 404, 
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "Clinic not found" }) 
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Not Found",
+                    statusCode: 404,
+                    message: "Clinic not found",
+                    details: { clinicId: clinicId },
+                    timestamp: new Date().toISOString()
+                })
             };
         }
 
@@ -147,19 +156,28 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 status: "success",
-                clinic: clinic,
+                statusCode: 200,
+                message: "Clinic retrieved successfully",
+                data: clinic,
+                timestamp: new Date().toISOString()
             }),
         };
     }
     catch (error: any) {
         console.error("Error retrieving clinic:", error);
         return { 
-            statusCode: 400, 
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: JSON.stringify({ error: `Failed to retrieve clinic: ${error.message}` }) 
+            statusCode: 500, 
+            headers: CORS_HEADERS,
+            body: JSON.stringify({
+                error: "Internal Server Error",
+                statusCode: 500,
+                message: "Failed to retrieve clinic",
+                details: { reason: error.message },
+                timestamp: new Date().toISOString()
+            })
         };
     }
 };

@@ -18,23 +18,9 @@ import { CORS_HEADERS } from "./corsHeaders";
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-// ❌ REMOVED INLINE CORS DEFINITION & HELPERS
-/*
-// Define CORS headers helper
-const getCorsHeaders = (event: APIGatewayProxyEvent): Record<string, string> => {
-    const origin = event?.headers?.origin || event?.headers?.Origin || "";
-    return {
-        "Access-Control-Allow-Origin": origin || "",
-        "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Requested-With",
-        "Access-Control-Allow-Methods": "OPTIONS,GET,POST,PUT,DELETE",
-        "Access-Control-Allow-Credentials": "true",
-        "Vary": "Origin",
-    };
-};
 
-// Define the content type header specific to the final response
-const JSON_CONTENT_HEADER = { "Content-Type": "application/json" };
-*/
+
+
 
 // ---------- Type Definitions ----------
 

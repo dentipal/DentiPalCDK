@@ -194,8 +194,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             statusCode: 200,
             headers: CORS_HEADERS,
             body: JSON.stringify({
+                status: "success",
+                statusCode: 200,
                 message: `${job.job_type?.S} job retrieved successfully`,
-                job: jobResponse,
+                data: jobResponse,
+                timestamp: new Date().toISOString()
             }),
         };
     } catch (error: any) {
@@ -206,8 +209,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             statusCode: 500,
             headers: CORS_HEADERS,
             body: JSON.stringify({
-                error: "Failed to retrieve job posting. Please try again.",
-                details: errorMessage,
+                error: "Internal Server Error",
+                statusCode: 500,
+                message: "Failed to retrieve job posting",
+                details: { reason: errorMessage },
+                timestamp: new Date().toISOString()
             }),
         };
     }

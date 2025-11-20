@@ -54,22 +54,13 @@ interface ProfileResponseItem {
     zipcode: string;
 }
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Define common headers
-const COMMON_HEADERS = {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
-*/
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
-/**
- * AWS Lambda handler to retrieve all professional profiles and enrich them with address details.
- * @param event The API Gateway event object.
- * @returns APIGatewayProxyResult.
- */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     // ✅ ADDED PREFLIGHT CHECK
     // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
@@ -133,28 +124,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }));
 
         // 4. Return the successful response
-        return {
+        return json(200, {
+            status: "success",
             statusCode: 200,
-            body: JSON.stringify({
-                success: true,
-                message: 'Professional profiles with address details (city, state, pincode) retrieved successfully',
-                profiles,
+            message: "Professional profiles retrieved successfully",
+            data: {
+                profiles: profiles,
                 count: profiles.length
-            }),
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-        };
+            },
+            timestamp: new Date().toISOString()
+        });
     } catch (error: any) {
         // 5. Handle and return error response
         console.error("Error fetching professional profiles:", error);
 
-        return {
+        return json(500, {
+            error: "Internal Server Error",
             statusCode: 500,
-            body: JSON.stringify({
-                success: false,
-                message: 'Error fetching professional profiles',
-                error: error.message
-            }),
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-        };
+            message: "Failed to retrieve professional profiles",
+            details: { reason: error.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

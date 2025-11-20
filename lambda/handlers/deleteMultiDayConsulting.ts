@@ -25,14 +25,13 @@ const ALLOWED_GROUPS = ["root", "clinicadmin", "clinicmanager"] as const;
 type AllowedGroup = typeof ALLOWED_GROUPS[number];
 const ALLOWED_GROUPS_SET = new Set<AllowedGroup>(ALLOWED_GROUPS);
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// CORS headers
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Credentials": true,
-};
-*/
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 const MULTI_DAY_JOB_TYPE = "multi_day_consulting";
 
@@ -78,11 +77,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isAllowed = groups.some(g => ALLOWED_GROUPS_SET.has(g as AllowedGroup));
 
         if (!isAllowed) {
-            return {
+            return json(403, {
+                error: "Forbidden",
                 statusCode: 403,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "You do not have permission to delete this job." })
-            };
+                message: "Access denied",
+                details: { requiredGroups: ALLOWED_GROUPS, userGroups: groups },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 3) Extract jobId from proxy path
@@ -90,11 +91,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobId = pathParts[2] || pathParts[pathParts.length - 1]; 
         
         if (!jobId) {
-            return {
+            return json(400, {
+                error: "Bad Request",
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "jobId is required in path parameters" })
-            };
+                message: "Job ID is required",
+                details: { pathFormat: "/jobs/multi_day_consulting/{jobId}" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 4) Verify the job exists and belongs to the clinic 
@@ -108,11 +111,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobResponse: GetItemCommandOutput = await dynamodb.send(getJobCommand);
 
         if (!jobResponse.Item) {
-            return {
+            return json(404, {
+                error: "Not Found",
                 statusCode: 404,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "Multiday job not found or access denied" })
-            };
+                message: "Multi-day consulting job not found",
+                details: { jobId: jobId },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Asserting the structure for safe access
@@ -120,13 +125,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 5) Ensure it's a multi_day_consulting job
         if (job.job_type?.S !== MULTI_DAY_JOB_TYPE) {
-            return {
+            return json(400, {
+                error: "Bad Request",
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: `This is not a '${MULTI_DAY_JOB_TYPE}' job. Use the appropriate endpoint for this job type.`
-                })
-            };
+                message: "Invalid job type",
+                details: { expected: MULTI_DAY_JOB_TYPE, received: job.job_type?.S },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 6) Check for active applications
@@ -187,31 +192,31 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamodb.send(deleteJobCommand);
 
         // 9) Return success
-        return {
+        return json(200, {
+            status: "success",
             statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: JSON.stringify({
-                message: "Multi-day consulting job deleted successfully",
-                jobId,
+            message: "Multi-day consulting job deleted successfully",
+            data: {
+                jobId: jobId,
                 affectedApplications: activeApplications.length,
                 applicationHandling: activeApplications.length > 0
                     ? "Active applications have been marked as 'job_cancelled'"
                     : "No active applications were affected"
-            })
-        };
+            },
+            timestamp: new Date().toISOString()
+        });
 
     } catch (error) {
         // Type assertion is necessary for error handling
         const errorMessage = (error as Error).message;
         console.error("Error deleting multi-day consulting job:", error);
         
-        return {
+        return json(500, {
+            error: "Internal Server Error",
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: JSON.stringify({
-                error: "Failed to delete multi-day consulting job. Please try again.",
-                details: errorMessage
-            })
-        };
+            message: "Failed to delete multi-day consulting job",
+            details: { reason: errorMessage },
+            timestamp: new Date().toISOString()
+        });
     }
 };

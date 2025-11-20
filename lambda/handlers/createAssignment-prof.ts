@@ -18,6 +18,13 @@ import { CORS_HEADERS } from "./corsHeaders";
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
 // Define the expected structure for the request body
 interface ApplicationRequestBody {
     message?: string;
@@ -66,13 +73,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!jobId) {
             console.error("jobId is missing in the path parameters");
-            return {
+            return json(400, {
+                error: "Bad Request",
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({
-                    error: "jobId is required in the path parameters"
-                })
-            };
+                message: "Job ID is required",
+                details: { location: "path parameters" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         console.log("Job ID extracted from path:", jobId);
@@ -86,13 +93,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Simple check for body presence
         if (Object.keys(applicationData).length === 0 && !event.body) {
-             return {
+             return json(400, {
+                error: "Bad Request",
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({
-                    error: "Application data is missing"
-                })
-            };
+                message: "Application data is missing",
+                details: { body: "empty" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Step 3: Fetch the job posting to get clinicId and status
@@ -106,13 +113,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobExists = await dynamodb.send(jobExistsCommand);
 
         if (!jobExists.Item) {
-            return {
+            return json(404, {
+                error: "Not Found",
                 statusCode: 404,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({
-                    error: "Job posting not found"
-                })
-            };
+                message: "Job posting not found",
+                details: { jobId },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Extract clinicId from the job posting
@@ -120,13 +127,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // In the original JS, clinicIdFromJob is sometimes referred to as 'clinicId' and sometimes as 'clinicUserSub' 
         // in the Key for CLINIC_PROFILES_TABLE. We assume clinicUserSub is the correct identifier for the clinic profile.
         if (!clinicIdFromJob) {
-            return {
+            return json(400, {
+                error: "Bad Request",
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({
-                    error: "Clinic ID (clinicUserSub) not found in job posting"
-                })
-            };
+                message: "Job posting is incomplete",
+                details: { missingField: "clinicUserSub" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         console.log("Clinic ID from job:", clinicIdFromJob);
@@ -134,13 +141,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Check if the job posting is active
         const jobStatus: string = jobExists.Item.status?.S || 'active';
         if (jobStatus !== 'active') {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({
-                    error: `Cannot apply to ${jobStatus} job posting`
-                })
-            };
+            return json(409, {
+                error: "Conflict",
+                statusCode: 409,
+                message: "Cannot apply to this job",
+                details: { currentStatus: jobStatus, reason: "Job is not accepting applications" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Step 4: Check if user has already applied to this job (no restrictions, multiple applications allowed)
@@ -163,13 +170,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         if (existingApplication.Items && existingApplication.Items.length > 0) {
             console.log("User has already applied to this job.");
-            return {
+            return json(409, {
+                error: "Conflict",
                 statusCode: 409,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({
-                    error: "You have already applied to this job"
-                })
-            };
+                message: "Duplicate application",
+                details: { reason: "You have already applied to this job", jobId },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Step 5: Create new application record
@@ -261,31 +268,31 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Step 7: Return response with application details
         console.log("Job application submitted successfully.");
-        return {
+        return json(201, {
+            status: "success",
             statusCode: 201,
-            headers: CORS_HEADERS, // ✅ Added CORS
-            body: JSON.stringify({
-                message: "Job application submitted successfully",
+            message: "Job application submitted successfully",
+            data: {
                 applicationId,
                 jobId: jobId,
-                status: "pending",
+                applicationStatus: "pending",
                 appliedAt: timestamp,
                 job: jobInfo,
                 clinic: clinicInfo
-            })
-        };
+            },
+            timestamp: new Date().toISOString()
+        });
     }
     catch (error) {
         const err = error as Error;
         console.error("Error creating job application:", err);
-        return {
+        return json(500, {
+            error: "Internal Server Error",
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Added CORS
-            body: JSON.stringify({
-                error: "Failed to submit job application. Please try again.",
-                details: err.message
-            })
-        };
+            message: "Failed to submit job application",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };
 exports.handler = handler;

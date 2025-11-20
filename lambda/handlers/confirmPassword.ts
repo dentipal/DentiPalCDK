@@ -72,7 +72,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Input validation
         if (!email || !code || !newPassword) {
             console.warn("[confirm] missing fields");
-            return json(400, { error: "Required fields: email, code, newPassword" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Email, verification code, and new password are required",
+                details: {
+                    missingFields: [
+                        !email && "email",
+                        !code && "code",
+                        !newPassword && "newPassword"
+                    ].filter(Boolean)
+                },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const emailLower: string = String(email).toLowerCase();
@@ -83,7 +95,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userPoolId = process.env.USER_POOL_ID;
             if (!userPoolId) {
                 console.error("[confirm] Missing USER_POOL_ID for username lookup");
-                return json(500, { error: "Server misconfiguration (USER_POOL_ID)" });
+                return json(500, {
+                    error: "Internal Server Error",
+                    statusCode: 500,
+                    message: "Server configuration error. Please contact support.",
+                    details: { issue: "Missing USER_POOL_ID environment variable" },
+                    timestamp: new Date().toISOString()
+                });
             }
             
             const foundUsername = await findUsernameByEmail(userPoolId, emailLower);
@@ -108,7 +126,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("[confirm] success for:", username);
 
         // Successful response
-        return json(200, { message: "Password reset successful" });
+        return json(200, {
+            status: "success",
+            statusCode: 200,
+            message: "Password reset successful",
+            timestamp: new Date().toISOString()
+        });
 
     } catch (err) {
         // Explicitly type the error
@@ -119,28 +142,34 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const name: string = error?.name || "";
         let message: string;
         let status: number;
+        let details: Record<string, any> = { errorType: name, reason: error?.message };
 
         // Determine friendly message and status code
         switch (name) {
             case "CodeMismatchException":
                 message = "Invalid verification code";
                 status = 400;
+                details.suggestion = "Please verify the code and try again";
                 break;
             case "ExpiredCodeException":
                 message = "Verification code expired";
                 status = 400;
+                details.suggestion = "Request a new password reset code";
                 break;
             case "UserNotFoundException":
-                message = "User not found";
+                message = "User account not found";
                 status = 404;
+                details.suggestion = "Check the email address and try again";
                 break;
             case "InvalidParameterException":
-                message = "Invalid parameters (check password policy)";
+                message = "Password does not meet requirements";
                 status = 400;
+                details.suggestion = "Ensure password meets policy requirements (length, complexity)";
                 break;
             case "LimitExceededException":
-                message = "Too many attempts. Try again later.";
+                message = "Too many attempts";
                 status = 429;
+                details.suggestion = "Please try again later";
                 break;
             default:
                 message = "Password reset failed";
@@ -149,6 +178,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Return error response
-        return json(status, { error: message, details: error?.message });
+        return json(status, {
+            error: status === 400 ? "Bad Request" : status === 401 ? "Unauthorized" : status === 404 ? "Not Found" : status === 429 ? "Too Many Requests" : "Internal Server Error",
+            statusCode: status,
+            message: message,
+            details: details,
+            timestamp: new Date().toISOString()
+        });
     }
 };

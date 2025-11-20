@@ -35,7 +35,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Step 2: Check if userSub is valid
         if (!userSub) {
-            return json(401, { error: "Unauthorized - Invalid or expired token" });
+            return json(401, {
+                error: "Unauthorized",
+                statusCode: 401,
+                message: "Invalid or expired token",
+                details: { issue: "Authentication failed" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Step 3: Check if the user has a profile
@@ -48,7 +54,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existingProfile = await dynamodb.send(new GetItemCommand(getParams));
 
         if (!existingProfile.Item) {
-            return json(404, { error: "Professional profile not found" });
+            return json(404, {
+                error: "Not Found",
+                statusCode: 404,
+                message: "Professional profile not found",
+                details: { userSub: userSub },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Step 4: Check if the profile is the default profile
@@ -59,8 +71,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         );
 
         if (isDefault) {
-            return json(403, {
-                error: "Cannot delete default profile. Set another profile as default first.",
+            return json(409, {
+                error: "Conflict",
+                statusCode: 409,
+                message: "Cannot delete default profile",
+                details: { reason: "Set another profile as default first" },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -75,13 +91,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Step 6: Return success response
         return json(200, {
+            status: "success",
+            statusCode: 200,
             message: "Professional profile deleted successfully",
-            userSub,
-            deletedAt: new Date().toISOString(),
+            data: {
+                deletedUserSub: userSub,
+                deletedAt: new Date().toISOString()
+            },
+            timestamp: new Date().toISOString()
         });
     } catch (error) {
         const err = error as Error;
         console.error("Error deleting professional profile:", err);
-        return json(500, { error: err.message || String(err) });
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to delete professional profile",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

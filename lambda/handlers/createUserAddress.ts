@@ -13,17 +13,6 @@ import { CORS_HEADERS } from "./corsHeaders";
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Define shared CORS headers
-const CORS_HEADERS: Record<string, string> = {
-    "Access-Control-Allow-Origin": "*", // or restrict to your domain in prod
-    "Access-Control-Allow-Headers":
-        "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token",
-    "Access-Control-Allow-Methods": "OPTIONS,POST",
-    "Content-Type": "application/json",
-};
-*/
 
 // Define the expected structure for the request body
 interface AddressRequestBody {

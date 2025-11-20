@@ -20,15 +20,7 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 // Allowed groups for job deletion
 const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Define CORS headers for the response
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Credentials": "true",
-    "Content-Type": "application/json"
-};
-*/
+
 
 // --- Lambda Handler Function ---
 

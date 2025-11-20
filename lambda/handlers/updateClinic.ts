@@ -106,7 +106,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isAllowedGroup: boolean = normalized.some(g => ALLOWED_UPDATERS.has(g));
         
         if (!isAllowedGroup) {
-            return json(403, { error: "Access denied: only Root or ClinicAdmin can update clinics" });
+            return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Access denied to update clinics",
+                details: { requiredGroups: ["Root", "ClinicAdmin"] },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 4. Extract Clinic ID
@@ -114,7 +120,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("Extracted clinicId:", clinicId);
 
         if (!clinicId) {
-            return json(400, { error: "Clinic ID is required in path parameters" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Clinic ID is required",
+                details: { pathFormat: "PUT /clinics/{clinicId}" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 5. Clinic-Scoped Access Check
@@ -123,7 +135,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const hasAccess: boolean = await hasClinicAccess(userSub, clinicId, "ClinicAdmin" as AccessLevel);
             
             if (!hasAccess) {
-                return json(403, { error: "Access denied to update clinic" });
+                return json(403, {
+                    error: "Forbidden",
+                    statusCode: 403,
+                    message: "Access denied to update this clinic",
+                    details: { clinicId: clinicId },
+                    timestamp: new Date().toISOString()
+                });
             }
         }
 
@@ -163,12 +181,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Check if only timestamp is being updated
         // If we only have 1 item in the array, it's just 'updatedAt'
         if (updateExpression.length === 1 && updateExpression[0].includes("updatedAt")) { 
-            return json(400, { error: "No fields to update" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "No fields to update",
+                details: { availableFields: ["name", "addressLine1", "addressLine2", "addressLine3", "city", "state", "pincode"] },
+                timestamp: new Date().toISOString()
+            });
         }
 
         if (!CLINICS_TABLE) {
              console.error("Environment variable CLINICS_TABLE is not set.");
-             return json(500, { error: "Server configuration error." });
+             return json(500, {
+                 error: "Internal Server Error",
+                 statusCode: 500,
+                 message: "Server configuration error",
+                 details: { missingConfig: "CLINICS_TABLE" },
+                 timestamp: new Date().toISOString()
+             });
         }
 
         // 7. Execute DynamoDB Update
@@ -185,16 +215,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamoClient.send(command);
         
         // 8. Success Response
-        return json(200, { 
-            status: "success", 
-            message: "Clinic updated successfully" 
+        return json(200, {
+            status: "success",
+            statusCode: 200,
+            message: "Clinic updated successfully",
+            data: { clinicId },
+            timestamp: new Date().toISOString()
         });
         
     } catch (err) {
         const error = err as Error;
         console.error("Error updating clinic:", error);
         
-        // Provide more detailed error response in production/development
-        return json(500, { error: `Failed to update clinic: ${error.message}` });
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to update clinic",
+            details: { reason: error.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

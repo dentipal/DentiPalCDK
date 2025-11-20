@@ -45,13 +45,25 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("Extracted clinicId:", clinicId);
 
         if (!clinicId) {
-            return json(400, { error: "Clinic ID is required in path parameters" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Clinic ID is required",
+                details: { pathFormat: "/clinics/{clinicId}" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Step 3: Authorization check
         // Note: isRoot(groups) is an external utility function assumed to be imported from './utils'.
         if (!isRoot(groups)) {
-            return json(403, { error: "Only Root users can delete clinics" });
+            return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Only Root users can delete clinics",
+                details: { requiredGroup: "Root" },
+                timestamp: new Date().toISOString()
+            });
         }
         
         // Step 4: Execute DeleteItemCommand
@@ -64,15 +76,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamoClient.send(command);
 
         // Step 5: Return success response
-        return json(200, { status: "success", message: "Clinic deleted successfully" });
+        return json(200, {
+            status: "success",
+            statusCode: 200,
+            message: "Clinic deleted successfully",
+            data: { deletedClinicId: clinicId },
+            timestamp: new Date().toISOString()
+        });
         
     } catch (error) {
         const err = error as Error & { message?: string; name?: string };
         console.error("Error deleting clinic:", err);
 
-        // Handle specific case where the item might not have existed (although DynamoDB delete is idempotent)
-        return json(500, { 
-            error: `Failed to delete clinic: ${err.message || "Internal Server Error"}` 
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to delete clinic",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
         });
     }
 };

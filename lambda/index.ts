@@ -186,7 +186,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
 
         // Job applications for clinics
         "GET:/clinics/{clinicId}/jobs/": getJobApplicationsForClinicHandler,
-        "GET:{clinicId}/jobs": getJobApplicantsOfAClinicHandler,
+        "GET:/{clinicId}/jobs": getJobApplicantsOfAClinicHandler,
 
         // Specific job type endpoints
         "POST:/jobs/temporary": createTemporaryJobHandler,
@@ -224,7 +224,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         // Job status management & Hiring
         "PUT:/jobs/{jobId}/status": updateJobStatusHandler,
         "POST:/jobs/{jobId}/hire": hireProfHandler,
-        "POST:{clinicId}/reject/{jobId}": rejectProfHandler,
+        "POST:/{clinicId}/reject/{jobId}": rejectProfHandler,
         "POST:/submitfeedback": submitFeedbackHandler,
 
         // Job invitations

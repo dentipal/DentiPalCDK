@@ -174,17 +174,7 @@ Welcome to the future of dental staffing!
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     console.log('📥 Received event:', JSON.stringify(event, null, 2));
     
-    // ❌ REMOVED INLINE CORS DEFINITION
-    /*
-    // Pre-define CORS headers for all responses
-    const responseHeaders: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    };
-    */
-
+ 
     if (event.httpMethod === "OPTIONS") {
         // ✅ Uses imported headers
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };
@@ -202,10 +192,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error('❌ Failed to parse request body:', parseError);
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
-                    error: "Invalid JSON or missing fields in request body",
-                    success: false
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Invalid JSON format in request body",
+                    details: { issue: "Body must be valid JSON with email and confirmationCode" },
+                    timestamp: new Date().toISOString()
                 })
             };
         }
@@ -214,12 +207,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Enhanced validation
         if (!verifyData.email || !verifyData.confirmationCode) {
+            const missingFields = [
+                !verifyData.email && "email",
+                !verifyData.confirmationCode && "confirmationCode"
+            ].filter(Boolean);
+
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
-                    error: "Required fields: email, confirmationCode",
-                    success: false
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Required fields are missing",
+                    details: { missingFields },
+                    timestamp: new Date().toISOString()
                 })
             };
         }
@@ -243,34 +244,47 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error('❌ Cognito confirmation failed:', confirmError);
             
             const err = confirmError as { name: string, message: string };
-            let errorMessage: string = "Verification failed. Please try again.";
+            let errorMessage: string = "Verification failed";
+            let errorName: string = "Bad Request";
             let statusCode: number = 400;
+            let details: Record<string, any> = { errorType: err.name, reason: err.message };
 
             if (err.name === 'CodeMismatchException') {
-                errorMessage = "Invalid verification code. Please check the code and try again.";
+                errorMessage = "Invalid verification code";
+                details.suggestion = "Please check the code and try again";
             } else if (err.name === 'ExpiredCodeException') {
-                errorMessage = "Verification code has expired. Please request a new one.";
+                errorMessage = "Verification code has expired";
+                details.suggestion = "Please request a new code";
             } else if (err.name === 'UserNotFoundException') {
-                errorMessage = "User not found. Please check your email address.";
+                errorMessage = "User not found";
+                errorName = "Not Found";
                 statusCode = 404;
+                details.suggestion = "Please check your email address";
             } else if (err.name === 'NotAuthorizedException') {
-                errorMessage = "User is already confirmed or invalid credentials.";
+                errorMessage = "User is already verified or invalid credentials";
+                errorName = "Forbidden";
                 statusCode = 403;
+                details.suggestion = "If you've already verified, please proceed to login";
             } else if (err.name === 'LimitExceededException' || err.name === 'TooManyFailedAttemptsException') {
-                errorMessage = "Too many attempts. Please wait before trying again.";
+                errorMessage = "Too many attempts";
+                errorName = "Too Many Requests";
                 statusCode = 429;
+                details.suggestion = "Please wait before trying again";
             } else {
                 statusCode = 500;
-                errorMessage = `Server Error: ${err.message}`;
+                errorName = "Internal Server Error";
+                errorMessage = "Verification failed";
             }
 
             return {
                 statusCode,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
-                    error: errorMessage,
-                    success: false,
-                    errorType: err.name
+                    error: errorName,
+                    statusCode: statusCode,
+                    message: errorMessage,
+                    details: details,
+                    timestamp: new Date().toISOString()
                 })
             };
         }
@@ -363,19 +377,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Step 5: Return success response
         const successResponse = {
-            message: "Email verification completed successfully! Welcome to DentiPal!",
-            success: true,
-            isVerified: true,
-            status: "VERIFIED",
-            userSub,
-            email,
-            fullName,
-            userType,
-            welcomeMessageSent: emailSent,
-            smsSent,
-            nextSteps: userType === 'professional' ?
-                "Complete your professional profile to start receiving job opportunities" :
-                "Set up your clinic profile and start posting job opportunities",
+            status: "success",
+            statusCode: 201,
+            message: "Email verification completed successfully!",
+            data: {
+                isVerified: true,
+                userSub,
+                email,
+                fullName,
+                userType,
+                welcomeMessageSent: emailSent,
+                smsSent,
+                nextSteps: userType === 'professional' ?
+                    "Complete your professional profile to start receiving job opportunities" :
+                    "Set up your clinic profile and start posting job opportunities",
+            },
             timestamp: new Date().toISOString()
         };
 
@@ -383,7 +399,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 201,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: CORS_HEADERS,
             body: JSON.stringify(successResponse)
         };
 
@@ -392,11 +408,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         return {
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: CORS_HEADERS,
             body: JSON.stringify({
-                error: "Internal server error during verification",
-                success: false,
-                message: "An unexpected error occurred. Please try again or contact support.",
+                error: "Internal Server Error",
+                statusCode: 500,
+                message: "An unexpected error occurred during verification",
+                details: { reason: error instanceof Error ? error.message : "Unknown error" },
+                suggestion: "Please try again or contact support",
                 timestamp: new Date().toISOString()
             })
         };

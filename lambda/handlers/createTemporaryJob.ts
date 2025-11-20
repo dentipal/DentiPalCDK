@@ -108,7 +108,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         if (!isAllowed) {
             console.warn(`[AUTH] User ${userSub} is not in an allowed group. Groups: [${rawGroups.join(', ')}]`);
-            return json(403, { error: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs" });
+            return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Access denied",
+                details: { requiredGroups: ["Root", "ClinicAdmin", "ClinicManager"], userGroups: rawGroups },
+                timestamp: new Date().toISOString()
+            });
         }
         // --------------------------------------------------------------------
 
@@ -129,7 +135,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         ) {
             console.warn("[VALIDATION] Missing required fields in body.");
             return json(400, {
-                error: "Required fields: clinicIds (array), professional_role, date, shift_speciality, hours, hourly_rate, start_time, end_time"
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Missing required fields",
+                details: {
+                    requiredFields: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "hourly_rate", "start_time", "end_time"]
+                },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -139,27 +151,55 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!VALID_ROLE_VALUES.includes(jobData.professional_role)) {
             console.warn(`[VALIDATION] Invalid professional_role: ${jobData.professional_role}`);
             return json(400, {
-                error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES.join(", ")}`
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid professional role",
+                details: { validRoles: VALID_ROLE_VALUES, providedRole: jobData.professional_role },
+                timestamp: new Date().toISOString()
             });
         }
 
         // Validate date format and future
         const jobDate = new Date(jobData.date);
         if (isNaN(jobDate.getTime())) {
-            return json(400, { error: "Invalid date format. Use ISO date string." });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid date format",
+                details: { providedDate: jobData.date, expectedFormat: "ISO 8601 date string" },
+                timestamp: new Date().toISOString()
+            });
         }
         const today = new Date();
         today.setHours(0, 0, 0, 0); 
         if (jobDate < today) {
-            return json(400, { error: "Job date must be today or in the future" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Job date must be in the future",
+                details: { providedDate: jobData.date, minimumDate: today.toISOString() },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Validate hours and rate
         if (jobData.hours < 1 || jobData.hours > 12) {
-            return json(400, { error: "Hours must be between 1 and 12" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid hours value",
+                details: { providedHours: jobData.hours, validRange: "1-12" },
+                timestamp: new Date().toISOString()
+            });
         }
         if (jobData.hourly_rate < 10 || jobData.hourly_rate > 200) {
-            return json(400, { error: "Hourly rate must be between $10 and $200" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid hourly rate",
+                details: { providedRate: `$${jobData.hourly_rate}`, validRange: "$10-$200" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const timestamp = new Date().toISOString();
@@ -279,19 +319,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const totalPay = jobData.hours * jobData.hourly_rate;
 
         return json(201, {
-            message: "Temporary job postings created successfully for multiple clinics",
-            jobIds,
-            job_type: "temporary",
-            professional_role: jobData.professional_role,
-            date: jobData.date,
-            hours: jobData.hours,
-            hourly_rate: jobData.hourly_rate,
-            total_pay: `$${totalPay.toFixed(2)}`,
+            status: "success",
+            statusCode: 201,
+            message: "Temporary job postings created successfully",
+            data: {
+                jobIds,
+                jobType: "temporary",
+                professionalRole: jobData.professional_role,
+                date: jobData.date,
+                hours: jobData.hours,
+                hourlyRate: jobData.hourly_rate,
+                totalPay: `$${totalPay.toFixed(2)}`
+            },
+            timestamp: new Date().toISOString()
         });
 
     } catch (error) {
         const err = error as Error;
         console.error("Error creating temporary job postings:", err);
-        return json(500, { error: err.message || "An unexpected error occurred" });
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to create temporary job postings",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

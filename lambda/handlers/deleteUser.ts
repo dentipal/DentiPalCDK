@@ -199,12 +199,24 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
         const groups = typeof rawGroups === 'string' ? rawGroups.split(',') : [];
         
         if (!isRoot(groups)) {
-             return json(403, { error: "Unauthorized: Only Root users can delete users" });
+             return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Only Root users can delete users",
+                details: { requiredGroup: "Root" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const idOrSub = getPathId(event);
         if (!idOrSub) {
-            return json(400, { error: "User identifier is required in path (/users/{email-or-sub})" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "User identifier is required",
+                details: { pathFormat: "/users/{email-or-sub}" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 2. Resolve Cognito Username
@@ -212,7 +224,13 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
         const isSubLookup = !idOrSub.includes("@");
 
         if (isSubLookup && !resolved) {
-            return json(404, { error: "User not found in Cognito (by sub)" });
+            return json(404, {
+                error: "Not Found",
+                statusCode: 404,
+                message: "User not found in Cognito",
+                details: { searchedBy: "sub", providedId: idOrSub },
+                timestamp: new Date().toISOString()
+            });
         }
         
         // If they passed an email, resolved.sub will be null, but we still have the username.
@@ -228,7 +246,13 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
             );
         } catch (e: any) {
             if (e?.name === "UserNotFoundException") {
-                return json(404, { error: "User does not exist in Cognito" });
+                return json(404, {
+                    error: "Not Found",
+                    statusCode: 404,
+                    message: "User does not exist in Cognito",
+                    details: { username: username },
+                    timestamp: new Date().toISOString()
+                });
             }
             throw e;
         }
@@ -271,11 +295,23 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
         // 6. Success Response
         return json(200, {
             status: "success",
-            message: "User deleted from Cognito and disassociated from clinics",
+            statusCode: 200,
+            message: "User deleted successfully",
+            data: {
+                deletedUsername: username,
+                disassociatedFromClinics: !!subToRemove
+            },
+            timestamp: new Date().toISOString()
         });
 
     } catch (error: any) {
         console.error("Error deleting user:", error);
-        return json(400, { error: error?.message || "Failed to delete user" });
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to delete user",
+            details: { reason: error?.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

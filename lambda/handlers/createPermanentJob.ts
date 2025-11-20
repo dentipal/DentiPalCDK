@@ -170,7 +170,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isAllowed: boolean = normalized.some(g => ALLOWED_GROUPS.has(g));
         
         if (!isAllowed) {
-            return json(403, { error: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs" });
+            return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Access denied",
+                details: { requiredGroups: ["Root", "ClinicAdmin", "ClinicManager"], userGroups: rawGroups },
+                timestamp: new Date().toISOString()
+            });
         }
         // --------------------------------------------------------------------
 
@@ -179,7 +185,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate common required fields
         if (!jobData.job_type || !jobData.professional_role || !jobData.shift_speciality || !jobData.clinicIds || !Array.isArray(jobData.clinicIds) || jobData.clinicIds.length === 0) {
             return json(400, {
-                error: "Required fields: job_type, professional_role, shift_speciality, clinicIds (non-empty array)"
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Missing required fields",
+                details: { requiredFields: ["job_type", "professional_role", "shift_speciality", "clinicIds"] },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -187,14 +197,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const validJobTypes = ["temporary", "multi_day_consulting", "permanent"];
         if (!validJobTypes.includes(jobData.job_type)) {
             return json(400, {
-                error: `Invalid job_type. Valid options: ${validJobTypes.join(", ")}`
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid job type",
+                details: { validTypes: validJobTypes, providedType: jobData.job_type },
+                timestamp: new Date().toISOString()
             });
         }
 
         // Validate professional role
         if (!VALID_ROLE_VALUES || !VALID_ROLE_VALUES.includes(jobData.professional_role)) {
             return json(400, {
-                error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES ? VALID_ROLE_VALUES.join(", ") : "Not available"}`
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid professional role",
+                details: { validRoles: VALID_ROLE_VALUES || [], providedRole: jobData.professional_role },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -212,7 +230,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (validationError) {
-            return json(400, { error: validationError });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Job validation failed",
+                details: { validationError, jobType: jobData.job_type },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const timestamp: string = new Date().toISOString();
@@ -338,13 +362,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await Promise.all(postJobsPromises);
 
         return json(201, {
-            message: "Job posting created for multiple clinics",
-            jobIds: jobIds
+            status: "success",
+            statusCode: 201,
+            message: "Job postings created successfully",
+            data: {
+                jobIds: jobIds,
+                jobType: jobData.job_type,
+                clinicsCount: jobData.clinicIds.length,
+                createdAt: timestamp
+            },
+            timestamp: new Date().toISOString()
         });
     } catch (error) {
         const err = error as Error;
         console.error("Error creating job posting:", err);
-        return json(500, { error: err.message });
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to create job postings",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };
 

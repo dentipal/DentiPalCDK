@@ -53,7 +53,13 @@ export const handler = async (
 
   try {
     if (!event.body) {
-      return json(400, { error: "Missing request body" });
+      return json(400, {
+        error: "Bad Request",
+        statusCode: 400,
+        message: "Request body is missing",
+        details: { issue: "JSON body is required" },
+        timestamp: new Date().toISOString()
+      });
     }
 
     const registrationData: RegistrationData = JSON.parse(event.body);
@@ -66,8 +72,20 @@ export const handler = async (
       !registrationData.userType ||
       !registrationData.password
     ) {
+      const missingFields = [
+        !registrationData.email && "email",
+        !registrationData.firstName && "firstName",
+        !registrationData.lastName && "lastName",
+        !registrationData.userType && "userType",
+        !registrationData.password && "password",
+      ].filter(Boolean);
+
       return json(400, {
-        error: "Required fields: email, firstName, lastName, userType, password",
+        error: "Bad Request",
+        statusCode: 400,
+        message: "Required fields are missing",
+        details: { missingFields },
+        timestamp: new Date().toISOString()
       });
     }
 
@@ -75,14 +93,20 @@ export const handler = async (
     if (registrationData.userType === "professional") {
       if (!registrationData.role) {
         return json(400, {
-          error: "Role is required for professional users",
-          validRoles: VALID_ROLE_VALUES,
+          error: "Bad Request",
+          statusCode: 400,
+          message: "Role is required for professional users",
+          details: { validRoles: VALID_ROLE_VALUES },
+          timestamp: new Date().toISOString()
         });
       }
       if (!VALID_ROLE_VALUES.includes(registrationData.role)) {
         return json(400, {
-          error: `Invalid role: ${registrationData.role}`,
-          validRoles: VALID_ROLE_VALUES,
+          error: "Bad Request",
+          statusCode: 400,
+          message: `Invalid role: ${registrationData.role}`,
+          details: { validRoles: VALID_ROLE_VALUES },
+          timestamp: new Date().toISOString()
         });
       }
     }
@@ -211,33 +235,48 @@ export const handler = async (
     }
 
     return json(200, {
+      status: "success",
+      statusCode: 201,
       message: "Registration initiated successfully. Please check your email for verification code.",
-      userSub: signUpResult.UserSub,
-      email: email,
-      userType: registrationData.userType,
-      role: registrationData.role || null,
-      cognitoGroup: cognitoGroup,
-      nextStep:
-        "Please check your email and use the verification code to complete registration by calling /auth/verify-otp",
-      codeDeliveryDetails: signUpResult.CodeDeliveryDetails,
+      data: {
+        userSub: signUpResult.UserSub,
+        email: email,
+        userType: registrationData.userType,
+        role: registrationData.role || null,
+        cognitoGroup: cognitoGroup,
+        nextStep: "Please check your email and use the verification code to complete registration by calling /auth/verify-otp",
+        codeDeliveryDetails: signUpResult.CodeDeliveryDetails,
+      },
+      timestamp: new Date().toISOString()
     });
 
   } catch (error: any) {
     console.error("Error initiating user registration:", error);
+    
+    let statusCode = 500;
+    let message = "Failed to initiate registration";
+    let details: Record<string, any> = { errorType: error.name, reason: error.message };
+
     if (error.name === "UsernameExistsException") {
-      return json(400, {
-        error: "User with this email already exists. Please try signing in instead.",
-      });
+      statusCode = 409;
+      message = "Email already registered";
+      details.suggestion = "Please use a different email or sign in instead";
+    } else if (error.name === "InvalidPasswordException") {
+      statusCode = 400;
+      message = "Password does not meet requirements";
+      details.suggestion = "Minimum 8 characters with uppercase, lowercase, number, and symbol";
+    } else if (error.name === "InvalidParameterException") {
+      statusCode = 400;
+      message = "Invalid parameters";
+      details.suggestion = "Check all required fields";
     }
-    if (error.name === "InvalidPasswordException") {
-      return json(400, {
-        error:
-          "Password does not meet requirements: minimum 8 characters with uppercase, lowercase, number, and symbol.",
-      });
-    }
-    return json(500, {
-      error: "Failed to initiate registration. Please try again.",
-      details: error.message,
+
+    return json(statusCode, {
+      error: statusCode === 400 ? "Bad Request" : statusCode === 409 ? "Conflict" : "Internal Server Error",
+      statusCode: statusCode,
+      message: message,
+      details: details,
+      timestamp: new Date().toISOString()
     });
   }
 };

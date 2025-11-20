@@ -35,8 +35,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn(`[AUTH] User groups [${groups.join(', ')}] is not Root. Access denied.`);
             return {
                 statusCode: 403,
-                headers: CORS_HEADERS, // ✅ Added headers
-                body: JSON.stringify({ error: "Only Root users can delete assignments" })
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Forbidden",
+                    statusCode: 403,
+                    message: "Only Root users can delete assignments",
+                    details: { requiredGroup: "Root" },
+                    timestamp: new Date().toISOString()
+                })
             };
         }
 
@@ -47,8 +53,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("[VALIDATION] Missing required fields: userSub or clinicId.");
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added headers
-                body: JSON.stringify({ error: "Missing required fields" })
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Required fields are missing",
+                    details: { missingFields: [!userSub && "userSub", !clinicId && "clinicId"].filter(Boolean) },
+                    timestamp: new Date().toISOString()
+                })
             };
         }
 
@@ -69,19 +81,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 4. Success Response
         return {
             statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Added headers
-            body: JSON.stringify({ status: "success", message: "Assignment deleted successfully" }),
+            headers: CORS_HEADERS,
+            body: JSON.stringify({
+                status: "success",
+                statusCode: 200,
+                message: "Assignment deleted successfully",
+                data: { deletedUserSub: userSub, deletedClinicId: clinicId },
+                timestamp: new Date().toISOString()
+            }),
         };
 
     } catch (error) {
         const err = error as Error;
         console.error("Error deleting assignment:", err);
         
-        // Use 500 for unexpected errors, preserving the error message detail
         return {
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Added headers
-            body: JSON.stringify({ error: `Failed to delete assignment: ${err.message}` })
+            headers: CORS_HEADERS,
+            body: JSON.stringify({
+                error: "Internal Server Error",
+                statusCode: 500,
+                message: "Failed to delete assignment",
+                details: { reason: err.message },
+                timestamp: new Date().toISOString()
+            })
         };
     }
 };

@@ -77,6 +77,13 @@ const dedupe = (arr: any[]) => {
   return out;
 };
 
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
 async function getJobsUsingQuery(jobIds: string[], clinicId: string) {
   const jobs: any[] = [];
 
@@ -225,11 +232,13 @@ export const handler = async (
     console.log(`🏥 Clinic ID: ${clinicId}`);
 
     if (!clinicId) {
-      return {
+      return json(400, {
+        error: "Bad Request",
         statusCode: 400,
-        headers: CORS_HEADERS,
-        body: JSON.stringify({ error: "clinicId is required in the path" }),
-      };
+        message: "Clinic ID is required",
+        details: { pathFormat: "/{clinicId}/applicants" },
+        timestamp: new Date().toISOString()
+      });
     }
 
     const postingsSchema = await getTableSchema(POSTINGS_TABLE);
@@ -253,16 +262,18 @@ export const handler = async (
     console.log(`📋 Found ${applications.length} applications`);
 
     if (!applications.length) {
-      return {
+      return json(200, {
+        status: "success",
         statusCode: 200,
-        headers: CORS_HEADERS,
-        body: JSON.stringify({
-          clinicId,
+        message: "No job applications found",
+        data: {
+          clinicId: clinicId,
           totalApplications: 0,
           applications: [],
-          byJobId: {},
-        }),
-      };
+          byJobId: {}
+        },
+        timestamp: new Date().toISOString()
+      });
     }
 
     const jobIds = dedupe(applications.map((a) => a.jobId).filter(Boolean));
@@ -372,29 +383,26 @@ export const handler = async (
       });
     }
 
-    return {
+    return json(200, {
+      status: "success",
       statusCode: 200,
-      headers: CORS_HEADERS,
-      body: JSON.stringify(
-        {
-          clinicId,
-          totalApplications: applicationsJoined.length,
-          applications: applicationsJoined,
-          byJobId,
-        },
-        null,
-        2
-      ),
-    };
+      message: "Job applicants retrieved successfully",
+      data: {
+        clinicId: clinicId,
+        totalApplications: applicationsJoined.length,
+        applications: applicationsJoined,
+        byJobId: byJobId
+      },
+      timestamp: new Date().toISOString()
+    });
   } catch (error: any) {
     console.error("❌ handler error:", error);
-    return {
+    return json(500, {
+      error: "Internal Server Error",
       statusCode: 500,
-      headers: CORS_HEADERS,
-      body: JSON.stringify({
-        error: "Failed to fetch applicants",
-        details: error.message,
-      }),
-    };
+      message: "Failed to fetch applicants",
+      details: { reason: error.message },
+      timestamp: new Date().toISOString()
+    });
   }
 };

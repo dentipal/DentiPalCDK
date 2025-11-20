@@ -65,18 +65,36 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 1. Authentication Check (Get userSub from authorizer claims)
         const userSub: string | undefined = event.requestContext?.authorizer?.claims?.sub;
         if (!userSub) {
-            return json(401, { error: 'Unauthorized' });
+            return json(401, {
+                error: "Unauthorized",
+                statusCode: 401,
+                message: "User authentication required",
+                details: { issue: "Missing 'sub' claim in JWT token" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 2. HTTP Method Check
         if (method !== 'DELETE') {
-            return json(405, { error: 'Method not allowed. Only DELETE is supported.' });
+            return json(405, {
+                error: "Method Not Allowed",
+                statusCode: 405,
+                message: "Only DELETE method is supported",
+                details: { allowedMethods: ["DELETE"] },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 3. Extract job ID from path parameters
         const jobId: string | undefined = event.pathParameters?.jobId;
         if (!jobId) {
-            return json(400, { error: 'Job ID is required' });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Job ID is required",
+                details: { pathFormat: "/jobs/{jobId}" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 4. Get existing job to verify ownership and status
@@ -87,7 +105,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existingJob = await dynamodb.send(new GetItemCommand(getCommandInput));
 
         if (!existingJob.Item) {
-            return json(404, { error: 'Job not found' });
+            return json(404, {
+                error: "Not Found",
+                statusCode: 404,
+                message: "Job not found",
+                details: { jobId: jobId },
+                timestamp: new Date().toISOString()
+            });
         }
         
         // Ensure Item properties exist before accessing
@@ -102,18 +126,32 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 5. Security check: Only clinic owner can delete their jobs
         if (userSub !== clinicUserSub) {
-            return json(403, { error: 'Access denied - you can only delete your own jobs' });
+            return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Only job owner can delete this job",
+                details: { requiredOwner: clinicUserSub },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 6. Business logic: Prevent deletion of jobs in certain statuses
         if (currentStatus === 'scheduled') {
-            return json(400, {
-                error: 'Cannot delete scheduled jobs. Please complete or cancel the job first.'
+            return json(409, {
+                error: "Conflict",
+                statusCode: 409,
+                message: "Cannot delete scheduled jobs",
+                details: { currentStatus: currentStatus, suggestion: "Please complete or cancel the job first" },
+                timestamp: new Date().toISOString()
             });
         }
         if (currentStatus === 'action_needed') {
-            return json(400, {
-                error: 'Cannot delete jobs with pending negotiations. Please resolve negotiations first.'
+            return json(409, {
+                error: "Conflict",
+                statusCode: 409,
+                message: "Cannot delete jobs with pending negotiations",
+                details: { currentStatus: currentStatus, suggestion: "Please resolve negotiations first" },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -294,20 +332,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 13. Final Response
         return json(200, {
+            status: "success",
+            statusCode: 200,
             message: 'Job deleted successfully',
-            jobId,
-            deletedAt: new Date().toISOString(),
-            jobType,
-            forceDelete,
-            cleanupPerformed: relatedItemsDeletedCount > 0,
-            relatedItemsDeleted: relatedItemsDeletedCount,
-            deletedJob: deletedJob.Attributes // Attributes of the job before deletion
+            data: {
+                jobId,
+                deletedAt: new Date().toISOString(),
+                jobType,
+                forceDelete,
+                cleanupPerformed: relatedItemsDeletedCount > 0,
+                relatedItemsDeleted: relatedItemsDeletedCount
+            },
+            timestamp: new Date().toISOString()
         });
 
     } catch (error) {
         const err = error as Error;
         console.error('Error deleting job posting:', err);
-        return json(500, { error: 'Internal server error', details: err.message });
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to delete job posting",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };
 

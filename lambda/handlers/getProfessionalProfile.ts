@@ -82,14 +82,24 @@ export const handler = async (
       }) || [];
 
     return json(200, {
-      profiles: profileId ? profiles[0] || null : profiles,
-      count: profiles.length,
+      status: "success",
+      statusCode: 200,
+      message: profileId ? "Profile retrieved successfully" : "Profiles retrieved successfully",
+      data: {
+        profiles: profileId ? profiles[0] || null : profiles,
+        count: profiles.length
+      },
+      timestamp: new Date().toISOString()
     });
   } catch (error: any) {
     console.error("Error getting professional profile:", error);
 
     return json(500, {
-      error: error.message,
+      error: "Internal Server Error",
+      statusCode: 500,
+      message: "Failed to retrieve professional profile",
+      details: { reason: error.message },
+      timestamp: new Date().toISOString()
     });
   }
 };

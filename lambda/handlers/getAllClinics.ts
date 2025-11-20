@@ -46,15 +46,7 @@ interface DynamoDBClinicItem {
     [key: string]: AttributeValue | undefined;
 }
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Define CORS headers
-const headers = {
-    "Access-Control-Allow-Origin": "*", // Allow any origin, modify for stricter security
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS", // Allow specific methods
-    "Access-Control-Allow-Headers": "Content-Type, Authorization" // Allow specific headers
-};
-*/
+
 
 /**
  * AWS Lambda handler to retrieve a list of clinics based on user permissions and filters.
@@ -198,23 +190,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 7. Success Response
         return {
             statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 status: "success",
-                clinics: clinics,
-                totalCount: clinics.length,
-                filters: {
-                    state: state || null,
-                    city: city || null,
-                    name: name || null,
-                    limit
+                statusCode: 200,
+                message: `Retrieved ${clinics.length} clinic(s)`,
+                data: {
+                    clinics: clinics,
+                    totalCount: clinics.length,
+                    filters: {
+                        state: state || null,
+                        city: city || null,
+                        name: name || null,
+                        limit
+                    }
                 },
-                currentUser: {
-                    userSub,
-                    isRoot: isRootUser,
-                    groups
-                },
-                message: `Retrieved ${clinics.length} clinic(s)`
+                timestamp: new Date().toISOString()
             })
         };
 
@@ -222,10 +213,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("❌ Error retrieving clinics:", error);
         return {
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: CORS_HEADERS,
             body: JSON.stringify({
-                error: "Failed to retrieve clinics. Please try again.",
-                details: error.message
+                error: "Internal Server Error",
+                statusCode: 500,
+                message: "Failed to retrieve clinics",
+                details: { reason: error.message },
+                timestamp: new Date().toISOString()
             })
         };
     }

@@ -68,6 +68,13 @@ const str = (x: AttributeValue | undefined): string =>
 const strOr = (a?: AttributeValue, b?: AttributeValue): string =>
   (a && "S" in a && a.S) || (b && "S" in b && b.S) || "";
 
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): any => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
 // ---- MAIN LAMBDA HANDLER ----
 export const handler = async (event: any) => {
   try {
@@ -258,29 +265,31 @@ export const handler = async (event: any) => {
         new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime()
     );
 
-    return {
+    return json(200, {
+      status: "success",
       statusCode: 200,
-      headers: CORS_HEADERS,
-      body: JSON.stringify({
-        message: "Job applications retrieved successfully",
-        applications,
+      message: "Job applications retrieved successfully",
+      data: {
+        applications: applications,
         totalCount: applications.length,
         filters: {
           status: status || "all",
           jobType: jobType || "all",
-          limit,
-        },
-      }),
-    };
+          limit: limit
+        }
+      },
+      timestamp: new Date().toISOString()
+    });
   } catch (error: any) {
     console.error("Error retrieving job applications:", error);
-    return {
+    return json(500, {
+      error: "Internal Server Error",
       statusCode: 500,
-      headers: CORS_HEADERS,
-      body: JSON.stringify({
-        error: "Failed to retrieve job applications. Please try again.",
-        details: error.message,
-      }),
-    };
+      message: "Failed to retrieve job applications",
+      details: { reason: error.message },
+      timestamp: new Date().toISOString()
+    });
+      
+    
   }
 };

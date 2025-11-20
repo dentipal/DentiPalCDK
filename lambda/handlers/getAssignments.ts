@@ -71,7 +71,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             .filter(Boolean);
 
         if (!userSub) {
-            return json(401, { error: "Unauthorized: Missing user context" });
+            return json(401, {
+                error: "Unauthorized",
+                statusCode: 401,
+                message: "User authentication required",
+                details: { issue: "Missing 'sub' claim in JWT token" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 2. Determine Target UserSub
@@ -104,11 +110,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }));
 
         // 5. Success Response
-        return json(200, { status: "success", assignments });
+        return json(200, {
+            status: "success",
+            statusCode: 200,
+            message: `Retrieved ${assignments.length} assignment(s)`,
+            data: { assignments },
+            timestamp: new Date().toISOString()
+        });
     }
     catch (error: any) {
         // 6. Error Response
         console.error("Error retrieving assignments:", error);
-        return json(400, { error: `Failed to retrieve assignments: ${error.message}` });
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to retrieve assignments",
+            details: { reason: error.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

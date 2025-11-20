@@ -22,21 +22,6 @@ interface ProfessionalProfileData {
     [key: string]: any;
 }
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Type for CORS headers
-interface CorsHeaders {
-    [header: string]: string;
-}
-
-const CORS_HEADERS: CorsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers":
-        "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token",
-    "Access-Control-Allow-Methods": "OPTIONS,POST",
-    "Content-Type": "application/json",
-};
-*/
 
 // --- Initialization ---
 

@@ -37,7 +37,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!jobId) {
             return json(400, {
-                error: "jobId is required in path parameters"
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Job ID is required",
+                details: { pathFormat: "/jobs/temporary/{jobId}" },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -53,7 +57,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobResponse = await dynamodb.send(jobCommand);
         if (!jobResponse.Item) {
             return json(404, {
-                error: "Temporary job not found or access denied"
+                error: "Not Found",
+                statusCode: 404,
+                message: "Temporary job not found",
+                details: { jobId: jobId },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -62,7 +70,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Verify it's a temporary job
         if (job.job_type?.S !== "temporary") {
             return json(400, {
-                error: "This is not a temporary job. Use the appropriate endpoint for this job type."
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid job type",
+                details: { expected: "temporary", received: job.job_type?.S },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -102,8 +114,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const profileResponse = await dynamodb.send(profileCommand);
         if (!profileResponse.Item) {
-            return json(400, {
-                error: "Profile not found for this clinic"
+            return json(404, {
+                error: "Not Found",
+                statusCode: 404,
+                message: "Clinic profile not found",
+                details: { clinicId: job.clinicId?.S },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -159,15 +175,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
 
         return json(200, {
+            status: "success",
+            statusCode: 200,
             message: "Temporary job retrieved successfully",
-            job: temporaryJob
+            data: { job: temporaryJob },
+            timestamp: new Date().toISOString()
         });
 
     } catch (error: any) {
         console.error("Error retrieving temporary job:", error);
         return json(500, {
-            error: "Failed to retrieve temporary job. Please try again.",
-            details: error.message
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to retrieve temporary job",
+            details: { reason: error.message },
+            timestamp: new Date().toISOString()
         });
     }
 };

@@ -174,14 +174,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     return json(200, {
       status: "success",
-      jobPostings,
-      totalCount: jobPostings.length
+      statusCode: 200,
+      message: `Retrieved ${jobPostings.length} job posting(s)`,
+      data: {
+        jobPostings,
+        totalCount: jobPostings.length
+      },
+      timestamp: new Date().toISOString()
     });
 
   } catch (error: any) {
     console.error("Error retrieving job postings:", error);
     return json(500, {
-      error: `Failed to retrieve job postings: ${error.message}`
+      error: "Internal Server Error",
+      statusCode: 500,
+      message: "Failed to retrieve job postings",
+      details: { reason: error.message },
+      timestamp: new Date().toISOString()
     });
   }
 };

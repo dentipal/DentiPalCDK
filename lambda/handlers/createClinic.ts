@@ -16,16 +16,7 @@ import { CORS_HEADERS } from "./corsHeaders";
 // Initialize the DynamoDB client
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
 
-// ❌ REMOVED INLINE HEADERS DEFINITION
-/*
-type CorsHeaders = Record<string, string>;
-const HEADERS: CorsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Content-Type": "application/json",
-};
-*/
+
 
 // Define the expected structure for the request body
 interface ClinicRequestBody {
@@ -112,8 +103,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!canCreateClinic(groups)) {
             return {
                 statusCode: 403,
-                headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
-                body: JSON.stringify({ error: "Only Root or Clinic Admin can create clinics" }),
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Forbidden",
+                    message: "Only Root or Clinic Admin users can create clinics",
+                    statusCode: 403,
+                    timestamp: new Date().toISOString(),
+                }),
             };
         }
 
@@ -124,9 +120,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!name || !addressLine1 || !city || !state || !pincode) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
-                    error: "Missing required fields: name, addressLine1, city, state, pincode",
+                    error: "Bad Request",
+                    message: "Missing required fields",
+                    requiredFields: ["name", "addressLine1", "city", "state", "pincode"],
+                    statusCode: 400,
+                    timestamp: new Date().toISOString(),
                 }),
             };
         }
@@ -181,12 +181,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Step 5: Return Success Response
         return {
-            statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
+            statusCode: 201,
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 status: "success",
+                statusCode: 201,
                 message: "Clinic created successfully",
-                clinic: {
+                data: {
                     clinicId,
                     name,
                     addressLine1,
@@ -199,22 +200,53 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     createdBy: userSub,
                     createdAt: timestamp,
                     updatedAt: timestamp,
-                    // Note: The response uses an array for associatedUsers, 
-                    // regardless of whether the DB stored it as L or SS.
-                    associatedUsers: [userSub], 
+                    associatedUsers: [userSub],
                 },
             }),
         };
     } catch (error) {
         // Step 6: Handle Errors
-        const err = error as Error & { message?: string }; // Cast for message property access
+        const err = error as Error & { name?: string; message?: string };
         console.error("Error creating clinic:", err);
+        
+        let statusCode = 500;
+        let errorMessage = "Internal Server Error";
+        let details: any = {};
+
+        if (err.name === "ConditionalCheckFailedException") {
+            statusCode = 409;
+            errorMessage = "Conflict";
+            details = { message: "Clinic with this ID already exists" };
+        } else if (err.name === "ValidationException") {
+            statusCode = 400;
+            errorMessage = "Bad Request";
+            details = { message: "Invalid request parameters" };
+        } else if (err.name === "ResourceNotFoundException") {
+            statusCode = 404;
+            errorMessage = "Not Found";
+            details = { message: "DynamoDB table not found" };
+        } else if (err.name === "AccessDenied") {
+            statusCode = 403;
+            errorMessage = "Forbidden";
+            details = { message: "Access denied to DynamoDB resource" };
+        } else if (err.name === "ServiceUnavailableException") {
+            statusCode = 503;
+            errorMessage = "Service Unavailable";
+            details = { message: "DynamoDB service temporarily unavailable" };
+        } else {
+            statusCode = 500;
+            errorMessage = "Internal Server Error";
+            details = { message: err.message || "An unexpected error occurred" };
+        }
+
         return {
-            statusCode: 400,
-            headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
+            statusCode,
+            headers: CORS_HEADERS,
             body: JSON.stringify({
-                error: "Failed to create clinic",
-                details: err.message || String(error),
+                error: errorMessage,
+                statusCode,
+                details,
+                timestamp: new Date().toISOString(),
             }),
         };
     }

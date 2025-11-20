@@ -11,19 +11,6 @@ import { CORS_HEADERS } from "./corsHeaders";
 // directly to the CognitoIdentityServiceProvider constructor.
 const cognito = new CognitoIdentityServiceProvider({ region: process.env.REGION });
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-interface CorsHeaders {
-  [header: string]: string | number | boolean;
-}
-
-const CORS: CorsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "OPTIONS,POST",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  "Content-Type": "application/json"
-};
-*/
 
 // --- Utility Functions ---
 
@@ -146,8 +133,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     if (!email) {
       console.warn("[validate] Missing email in body.");
-      // ✅ Updated to use CORS_HEADERS
-      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Email is required" }) };
+      return {
+        statusCode: 400,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          error: "Bad Request",
+          statusCode: 400,
+          message: "Email is required",
+          details: { missingFields: ["email"] },
+          timestamp: new Date().toISOString()
+        })
+      };
     }
 
     // Extract id token from Authorization header
@@ -156,11 +152,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     if (!authHeader.startsWith("Bearer ")) {
       console.warn("[auth] Missing or invalid Bearer token.");
-      // ✅ Updated to use CORS_HEADERS
       return {
         statusCode: 401,
         headers: CORS_HEADERS,
-        body: JSON.stringify({ error: "Authorization Bearer ID token is required" })
+        body: JSON.stringify({
+          error: "Unauthorized",
+          statusCode: 401,
+          message: "Authorization Bearer ID token is required",
+          details: { missingHeader: "Authorization: Bearer <token>" },
+          timestamp: new Date().toISOString()
+        })
       };
     }
 
@@ -168,8 +169,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const parts = idToken.split(".");
     if (parts.length !== 3) {
       console.warn("[decode] ID token does not have 3 JWT parts.");
-      // ✅ Updated to use CORS_HEADERS
-      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Invalid ID token format" }) };
+      return {
+        statusCode: 400,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          error: "Bad Request",
+          statusCode: 400,
+          message: "Invalid ID token format",
+          details: { reason: "JWT must contain 3 parts separated by dots" },
+          timestamp: new Date().toISOString()
+        })
+      };
     }
 
     // Decode JWT payload
@@ -219,8 +229,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.log("[resp] result:", JSON.stringify(result, null, 2));
     console.log("=== /auth/check-email REQUEST END (200) ===");
 
-    // ✅ Updated to use CORS_HEADERS
-    return { statusCode: 200, headers: CORS_HEADERS, body: JSON.stringify(result) };
+    return {
+      statusCode: 200,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({
+        status: "success",
+        statusCode: 200,
+        message: "Email verified against token",
+        data: {
+          email,
+          userType,
+          groups: groupNames,
+          tokenEmail
+        },
+        timestamp: new Date().toISOString()
+      })
+    };
 
   } catch (err) {
     const error = err as AWS.AWSError;
@@ -231,11 +255,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.error("stack:", error?.stack);
 
     const code = error?.code || error?.name;
-    if (code === "UserNotFoundException") {
-      // ✅ Updated to use CORS_HEADERS
-      return { statusCode: 404, headers: CORS_HEADERS, body: JSON.stringify({ error: "User not found" }) };
-    }
-    // ✅ Updated to use CORS_HEADERS
-    return { statusCode: 500, headers: CORS_HEADERS, body: JSON.stringify({ error: `Error verifying email: ${error?.message}` }) };
+    const errorName = code === "UserNotFoundException" ? "Not Found" : "Internal Server Error";
+    const statusCode = code === "UserNotFoundException" ? 404 : 500;
+
+    return {
+      statusCode: statusCode,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({
+        error: errorName,
+        statusCode: statusCode,
+        message: code === "UserNotFoundException" ? "User not found" : "Error verifying email",
+        details: { errorType: code, reason: error?.message },
+        timestamp: new Date().toISOString()
+      })
+    };
   }
 };

@@ -20,16 +20,6 @@ import { CORS_HEADERS } from "./corsHeaders";
 const REGION: string = process.env.REGION || process.env.AWS_REGION || "us-east-1";
 const dynamodb = new DynamoDBClient({ region: REGION });
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-type CorsHeaders = Record<string, string>;
-const CORS_HEADERS: CorsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token",
-    "Access-Control-Allow-Methods": "OPTIONS,GET,POST,PUT,DELETE",
-    "Content-Type": "application/json",
-};
-*/
 
 /**
  * Helper to construct the API Gateway response object.
@@ -178,7 +168,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isAllowed: boolean = normalizedGroups.some(g => ALLOWED_GROUPS.has(g));
         
         if (!isAllowed) {
-            return resp(403, { error: "Access denied: only Root, ClinicAdmin, or ClinicManager can create consulting projects" });
+            return resp(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Access denied",
+                details: { requiredGroups: ["Root", "ClinicAdmin", "ClinicManager"], userGroups: rawGroups },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const jobData: JobData = JSON.parse(event.body || "{}");
@@ -198,40 +194,85 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             !jobData.end_time
         ) {
             return resp(400, {
-                error:
-                    "Required fields: clinicIds (array), professional_role, dates, shift_speciality, hours_per_day, hourly_rate, total_days, start_time, end_time",
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Missing required fields",
+                details: {
+                    requiredFields: ["clinicIds", "professional_role", "dates", "shift_speciality", "hours_per_day", "hourly_rate", "total_days", "start_time", "end_time"]
+                },
+                timestamp: new Date().toISOString()
             });
         }
 
         // Professional role validation
         if (typeof VALID_ROLE_VALUES === 'undefined' || !VALID_ROLE_VALUES.includes(jobData.professional_role)) {
-            return resp(400, { error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES ? VALID_ROLE_VALUES.join(", ") : "Unknown"}` });
+            return resp(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid professional role",
+                details: { validRoles: VALID_ROLE_VALUES || [], providedRole: jobData.professional_role },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Dates validation
         if (!Array.isArray(jobData.dates) || jobData.dates.length === 0) {
-            return resp(400, { error: "Dates must be a non-empty array" });
+            return resp(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Dates array is required",
+                details: { providedDates: jobData.dates },
+                timestamp: new Date().toISOString()
+            });
         }
         if (jobData.dates.length > 30) {
-            return resp(400, { error: "Maximum 30 days allowed for consulting projects" });
+            return resp(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Too many dates",
+                details: { maxDays: 30, providedDays: jobData.dates.length },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         for (const d of jobData.dates) {
             const dt = new Date(d);
-            if (isNaN(dt.getTime())) return resp(400, { error: `Invalid date format: ${d}. Use ISO date string.` });
-            if (dt < today) return resp(400, { error: `All dates must be in the future. Invalid date: ${d}` });
+            if (isNaN(dt.getTime())) return resp(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid date format",
+                details: { invalidDate: d, expectedFormat: "ISO 8601 date string" },
+                timestamp: new Date().toISOString()
+            });
+            if (dt < today) return resp(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "All dates must be in the future",
+                details: { invalidDate: d, today: today.toISOString() },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const uniqueDates = new Set(jobData.dates);
         if (uniqueDates.size !== jobData.dates.length) {
-            return resp(400, { error: "Duplicate dates are not allowed" });
+            return resp(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Duplicate dates not allowed",
+                details: { uniqueDates: uniqueDates.size, providedDates: jobData.dates.length },
+                timestamp: new Date().toISOString()
+            });
         }
 
         if (jobData.dates.length !== jobData.total_days) {
             return resp(400, {
-                error: `Number of dates (${jobData.dates.length}) must match total_days (${jobData.total_days})`,
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Dates count must match total_days",
+                details: { datesCount: jobData.dates.length, totalDays: jobData.total_days },
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -240,16 +281,34 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const hourlyRate = Number(jobData.hourly_rate);
         
         if (!Number.isFinite(hoursPerDay) || hoursPerDay < 1 || hoursPerDay > 12) {
-            return resp(400, { error: "Hours per day must be a number between 1 and 12" });
+            return resp(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid hours per day",
+                details: { providedHours: jobData.hours_per_day, validRange: "1-12" },
+                timestamp: new Date().toISOString()
+            });
         }
         if (!Number.isFinite(hourlyRate) || hourlyRate < 10 || hourlyRate > 300) {
-            return resp(400, { error: "Hourly rate must be a number between $10 and $300 for consulting" });
+            return resp(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid hourly rate",
+                details: { providedRate: `$${jobData.hourly_rate}`, validRange: "$10-$300" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // ---------- meal_break: generic string + optional minutes ----------
         const mealBreakRaw = typeof jobData.meal_break === "string" ? normalizeWs(jobData.meal_break) : "";
         if (mealBreakRaw && mealBreakRaw.length > 100) {
-            return resp(400, { error: "meal_break must be 100 characters or fewer" });
+            return resp(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Meal break description too long",
+                details: { maxLength: 100, providedLength: mealBreakRaw.length },
+                timestamp: new Date().toISOString()
+            });
         }
         const mealBreakMinutes = mealBreakRaw ? parseMealBreakMinutes(mealBreakRaw) : null;
         // ------------------------------------------------------------------
@@ -370,26 +429,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Return successful response
         return resp(201, {
-            message: "Multi-day consulting projects created successfully for multiple clinics",
-            jobIds,
-            job_type: "multi_day_consulting",
-            professional_role: jobData.professional_role,
-            dates: sortedDates,
-            total_days: jobData.total_days,
-            hours_per_day: hoursPerDay,
-            hourly_rate: hourlyRate,
-            meal_break: mealBreakRaw || null,
-            meal_break_minutes: mealBreakMinutes, // nullable
-            total_hours: totalHours,
-            total_compensation: `$${totalPay.toLocaleString()}`,
-            start_date: sortedDates[0],
-            end_date: sortedDates[sortedDates.length - 1],
+            status: "success",
+            statusCode: 201,
+            message: "Multi-day consulting projects created successfully",
+            data: {
+                jobIds,
+                jobType: "multi_day_consulting",
+                professionalRole: jobData.professional_role,
+                dates: sortedDates,
+                totalDays: jobData.total_days,
+                hoursPerDay: hoursPerDay,
+                hourlyRate: hourlyRate,
+                mealBreak: mealBreakRaw || null,
+                mealBreakMinutes: mealBreakMinutes,
+                totalHours: totalHours,
+                totalCompensation: `$${totalPay.toLocaleString()}`,
+                startDate: sortedDates[0],
+                endDate: sortedDates[sortedDates.length - 1]
+            },
+            timestamp: new Date().toISOString()
         });
     } catch (error) {
         // Handle Errors
         const err = error as Error & { message?: string };
         console.error("Error creating multi-day consulting project:", err);
-        return resp(500, { error: err.message || "Internal Server Error" });
+        return resp(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to create multi-day consulting projects",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };
 

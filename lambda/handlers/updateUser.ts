@@ -198,7 +198,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     
     if (method !== "PUT") {
-         return json(405, { error: "Method not allowed. Only PUT is supported." });
+         return json(405, {
+            error: "Method Not Allowed",
+            statusCode: 405,
+            message: "Only PUT method is supported",
+            details: { allowedMethods: ["PUT"] },
+            timestamp: new Date().toISOString()
+         });
     }
 
     try {
@@ -212,7 +218,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isClinicAdmin: boolean = groups.includes("ClinicAdmin");
         
         if (!isRootUser && !isClinicAdmin) {
-            return json(403, { error: "Only Root or ClinicAdmin can update users" });
+            return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Only Root or ClinicAdmin can update users",
+                details: { requiredGroups: ["Root", "ClinicAdmin"] },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const body: RequestBody = JSON.parse(event.body || "{}");
@@ -221,19 +233,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const username: string | null = extractUsername(event, email);
         
         if (!username) {
-            return json(400, { error: "Missing username/email in path or body. Expected PUT /users/{email}" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Username or email is required",
+                details: { pathFormat: "PUT /users/{email}" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Ensure user exists (throws if not found)
         try {
             await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
         } catch (e) {
-            return json(404, { error: `User does not exist: ${username}` });
+            return json(404, {
+                error: "Not Found",
+                statusCode: 404,
+                message: "User does not exist",
+                details: { username: username },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 1. Validate subgroup
         if (subgroup && !VALID_SUBGROUPS.includes(subgroup)) {
-            return json(400, { error: `Invalid subgroup: ${subgroup}. Valid groups are: ${VALID_SUBGROUPS.join(", ")}` });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: `Invalid subgroup: ${subgroup}`,
+                details: { validGroups: VALID_SUBGROUPS },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 2. Build user attributes array for Cognito update
@@ -244,12 +274,29 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (phoneNumber) {
             const e164 = toE164(phoneNumber);
             if (!e164) {
-                return json(400, { error: "Invalid phone number format. Use E.164 like +919876543210." });
+                return json(400, {
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Invalid phone number format",
+                    details: { format: "E.164 format (e.g., +919876543210)", received: phoneNumber },
+                    timestamp: new Date().toISOString()
+                });
             }
             attrs.push({ Name: "phone_number", Value: e164 });
         }
 
-        // 3. Update Cognito attributes
+        // 3. Validate clinicIds if provided
+        if (clinicIds && !Array.isArray(clinicIds)) {
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "clinicIds must be an array",
+                details: { expected: "Array of clinic IDs" },
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+        // 4. Update Cognito attributes if any were collected
         if (attrs.length) {
             await cognito.send(new AdminUpdateUserAttributesCommand({
                 UserPoolId: USER_POOL_ID,
@@ -258,7 +305,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }));
         }
 
-        // 4. Update Cognito group (if subgroup is provided)
+        // 5. Update Cognito group (if subgroup is provided)
         if (subgroup) {
             // Remove from all existing clinic groups first
             await removeFromClinicSubgroups(username);
@@ -271,12 +318,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }));
         }
 
-        // 5. Update DynamoDB to associate user with clinics (if clinicIds are provided)
+        // 6. Update DynamoDB to associate user with clinics (if clinicIds are provided)
         if (Array.isArray(clinicIds) && clinicIds.length > 0) {
             const userSub: string | null = await getUserSubByUsername(username);
             
             if (!userSub) {
-                return json(400, { error: "Could not resolve user sub required for DynamoDB association" });
+                return json(400, {
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Could not resolve user sub required for clinic association",
+                    details: { username: username },
+                    timestamp: new Date().toISOString()
+                });
             }
             
             for (const cid of clinicIds) {
@@ -296,11 +349,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
-        return json(200, { status: "success", message: "User updated successfully", username });
+        return json(200, {
+            status: "success",
+            statusCode: 200,
+            message: "User updated successfully",
+            data: { username },
+            timestamp: new Date().toISOString()
+        });
     } catch (error) {
         console.error("Error updating user:", error);
-        return json(500, { 
-            error: (error as Error)?.message || "Failed to update user due to an unexpected server error." 
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to update user",
+            details: { reason: (error as Error)?.message },
+            timestamp: new Date().toISOString()
         });
     }
 };

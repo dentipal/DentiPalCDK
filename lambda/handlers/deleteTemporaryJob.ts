@@ -16,14 +16,13 @@ import { CORS_HEADERS } from "./corsHeaders";
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Define CORS headers
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Content-Type": "application/json",
-};
-*/
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 /**
  * AWS Lambda handler to delete a temporary job posting and update its active applications.
@@ -60,13 +59,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("Extracted jobId:", jobId);
 
         if (!jobId) {
-            return {
+            return json(400, {
+                error: "Bad Request",
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "jobId is required in path parameters",
-                }),
-            };
+                message: "Job ID is required",
+                details: { pathFormat: "/jobs/temporary/{jobId}" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 3. Verify Job Existence and Ownership
@@ -85,24 +84,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("jobResponse:", jobResponse);
 
         if (!job) {
-            return {
+            return json(404, {
+                error: "Not Found",
                 statusCode: 404,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "Temporary job not found or access denied",
-                }),
-            };
+                message: "Temporary job not found",
+                details: { jobId: jobId },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 4. Verify Job Type is 'temporary'
         if (job.job_type?.S !== 'temporary') {
-            return {
+            return json(400, {
+                error: "Bad Request",
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "This is not a temporary job. Use the appropriate endpoint for this job type.",
-                }),
-            };
+                message: "Invalid job type",
+                details: { expected: "temporary", received: job.job_type?.S },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 5. Check for Active Applications
@@ -185,30 +184,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamodb.send(deleteCommand);
 
         // 8. Success Response
-        return {
+        return json(200, {
+            status: "success",
             statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: JSON.stringify({
-                message: "Temporary job deleted successfully",
-                jobId,
+            message: "Temporary job deleted successfully",
+            data: {
+                jobId: jobId,
                 affectedApplications: activeApplications.length,
                 applicationHandling: activeApplications.length > 0 ?
                     "Active applications have been marked as 'job_cancelled'" :
-                    "No active applications were affected",
-            }),
-        };
+                    "No active applications were affected"
+            },
+            timestamp: new Date().toISOString()
+        });
     }
     catch (error) {
         // 9. Error Handling
         const err = error as Error;
         console.error("Error deleting temporary job:", err);
-        return {
+        return json(500, {
+            error: "Internal Server Error",
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: JSON.stringify({
-                error: "Failed to delete temporary job. Please try again.",
-                details: err.message,
-            }),
-        };
+            message: "Failed to delete temporary job",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

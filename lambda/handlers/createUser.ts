@@ -30,16 +30,7 @@ const cognitoClient = new CognitoIdentityProviderClient({ region: REGION });
 const dynamodbClient = new DynamoDBClient({ region: REGION }); 
 const sesClient = new SESClient({ region: REGION }); 
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Define shared CORS headers
-const corsHeaders: Record<string, string> = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "OPTIONS,POST,GET",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Content-Type": "application/json",
-};
-*/
+
 
 // Define the expected structure for the request body
 interface RequestBody {
@@ -86,8 +77,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("Unauthorized user tried to add new user:", groupsArray);
             return {
                 statusCode: 403,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "Unauthorized: Only Root users can add new users" }),
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    message: "Only Root users can add new users",
+                    statusCode: 403,
+                    timestamp: new Date().toISOString(),
+                }),
             };
         }
 
@@ -103,8 +99,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("Passwords do not match");
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "Passwords do not match" }),
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Bad Request",
+                    message: "Passwords do not match",
+                    field: "password",
+                    statusCode: 400,
+                    timestamp: new Date().toISOString(),
+                }),
             };
         }
 
@@ -113,8 +115,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("Missing required fields:", { firstName, lastName, phoneNumber, email, password, subgroup, clinicIds });
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "Missing required fields" }),
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Bad Request",
+                    message: "Missing required fields",
+                    requiredFields: ["firstName", "lastName", "phoneNumber", "email", "password", "verifyPassword", "subgroup", "clinicIds"],
+                    statusCode: 400,
+                    timestamp: new Date().toISOString(),
+                }),
             };
         }
 
@@ -124,8 +132,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("Invalid subgroup:", subgroup);
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "Invalid subgroup" }),
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Bad Request",
+                    message: "Invalid subgroup",
+                    validOptions: validGroups,
+                    provided: subgroup,
+                    statusCode: 400,
+                    timestamp: new Date().toISOString(),
+                }),
             };
         }
 
@@ -245,39 +260,73 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         return {
-            statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            statusCode: 201,
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 status: "success",
-                message: "User created successfully and associated with clinic(s).",
-                userSub: userSub,
+                statusCode: 201,
+                message: "User created successfully",
+                data: {
+                    userSub,
+                    email,
+                    firstName,
+                    lastName,
+                    subgroup,
+                    clinics: clinicIds,
+                    createdAt: new Date().toISOString(),
+                },
             }),
         };
 
     } catch (error) {
         // Explicitly type the error
         const err = error as Error & { name?: string; message?: string };
-        console.error("Error:", err);
+        console.error("Error creating user:", err);
         
-        // Provide more specific error messages
-        let errorMessage = err.message || "An unknown error occurred";
-        let statusCode = 400; // Default to 400 for client-related errors
+        // Handle specific Cognito errors
+        let statusCode = 500;
+        let errorMessage = "Internal Server Error";
+        let details: any = {};
 
         if (err.name === "UsernameExistsException") {
-            errorMessage = "A user with this email already exists.";
+            statusCode = 409;
+            errorMessage = "Conflict";
+            details = { message: "User with this email already exists" };
         } else if (err.name === "InvalidPasswordException") {
-            errorMessage = "Password does not meet the requirements.";
+            statusCode = 400;
+            errorMessage = "Bad Request";
+            details = { message: "Password does not meet requirements" };
         } else if (err.name === "NotAuthorizedException") {
-             errorMessage = "Unauthorized access or incorrect credentials.";
-             statusCode = 401;
-        } else if (err.name === "InternalErrorException") {
-             statusCode = 500;
+            statusCode = 401;
+            errorMessage = "Unauthorized";
+            details = { message: "Invalid credentials or authentication failed" };
+        } else if (err.name === "InvalidParameterException") {
+            statusCode = 400;
+            errorMessage = "Bad Request";
+            details = { message: err.message || "Invalid parameters provided" };
+        } else if (err.name === "LimitExceededException") {
+            statusCode = 429;
+            errorMessage = "Too Many Requests";
+            details = { message: "Too many requests. Please try again later." };
+        } else if (err.name === "InternalErrorException" || err.name === "ServiceFailureException") {
+            statusCode = 503;
+            errorMessage = "Service Unavailable";
+            details = { message: "AWS service error. Please try again later." };
+        } else {
+            statusCode = 500;
+            errorMessage = "Internal Server Error";
+            details = { message: err.message || "An unexpected error occurred" };
         }
 
         return {
-            statusCode: statusCode,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: JSON.stringify({ error: errorMessage }),
+            statusCode,
+            headers: CORS_HEADERS,
+            body: JSON.stringify({
+                error: errorMessage,
+                statusCode,
+                details,
+                timestamp: new Date().toISOString(),
+            }),
         };
     }
 };

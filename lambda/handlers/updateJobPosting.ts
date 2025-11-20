@@ -76,24 +76,48 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     if (method !== 'PUT') {
-        return json(405, { error: 'Method not allowed' });
+        return json(405, {
+            error: "Method Not Allowed",
+            statusCode: 405,
+            message: "Only PUT method is supported",
+            details: { allowedMethods: ["PUT"] },
+            timestamp: new Date().toISOString()
+        });
     }
 
     try {
         // Auth check: Get userSub from the authorizer
         const userSub: string | undefined = event.requestContext.authorizer?.claims?.sub;
         if (!userSub) {
-            return json(401, { error: 'Unauthorized: Missing user identity.' });
+            return json(401, {
+                error: "Unauthorized",
+                statusCode: 401,
+                message: "Missing user identity",
+                details: { reason: "User authentication required" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Extract job ID from path parameters
         const jobId: string | undefined = event.pathParameters?.jobId;
         if (!jobId) {
-            return json(400, { error: 'Job ID is required' });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Job ID is required",
+                details: { pathFormat: "PUT /job-postings/{jobId}" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         if (!event.body) {
-            return json(400, { error: 'Request body is required' });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Request body is required",
+                details: { hint: "Provide JSON body with fields to update" },
+                timestamp: new Date().toISOString()
+            });
         }
         
         const updateData: UpdateJobPostingBody = JSON.parse(event.body);
@@ -107,7 +131,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existingJobResponse = await ddbDoc.send(getCommand);
         
         if (!existingJobResponse.Item) {
-            return json(404, { error: 'Job not found' });
+            return json(404, {
+                error: "Not Found",
+                statusCode: 404,
+                message: "Job not found",
+                details: { jobId: jobId },
+                timestamp: new Date().toISOString()
+            });
         }
         
         const existingItem = existingJobResponse.Item as JobItem;
@@ -117,24 +147,48 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Check for critical missing data
         if (!clinicUserSub || !jobType) {
-             return json(500, { error: 'Internal job data missing (clinicUserSub or job_type)' });
+             return json(500, {
+                 error: "Internal Server Error",
+                 statusCode: 500,
+                 message: "Internal job data incomplete",
+                 details: { missingFields: [!clinicUserSub ? "clinicUserSub" : "", !jobType ? "job_type" : ""].filter(Boolean) },
+                 timestamp: new Date().toISOString()
+             });
         }
 
         // Security check: Only clinic owner can update their jobs
         if (userSub !== clinicUserSub) {
-            return json(403, { error: 'Access denied - you can only update your own jobs' });
+            return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Access denied",
+                details: { reason: "Only job creator can update" },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Prevent updates to completed jobs
         if (currentStatus === 'completed') {
-            return json(400, { error: 'Cannot update completed jobs' });
+            return json(409, {
+                error: "Conflict",
+                statusCode: 409,
+                message: "Cannot update completed jobs",
+                details: { currentStatus: currentStatus },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // --- Step 2: Validation ---
         
         // Validate professional role
         if (updateData.professional_role && !VALID_ROLE_VALUES.includes(updateData.professional_role)) {
-            return json(400, { error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES.join(', ')}` });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid professional role",
+                details: { validRoles: VALID_ROLE_VALUES, received: updateData.professional_role },
+                timestamp: new Date().toISOString()
+            });
         }
 
         const now = new Date();
@@ -272,15 +326,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const result = await ddbDoc.send(new UpdateCommand(updateCommand));
 
         return json(200, {
-            message: 'Job updated successfully',
-            jobId,
-            updatedAt: updatedTimestamp,
-            fieldsUpdated: Object.keys(updateData).filter(key => updateData[key as keyof UpdateJobPostingBody] !== undefined),
-            updatedJob: result.Attributes
+            status: "success",
+            statusCode: 200,
+            message: "Job updated successfully",
+            data: {
+                jobId,
+                updatedAt: updatedTimestamp,
+                fieldsUpdated: Object.keys(updateData).filter(key => updateData[key as keyof UpdateJobPostingBody] !== undefined),
+                updatedJob: result.Attributes
+            },
+            timestamp: new Date().toISOString()
         });
     }
     catch (error) {
         console.error('Error updating job posting:', error);
-        return json(500, { error: 'Internal server error', details: (error as Error).message });
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to update job",
+            details: { reason: (error as Error).message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

@@ -140,7 +140,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const result: QueryCommandOutput = await dynamodb.send(new QueryCommand(queryParams));
 
         if (!result.Items || result.Items.length === 0) {
-            return json(404, { error: "No clinic profiles found" });
+            return json(404, {
+                error: "Not Found",
+                statusCode: 404,
+                message: "No clinic profiles found",
+                details: { userSub: userSub },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // Unmarshal the main clinic profiles (full version)
@@ -251,13 +257,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // STEP 4: Final Response
         // -----------------------------------------------------------------
         return json(200, {
+            status: "success",
+            statusCode: 200,
             message: "Clinic profiles retrieved successfully",
-            profiles: enrichedProfiles,
+            data: { profiles: enrichedProfiles },
+            timestamp: new Date().toISOString()
         });
     } catch (error: any) {
         // Log detailed error for debugging
         console.error("DETAILED ERROR:", error); 
         console.error("Error retrieving clinic profiles:", error);
-        return json(500, { error: "Failed to retrieve clinic profiles" });
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to retrieve clinic profiles",
+            details: { reason: error.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

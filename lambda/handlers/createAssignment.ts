@@ -58,7 +58,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!isRoot(groups)) {
             console.warn(`[AUTH] User groups [${groups.join(',')}] is not a Root user. Access denied.`);
-            return json(403, { error: "Only Root users can assign clinics" });
+            return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Access denied",
+                details: { requiredGroup: "Root", userGroups: groups },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 2. Input Validation
@@ -66,12 +72,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!userSub || !clinicId || !accessLevel) {
             console.warn("[VALIDATION] Missing required fields: userSub, clinicId, or accessLevel.");
-            return json(400, { error: "Missing required fields" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Missing required fields",
+                details: { requiredFields: ["userSub", "clinicId", "accessLevel"] },
+                timestamp: new Date().toISOString()
+            });
         }
 
         if (!VALID_ACCESS_LEVELS.includes(accessLevel)) {
             console.warn(`[VALIDATION] Invalid access level provided: ${accessLevel}`);
-            return json(400, { error: "Invalid access level" });
+            return json(400, {
+                error: "Bad Request",
+                statusCode: 400,
+                message: "Invalid access level",
+                details: { validLevels: VALID_ACCESS_LEVELS, providedLevel: accessLevel },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 3. DynamoDB Put Operation
@@ -92,17 +110,29 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamoClient.send(command);
 
         // 4. Success Response
-        return json(200, { 
-            status: "success", 
-            message: "User assigned to clinic successfully" 
+        return json(200, {
+            status: "success",
+            statusCode: 200,
+            message: "User assigned to clinic successfully",
+            data: {
+                userSub,
+                clinicId,
+                accessLevel,
+                assignedAt: now
+            },
+            timestamp: new Date().toISOString()
         });
 
     } catch (error) {
         // Use type assertion for better error logging
         const err = error as Error;
         console.error("Error assigning user to clinic:", err);
-        return json(500, { 
-            error: `Failed to assign user: ${err.message}` 
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to assign user to clinic",
+            details: { reason: err.message },
+            timestamp: new Date().toISOString()
         });
     }
 };

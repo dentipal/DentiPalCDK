@@ -62,7 +62,13 @@ export const handler = async (
 
     if (!loginData.email || !loginData.password) {
       console.warn("Missing required fields");
-      return json(400, { error: "Required fields: email, password" });
+      return json(400, {
+        error: "Bad Request",
+        message: "Missing required fields",
+        requiredFields: ["email", "password"],
+        statusCode: 400,
+        timestamp: new Date().toISOString(),
+      });
     }
 
     const email = String(loginData.email).toLowerCase();
@@ -82,7 +88,12 @@ export const handler = async (
 
     if (!tokens) {
       console.warn("Authentication failed for email:", email);
-      return json(401, { error: "Authentication failed. Please check your credentials." });
+      return json(401, {
+        error: "Unauthorized",
+        message: "Invalid email or password",
+        statusCode: 401,
+        timestamp: new Date().toISOString(),
+      });
     }
 
     // Decode id token (no external deps)
@@ -219,31 +230,70 @@ export const handler = async (
       clinicsCount: responseBody.user.associatedClinics.length,
     });
 
-    return json(200, responseBody);
+    return json(200, {
+      status: "success",
+      statusCode: 200,
+      message: "Login successful",
+      data: {
+        tokens: {
+          accessToken: tokens.AccessToken,
+          idToken: tokens.IdToken,
+          refreshToken: tokens.RefreshToken,
+          expiresIn: tokens.ExpiresIn,
+          tokenType: tokens.TokenType || "Bearer",
+        },
+        user: {
+          email,
+          sub: userSub,
+          groups: userGroups,
+          associatedClinics,
+        },
+        loginAt: new Date().toISOString(),
+      },
+    });
 
   } catch (error: any) {
-    console.error("=== ERROR DEBUG ===");
     console.error("Error during login:", error);
-    console.error("Error name:", error.name);
-    console.error("Error message:", error.message);
-    console.error("Error stack:", error.stack);
+    
+    let statusCode = 500;
+    let errorMessage = "Internal Server Error";
+    let details: any = {};
 
     if (error.name === "NotAuthorizedException") {
-      return json(401, { error: "Invalid email or password" });
-    }
-    if (error.name === "UserNotConfirmedException") {
-      return json(403, { error: "Email not verified. Please verify your account first." });
-    }
-    if (error.name === "UserNotFoundException") {
-      return json(404, { error: "User not found. Please check your email or register first." });
-    }
-    if (error.name === "TooManyRequestsException") {
-      return json(429, { error: "Too many login attempts. Please try again later." });
+      statusCode = 401;
+      errorMessage = "Unauthorized";
+      details = { message: "Invalid email or password" };
+    } else if (error.name === "UserNotConfirmedException") {
+      statusCode = 403;
+      errorMessage = "Forbidden";
+      details = { message: "Email not verified. Please verify your email first." };
+    } else if (error.name === "UserNotFoundException") {
+      statusCode = 404;
+      errorMessage = "Not Found";
+      details = { message: "User with this email does not exist" };
+    } else if (error.name === "TooManyRequestsException") {
+      statusCode = 429;
+      errorMessage = "Too Many Requests";
+      details = { message: "Too many login attempts. Please try again later." };
+    } else if (error.name === "ResourceNotFoundException") {
+      statusCode = 404;
+      errorMessage = "Not Found";
+      details = { message: "Cognito resource not found" };
+    } else if (error.name === "InvalidParameterException") {
+      statusCode = 400;
+      errorMessage = "Bad Request";
+      details = { message: "Invalid request parameters" };
+    } else {
+      statusCode = 500;
+      errorMessage = "Internal Server Error";
+      details = { message: error.message || "An unexpected error occurred" };
     }
 
-    return json(500, {
-      error: "Login failed. Please try again.",
-      details: error.message,
+    return json(statusCode, {
+      error: errorMessage,
+      statusCode,
+      details,
+      timestamp: new Date().toISOString(),
     });
   }
 };

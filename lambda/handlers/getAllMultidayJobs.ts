@@ -14,14 +14,6 @@ import { CORS_HEADERS } from "./corsHeaders";
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-// ❌ REMOVED INLINE CORS DEFINITION
-/*
-// Define CORS headers for convenience
-const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*", // Allow cross-origin requests
-    "Access-Control-Allow-Headers": "Content-Type, Authorization", // Allow CORS headers
-};
-*/
 
 // Simplified interface for a DynamoDB Item
 interface DynamoDBJobItem {

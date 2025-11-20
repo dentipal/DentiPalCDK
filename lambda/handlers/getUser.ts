@@ -44,9 +44,15 @@ export const handler = async (
         if (!requesterSub) {
             console.error("Requester not authenticated: 'sub' claim missing.");
             return {
-                statusCode: 400,
+                statusCode: 401,
                 headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "User not authenticated" })
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    statusCode: 401,
+                    message: "User authentication required",
+                    details: { issue: "Missing 'sub' claim in JWT token" },
+                    timestamp: new Date().toISOString()
+                })
             };
         }
 
@@ -86,8 +92,13 @@ export const handler = async (
                 headers: CORS_HEADERS,
                 body: JSON.stringify({
                     status: "success",
-                    users: [],
-                    requesterId: requesterSub
+                    statusCode: 200,
+                    message: "No clinics found for requester",
+                    data: {
+                        users: [],
+                        requesterId: requesterSub
+                    },
+                    timestamp: new Date().toISOString()
                 })
             };
         }
@@ -112,8 +123,13 @@ export const handler = async (
                 headers: CORS_HEADERS,
                 body: JSON.stringify({
                     status: "success",
-                    users: [],
-                    requesterId: requesterSub
+                    statusCode: 200,
+                    message: "No associated users found",
+                    data: {
+                        users: [],
+                        requesterId: requesterSub
+                    },
+                    timestamp: new Date().toISOString()
                 })
             };
         }
@@ -200,9 +216,14 @@ export const handler = async (
             headers: CORS_HEADERS,
             body: JSON.stringify({
                 status: "success",
-                users: successfulUsers,
-                requesterId: requesterSub
-                // failedToFetchUsers: usersWithErrors  // optional
+                statusCode: 200,
+                message: `Retrieved ${successfulUsers.length} user(s)`,
+                data: {
+                    users: successfulUsers,
+                    requesterId: requesterSub,
+                    failedCount: usersWithErrors.length
+                },
+                timestamp: new Date().toISOString()
             })
         };
     } catch (error: any) {
@@ -211,7 +232,11 @@ export const handler = async (
             statusCode: 500,
             headers: CORS_HEADERS,
             body: JSON.stringify({
-                error: `Failed to retrieve user(s) details: ${error.message}`
+                error: "Internal Server Error",
+                statusCode: 500,
+                message: "Failed to retrieve user(s) details",
+                details: { reason: error.message },
+                timestamp: new Date().toISOString()
             })
         };
     }
