@@ -7,8 +7,8 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import {
     APIGatewayProxyEventV2,
-    APIGatewayProxyResultV2
-} from "aws-lambda"; // Assuming this runs in an AWS Lambda environment
+    APIGatewayProxyStructuredResultV2 // Import the structured interface
+} from "aws-lambda"; 
 
 // --- Type Definitions for better safety ---
 
@@ -27,7 +27,8 @@ interface RefreshedTokens {
 }
 
 /** Defines the standard Lambda/API Gateway response structure. */
-interface HandlerResponse extends APIGatewayProxyResultV2 {
+// FIX: Extend APIGatewayProxyStructuredResultV2 instead of the Union type APIGatewayProxyResultV2
+interface HandlerResponse extends APIGatewayProxyStructuredResultV2 {
     statusCode: number;
     body: string; // The body is always a stringified JSON object
 }

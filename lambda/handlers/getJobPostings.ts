@@ -6,6 +6,7 @@ import {
     GetItemCommand,
     AttributeValue
 } from "@aws-sdk/client-dynamodb";
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken, isRoot } from "./utils";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -16,27 +17,6 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 interface DynamoItem {
     [key: string]: AttributeValue;
-}
-
-interface LambdaEvent {
-    pathParameters?: {
-        proxy?: string;
-    };
-    requestContext?: {
-        authorizer?: {
-            claims?: { [key: string]: string };
-        };
-    };
-    headers?: {
-        Authorization?: string;
-    };
-    body?: string;
-    [key: string]: any;
-}
-
-interface LambdaResponse {
-    statusCode: number;
-    body: string;
 }
 
 // -------------------------
@@ -58,13 +38,22 @@ async function getAllClinicUserSubs(): Promise<string[]> {
 // -------------------------
 // Handler: Retrieve job postings (clinic or root)
 // -------------------------
-export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
-    try {
-        const userSub = await validateToken(event);
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
+    // This variable isn't strictly used in the logic below but is good practice to have if needed later
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 
-        const groups =
-            event.requestContext?.authorizer?.claims?.["cognito:groups"]?.split(",") ||
-            [];
+    try {
+        // Cast event to any to ensure compatibility with validateToken utility
+        const userSub = await validateToken(event as any);
+
+        // Safe access to claims
+        const claims = event.requestContext?.authorizer?.claims || {};
+        const groupsClaim = claims["cognito:groups"];
+        
+        const groups = typeof groupsClaim === 'string' 
+            ? groupsClaim.split(",") 
+            : (Array.isArray(groupsClaim) ? groupsClaim : []);
 
         let clinicUserSubs: string[] = [];
 
@@ -119,6 +108,13 @@ export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
                             const clinicCommand = new GetItemCommand({
                                 TableName: process.env.CLINIC_PROFILES_TABLE,
                                 Key: {
+                                    // Assuming primary key is just clinicId or composite. 
+                                    // Based on context from other files (getJobPosting.ts), it seems to be composite {clinicId, userSub}
+                                    // However, here we only have clinicUserSub. 
+                                    // IF the table PK is just userSub (or GSI), we query. 
+                                    // IF the table PK is composite, we can't GetItem with just userSub.
+                                    // Based on the code provided in the query, it uses userSub as the Key.
+                                    // NOTE: If this fails in runtime, check if CLINIC_PROFILES_TABLE uses clinicId as PK.
                                     userSub: { S: clinicUserSub }
                                 }
                             });

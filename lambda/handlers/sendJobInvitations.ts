@@ -24,21 +24,23 @@ interface InvitationPayload {
     customNotes?: string;
 }
 
-/** Define a generalized structure for DynamoDB Items */
-type DynamoDBItem = { [key: string]: AttributeValue | undefined };
+/** Define a generalized structure for DynamoDB Items (strict for PutItem) */
+type DynamoDBItem = Record<string, AttributeValue>;
 
 /** Minimal structure for a Job Posting Item (dynamoDB format) */
-interface JobItem extends DynamoDBItem {
+interface JobItem {
     clinicId?: AttributeValue;
     professional_role?: AttributeValue;
     job_type?: AttributeValue;
+    [key: string]: AttributeValue | undefined;
 }
 
 /** Minimal structure for a Professional Profile Item (dynamoDB format) */
-interface ProfessionalItem extends DynamoDBItem {
+interface ProfessionalItem {
     userSub?: AttributeValue;
     full_name?: AttributeValue;
     role?: AttributeValue;
+    [key: string]: AttributeValue | undefined;
 }
 
 /** Defines the result structure for a single successful invitation */
@@ -94,7 +96,11 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
 
         // 2. Path Parsing (Extract jobId)
         // Using `pathParameters.proxy` and `path` for compatibility with common API Gateway setups
-        const fullPath: string = (event.pathParameters?.proxy as string) || (event.path || "");
+        // FIX: Safely access 'path' via casting or use 'rawPath' for V2
+        const v1Path = (event as APIGatewayProxyEvent).path;
+        const v2Path = (event as APIGatewayProxyEventV2).rawPath;
+        
+        const fullPath: string = (event.pathParameters?.proxy as string) || (v1Path || v2Path || "");
         const pathParts: string[] = fullPath.split("/");
         
         // Find "jobs" in path and take the next element as jobId
@@ -219,7 +225,8 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
                 const invitationId: string = uuidv4();
                 
                 // Note: DynamoDB PutItem requires all AttributeValues to be defined with type (S, N, BOOL, etc.)
-                const invitationItem: DynamoDBItem = {
+                // FIX: Defined invitationItem as explicit Record<string, AttributeValue> to match PutItemCommand input
+                const invitationItem: Record<string, AttributeValue> = {
                     invitationId: { S: invitationId },
                     jobId: { S: jobId },
                     professionalUserSub: { S: profSub },

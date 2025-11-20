@@ -4,15 +4,10 @@ import {
     PutItemCommand,
     AttributeValue
 } from "@aws-sdk/client-dynamodb";
-import { validateToken } from "./utils"; // Assumed dependency
-import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles"; // Assumed dependency
+import { validateToken } from "./utils"; 
+import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles"; 
 
 // --- Type Definitions ---
-
-// Simplified type for the expected DynamoDB Item structure
-interface DynamoDBItem {
-    [key: string]: AttributeValue;
-}
 
 // Interface for the expected request body data structure
 interface ProfessionalProfileData {
@@ -44,8 +39,10 @@ const CORS_HEADERS: CorsHeaders = {
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // FIX: Cast requestContext to 'any' to handle both REST API (v1) and HTTP API (v2) events
+    // APIGatewayProxyEvent definition strictly checks for v1 properties.
     const method =
-        event.requestContext?.http?.method || event.httpMethod || "POST";
+        (event.requestContext as any).http?.method || event.httpMethod || "POST";
 
     // --- CORS preflight ---
     if (method === "OPTIONS") {
@@ -85,8 +82,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const timestamp = new Date().toISOString();
 
-        // 4. Build DynamoDB item (Base fields)
-        const item: DynamoDBItem = {
+        // 4. Build DynamoDB item using standard Record<string, AttributeValue>
+        const item: Record<string, AttributeValue> = {
             userSub: { S: userSub }, // Primary Key
             role: { S: profileData.role },
             first_name: { S: profileData.first_name },
@@ -129,7 +126,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 7. Insert into DynamoDB with ConditionExpression to prevent overwrites
         await dynamodb.send(
             new PutItemCommand({
-                TableName: process.env.PROFESSIONAL_PROFILES_TABLE, // Assumed ENV var
+                TableName: process.env.PROFESSIONAL_PROFILES_TABLE,
                 Item: item,
                 // Only create the profile if a userSub does not already exist
                 ConditionExpression: "attribute_not_exists(userSub)",

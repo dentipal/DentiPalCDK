@@ -5,6 +5,7 @@ import {
     QueryCommand,
     AttributeValue
 } from "@aws-sdk/client-dynamodb";
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { validateToken } from "./utils";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -12,22 +13,6 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 // ---------------------------
 // Types
 // ---------------------------
-interface LambdaEvent {
-    pathParameters?: {
-        proxy?: string;
-    };
-    headers?: {
-        Authorization?: string;
-    };
-    requestContext?: any;
-    body?: string;
-    [key: string]: any;
-}
-
-interface LambdaResponse {
-    statusCode: number;
-    body: string;
-}
 
 interface DynamoItem {
     [key: string]: AttributeValue;
@@ -36,12 +21,22 @@ interface DynamoItem {
 // ---------------------------
 // Handler
 // ---------------------------
-export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
-    try {
-        const userSub = await validateToken(event);
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // FIX: Handle HTTP API (v2) structure where method is in requestContext.http
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 
-        const pathParts = event.pathParameters?.proxy?.split("/");
-        const jobId = pathParts?.[2];
+    try {
+        // Cast event to any to ensure compatibility with validateToken utility
+        const userSub = await validateToken(event as any);
+
+        // Extract jobId from proxy path or directly from pathParameters
+        let jobId = event.pathParameters?.jobId;
+
+        if (!jobId && event.pathParameters?.proxy) {
+             const pathParts = event.pathParameters.proxy.split("/");
+             // Expected path from original code: /jobs/multi_day_consulting/{jobId} -> index 2
+             jobId = pathParts[2];
+        }
 
         if (!jobId) {
             return {

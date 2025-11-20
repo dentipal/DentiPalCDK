@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     GetItemCommand,
@@ -8,70 +7,54 @@ import {
     AttributeValue,
     GetItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-
-// The utility function is assumed to be imported from './utils'.
-// The actual type for the event is often APIGatewayProxyEventV2 or similar, 
-// but we'll use a simplified interface for portability.
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils"; 
 
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-// --- Type Definitions ---
-
-// Simplified interface for the Lambda event, focusing on necessary properties
-interface LambdaEvent {
-    pathParameters?: {
-        proxy?: string;
-    };
-    [key: string]: any; // Allow other properties like 'headers'
-}
-
-// Interface for a DynamoDB Item with specific known keys and standard AttributeValue structure
-interface DynamoDBItem {
-    clinicUserSub?: AttributeValue;
-    jobId?: AttributeValue;
-    applicationId?: AttributeValue;
-    job_type?: AttributeValue;
-    applicationStatus?: AttributeValue;
-    [key: string]: AttributeValue | undefined; // Allow for other properties
-}
-
-// Interface for the Lambda response
-interface LambdaResponse {
-    statusCode: number;
-    headers: { [key: string]: string };
-    body: string;
-}
-
 // Define CORS headers
-const corsHeaders = {
+const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
+    "Content-Type": "application/json",
 };
 
 /**
  * AWS Lambda handler to delete a temporary job posting and update its active applications.
- * * @param event The API Gateway event object.
- * @returns A LambdaResponse object.
+ * @param event The API Gateway event object.
+ * @returns A APIGatewayProxyResult object.
  */
-export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+
+    // Preflight
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // 1. Validate Token and Extract User Sub
-        // Assumes validateToken returns the user's sub/ID (string) and throws on failure.
-        const userSub: string = validateToken(event);
+        // We cast event to 'any' to ensure compatibility if validateToken expects specific properties not strictly in ProxyEvent
+        const userSub: string = await validateToken(event as any);
         console.log("userSub:", userSub);
 
         // 2. Extract jobId from Path
-        // The path structure is assumed to be /jobs/temporary/{jobId} or similar
-        const pathParts = event.pathParameters?.proxy?.split('/');
-        const jobId = pathParts?.[2];
+        // Supports direct path parameter {jobId} or proxy path /jobs/temporary/{jobId}
+        let jobId = event.pathParameters?.jobId;
+        
+        if (!jobId && event.pathParameters?.proxy) {
+             const pathParts: string[] = event.pathParameters.proxy.split("/");
+             // Expected path: /jobs/temporary/{jobId} -> parts[2]
+             jobId = pathParts[pathParts.length - 1]; 
+        }
 
-        console.log("Extracted jobId from path:", jobId);
+        console.log("Extracted jobId:", jobId);
 
         if (!jobId) {
             return {
                 statusCode: 400,
-                headers: corsHeaders,
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
                     error: "jobId is required in path parameters",
                 }),
@@ -82,21 +65,21 @@ export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
         const getJobCommand = new GetItemCommand({
             TableName: process.env.JOB_POSTINGS_TABLE,
             Key: {
+                // Assuming Schema: PK=clinicUserSub, SK=jobId based on previous context
                 clinicUserSub: { S: userSub },
                 jobId: { S: jobId },
             },
         });
 
         const jobResponse: GetItemCommandOutput = await dynamodb.send(getJobCommand);
-
-        const job = jobResponse.Item as DynamoDBItem | undefined;
+        const job = jobResponse.Item;
 
         console.log("jobResponse:", jobResponse);
 
         if (!job) {
             return {
                 statusCode: 404,
-                headers: corsHeaders,
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
                     error: "Temporary job not found or access denied",
                 }),
@@ -107,7 +90,7 @@ export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
         if (job.job_type?.S !== 'temporary') {
             return {
                 statusCode: 400,
-                headers: corsHeaders,
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
                     error: "This is not a temporary job. Use the appropriate endpoint for this job type.",
                 }),
@@ -117,9 +100,9 @@ export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
         // 5. Check for Active Applications
         const applicationsCommand = new QueryCommand({
             TableName: process.env.JOB_APPLICATIONS_TABLE,
+            // Assuming 'JobIndex' GSI exists where PK=jobId, or jobId is the PK of the table
+            // If jobId is NOT the partition key of the table, you MUST specify IndexName: 'JobIndex'
             KeyConditionExpression: "jobId = :jobId",
-            // Note: FilterExpression is performed *after* the KeyConditionExpression (Query), 
-            // potentially leading to high WCU consumption if the key returns many items.
             FilterExpression: "applicationStatus IN (:pending, :accepted, :negotiating)",
             ExpressionAttributeValues: {
                 ":jobId": { S: jobId },
@@ -130,7 +113,7 @@ export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
         });
 
         const applicationsResponse = await dynamodb.send(applicationsCommand);
-        const activeApplications: DynamoDBItem[] = (applicationsResponse.Items as DynamoDBItem[] || []);
+        const activeApplications = applicationsResponse.Items || [];
 
         console.log("activeApplications:", activeApplications);
 
@@ -141,18 +124,34 @@ export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
             // Use Promise.all to run all updates concurrently
             await Promise.all(activeApplications.map(async (application) => {
                 const applicationId = application.applicationId?.S;
+                const professionalUserSub = application.professionalUserSub?.S;
+
                 if (!applicationId) {
                     console.warn("Application item missing applicationId field, skipping update:", application);
                     return;
                 }
 
                 try {
+                    // Determine the Primary Key for the update
+                    // Usually it's Composite: (jobId, professionalUserSub) OR just (applicationId)
+                    // Adjust 'Key' below to match your actual JOB_APPLICATIONS_TABLE schema
+                    const updateKey: Record<string, AttributeValue> = {};
+                    
+                    if (application.jobId?.S && application.professionalUserSub?.S) {
+                         updateKey.jobId = { S: application.jobId.S };
+                         updateKey.professionalUserSub = { S: application.professionalUserSub.S };
+                    } else if (application.applicationId?.S) {
+                         updateKey.applicationId = { S: application.applicationId.S };
+                    }
+
+                    if (Object.keys(updateKey).length === 0) {
+                        console.warn("Could not determine Primary Key for application update", application);
+                        return;
+                    }
+
                     await dynamodb.send(new UpdateItemCommand({
                         TableName: process.env.JOB_APPLICATIONS_TABLE,
-                        Key: {
-                            jobId: { S: jobId },
-                            applicationId: { S: applicationId },
-                        },
+                        Key: updateKey,
                         UpdateExpression: "SET applicationStatus = :status, updatedAt = :updatedAt",
                         ExpressionAttributeValues: {
                             ":status": { S: "job_cancelled" },
@@ -180,7 +179,7 @@ export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
         // 8. Success Response
         return {
             statusCode: 200,
-            headers: corsHeaders,
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 message: "Temporary job deleted successfully",
                 jobId,
@@ -191,21 +190,17 @@ export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
             }),
         };
     }
-    catch (error: any) {
+    catch (error) {
         // 9. Error Handling
-        console.error("Error deleting temporary job:", error);
+        const err = error as Error;
+        console.error("Error deleting temporary job:", err);
         return {
             statusCode: 500,
-            headers: corsHeaders,
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 error: "Failed to delete temporary job. Please try again.",
-                details: error.message,
+                details: err.message,
             }),
         };
     }
 };
-
-// Export the handler for use by the Lambda runtime environment
-// This line is for compatibility with Node.js modules environments
-// It is equivalent to `export const handler = ...` in ES modules if transpiled correctly.
-// exports.handler = handler;

@@ -5,35 +5,17 @@ import {
     UpdateItemCommandInput,
     DynamoDBClientConfig 
 } from "@aws-sdk/client-dynamodb";
-// Imports for AWS Lambda types (assuming API Gateway V2 or similar)
+// Imports for AWS Lambda types (Switching to V1 to match project consistency and fix type errors)
 import { 
-    APIGatewayProxyEventV2, 
-    APIGatewayProxyResultV2 
+    APIGatewayProxyEvent, 
+    APIGatewayProxyResult 
 } from "aws-lambda"; 
-
-// Import the utility function. You'll need to create a `utils.ts` file 
-// with the correct export for `validateToken`.
-// import { validateToken } from "./utils"; // <--- Uncomment this line
+import { validateToken } from "./utils";
 
 // --- Type Definitions ---
 
-// Define the shape of the expected utility function
-interface TokenValidator {
-    (event: APIGatewayProxyEventV2): Promise<string>; // Returns the userSub
-}
-
-// Placeholder for the external utility function (replace with actual import)
-const validateToken: TokenValidator = (event: APIGatewayProxyEventV2): Promise<string> => {
-    // NOTE: This placeholder assumes validateToken is defined and correctly 
-    // imports the external function. You must ensure `validateToken` is 
-    // exported from `./utils` and is correctly implemented.
-    // For now, returning a mock user sub. Remove this mock and 
-    // uncomment the real import when deploying.
-    return Promise.resolve("mock-user-sub-from-token"); 
-};
-
-/** Standard response format for API Gateway V2 Lambda integration */
-type HandlerResponse = APIGatewayProxyResultV2;
+/** Standard response format for API Gateway Lambda integration */
+type HandlerResponse = APIGatewayProxyResult;
 
 /** Interface for the expected structure of Cognito claims */
 interface CognitoClaims {
@@ -65,8 +47,9 @@ const ALLOWED_GROUPS = new Set<string>(["root", "clinicadmin", "clinicmanager"])
 /** * Robustly parses user groups from the Cognito Authorizer claims in the event. 
  * Handles string, array, and JSON string representations.
  */
-function parseGroupsFromAuthorizer(event: APIGatewayProxyEventV2): string[] {
-    const claims: CognitoClaims = event?.requestContext?.authorizer?.claims || {};
+function parseGroupsFromAuthorizer(event: APIGatewayProxyEvent): string[] {
+    // FIX: Cast requestContext to 'any' to avoid type errors if the definition is strict
+    const claims: CognitoClaims = (event.requestContext as any)?.authorizer?.claims || {};
     let raw: string | string[] = claims["cognito:groups"] ?? claims["cognito:Groups"] ?? "";
 
     if (Array.isArray(raw)) return raw;
@@ -103,21 +86,31 @@ const normalize = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, "
 /* ------------------------------------------------------------------------- */
 
 // --- Main Handler Function ---
-export const handler = async (event: APIGatewayProxyEventV2): Promise<HandlerResponse> => {
+export const handler = async (event: APIGatewayProxyEvent): Promise<HandlerResponse> => {
     try {
+        // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
+        const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+
         // Handle preflight OPTIONS request
-        if (event.requestContext.http.method === "OPTIONS") {
+        if (method === "OPTIONS") {
             return { statusCode: 200, headers: CORS_HEADERS, body: "" };
         }
 
         // 1. Extract and Validate Path Parameters (clinicId and jobId)
-        // Using event.rawPath for reliability in V2 payload format
-        const fullPath = event.rawPath || ""; 
-        // Regex to match: /<clinicId>/reject/<jobId>
-        const match = fullPath.match(/\/([^/]+)\/reject\/([^/]+)/);
+        // Support both direct path parameters and proxy path
+        // /<clinicId>/reject/<jobId>
+        let clinicId = event.pathParameters?.clinicId;
+        let jobId = event.pathParameters?.jobId;
 
-        const clinicId: string | undefined = match?.[1];
-        const jobId: string | undefined = match?.[2];
+        // Fallback to parsing path/proxy if specific params aren't mapped
+        if ((!clinicId || !jobId) && (event.path || event.pathParameters?.proxy)) {
+             const rawPath = event.path || event.pathParameters?.proxy || "";
+             const match = rawPath.match(/\/([^/]+)\/reject\/([^/]+)/);
+             if (match) {
+                 clinicId = match[1];
+                 jobId = match[2];
+             }
+        }
 
         if (!clinicId || !jobId) {
             return {
@@ -131,7 +124,8 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<HandlerRes
 
         // 2. Validate Token (Authentication)
         // Assume validateToken throws an error on failure, which is caught below
-        await validateToken(event); 
+        // Cast event to any to ensure compatibility
+        await validateToken(event as any); 
 
         // 3. Group Authorization
         const rawGroups: string[] = parseGroupsFromAuthorizer(event);
@@ -165,7 +159,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<HandlerRes
 
         // 5. Update DynamoDB
         const updateParams: UpdateItemCommandInput = {
-            TableName: "DentiPal-JobApplications", // Assuming table name is constant
+            TableName: "DentiPal-JobApplications", // Assuming table name is constant, consider using process.env.JOB_APPLICATIONS_TABLE
             Key: {
                 jobId: { S: jobId },
                 professionalUserSub: { S: professionalUserSub }
@@ -207,8 +201,3 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<HandlerRes
         };
     }
 };
-
-// Export the handler function
-// Note: In modern Node.js environments (like Lambda), using `export const handler` is often enough, 
-// but keeping `exports.handler = handler;` for compatibility if needed.
-// exports.handler = handler;

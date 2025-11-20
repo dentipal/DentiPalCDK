@@ -8,15 +8,10 @@ import {
     GetItemCommandInput
 } from "@aws-sdk/client-dynamodb";
 import { v4 as uuidv4 } from "uuid";
-import { validateToken } from "./utils"; // Assumed dependency
-import { VALID_ROLE_VALUES } from "./professionalRoles"; // Assumed dependency
+import { validateToken } from "./utils"; 
+import { VALID_ROLE_VALUES } from "./professionalRoles"; 
 
 // --- Type Definitions ---
-
-// Simplified type for the expected DynamoDB Item structure
-interface DynamoDBItem {
-    [key: string]: AttributeValue;
-}
 
 // Interface for the expected request body data structure (temporary job)
 interface MultiJobData {
@@ -84,12 +79,12 @@ const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
  * @param userSub The user's Cognito sub.
  * @returns The DynamoDB item or null.
  */
-async function getClinicProfileByUser(clinicId: string, userSub: string): Promise<DynamoDBItem | null> {
+async function getClinicProfileByUser(clinicId: string, userSub: string): Promise<Record<string, AttributeValue> | null> {
     const res: GetItemCommandOutput = await dynamodb.send(
         new GetItemCommand({
             TableName: process.env.CLINIC_PROFILES_TABLE,
             Key: { clinicId: { S: clinicId }, userSub: { S: userSub } },
-        } as GetItemCommandInput) // Explicit cast for Key structure
+        } as GetItemCommandInput) 
     );
     return res.Item || null;
 }
@@ -97,8 +92,10 @@ async function getClinicProfileByUser(clinicId: string, userSub: string): Promis
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+
     // Preflight
-    const method = event?.httpMethod || event?.requestContext?.http?.method;
     if (method === "OPTIONS") {
         return { statusCode: 204, headers: CORS_HEADERS, body: "" };
     }
@@ -248,8 +245,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const practiceType = p.practice_type?.S || "General";
 
 
-            // 6. Build DynamoDB item
-            const item: DynamoDBItem = {
+            // 6. Build DynamoDB item using Record<string, AttributeValue>
+            const item: Record<string, AttributeValue> = {
                 clinicId: { S: clinicId },
                 clinicUserSub: { S: userSub },
                 jobId: { S: jobId },
@@ -304,7 +301,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             // 7. Insert the job into DynamoDB
             await dynamodb.send(
                 new PutItemCommand({
-                    TableName: process.env.JOB_POSTINGS_TABLE, // Assumed ENV var
+                    TableName: process.env.JOB_POSTINGS_TABLE,
                     Item: item,
                 })
             );

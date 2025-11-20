@@ -2,6 +2,7 @@
 import {
     DynamoDBClient,
     QueryCommand,
+    QueryCommandInput, // Import the input type
     QueryCommandOutput,
     AttributeValue,
     GetItemCommand,
@@ -129,7 +130,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("Extracted userSub:", userSub);
 
         // Step 2: Fetch clinic profiles
-        const queryParams = {
+        const queryParams: QueryCommandInput = {
             TableName: CLINIC_PROFILES_TABLE,
             IndexName: "userSub-index", // Assumed GSI
             KeyConditionExpression: "userSub = :userSub",
@@ -204,22 +205,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const enrichedProfiles: EnrichedClinicProfile[] = await Promise.all(
             clinicProfiles.map(async (clinic) => {
                 // --- Get Posted Jobs Count ---
-                const postedParams = {
+                // FIX: Explicitly type params as QueryCommandInput to allow 'Select' property string literal
+                const postedParams: QueryCommandInput = {
                     TableName: CLINIC_JOBS_POSTED_TABLE,
-                    IndexName: "ClinicIdIndex", // ⚠️ GSI name from original code
+                    IndexName: "ClinicIdIndex", 
                     KeyConditionExpression: "clinicId = :clinicId",
                     ExpressionAttributeValues: {
                         ":clinicId": { S: clinic.clinicId },
                     },
-                    Select: "COUNT", // Only fetch the count
+                    Select: "COUNT", // Now correctly interpreted as specific string literal
                 };
                 const postedResult: QueryCommandOutput = await dynamodb.send(new QueryCommand(postedParams));
                 const jobsPosted: number = postedResult.Count || 0;
 
                 // --- Get Completed Jobs Count & Total Paid ---
-                const completedParams = {
+                const completedParams: QueryCommandInput = {
                     TableName: CLINICS_JOBS_COMPLETED_TABLE,
-                    IndexName: "clinicId-index", // ⚠️ GSI name from original code
+                    IndexName: "clinicId-index",
                     KeyConditionExpression: "clinicId = :clinicId",
                     ExpressionAttributeValues: {
                         ":clinicId": { S: clinic.clinicId },

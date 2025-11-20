@@ -38,8 +38,8 @@ const CORS: CorsHeaders = {
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // Determine the HTTP method safely
-    const method = event.httpMethod || event.requestContext?.http?.method;
+    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 
     try {
         // 1. Handle CORS preflight

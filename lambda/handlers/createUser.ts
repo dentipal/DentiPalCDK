@@ -6,15 +6,12 @@ import {
     AdminCreateUserCommandInput,
     AdminAddUserToGroupCommandInput,
     AdminSetUserPasswordCommandInput,
-    AttributeType, // Type for user attributes in Cognito
+    AttributeType, 
 } from "@aws-sdk/client-cognito-identity-provider";
 import { 
     DynamoDBClient, 
     UpdateItemCommand, 
     UpdateItemCommandInput,
-    GetItemCommand,
-    GetItemCommandInput,
-    AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { 
     SESClient, 
@@ -27,8 +24,8 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 const REGION: string = process.env.REGION || process.env.AWS_REGION || "us-east-1";
 
 const cognitoClient = new CognitoIdentityProviderClient({ region: REGION });
-const dynamodbClient = new DynamoDBClient({ region: REGION }); // Using DynamoDBClient (v3)
-const sesClient = new SESClient({ region: REGION }); // Using SESClient (v3)
+const dynamodbClient = new DynamoDBClient({ region: REGION }); 
+const sesClient = new SESClient({ region: REGION }); 
 
 // Define shared CORS headers
 const corsHeaders: Record<string, string> = {
@@ -67,11 +64,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 1️⃣ Verify Root User Authorization
-        // Note: The original JS uses event.requestContext?.authorizer?.claims?.['cognito:groups']
-        // which returns a string or array depending on the API Gateway type. We assume an array for simplicity,
-        // but handle the case where it might be a comma-separated string if needed (though the original check assumes array).
-        const userGroups: string[] = (event.requestContext?.authorizer?.claims?.['cognito:groups'] as string[] | string) || [];
-        const groupsArray = Array.isArray(userGroups) ? userGroups : String(userGroups).split(',').map(s => s.trim());
+        const claims = event.requestContext?.authorizer?.claims || {};
+        const rawGroups = claims['cognito:groups'];
+        
+        // FIX: Cast as 'string | string[]' and allow the variable to hold either type.
+        // The groupsArray logic below normalizes it into a string[] anyway.
+        const userGroups = (rawGroups || []) as string | string[];
+        
+        const groupsArray = Array.isArray(userGroups) 
+            ? userGroups 
+            : String(userGroups).split(',').map(s => s.trim());
         
         if (!groupsArray.includes("Root")) {
             console.warn("Unauthorized user tried to add new user:", groupsArray);
@@ -171,23 +173,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log(`User ${email} added to group ${subgroup}`);
 
         // 4️⃣ Store userSub in the clinics' associated users (using DynamoDBClient v3)
-        const CLINICS_TABLE_NAME = "DentiPal-Clinics"; // Table name is hardcoded in JS
+        const CLINICS_TABLE_NAME = "DentiPal-Clinics"; 
 
         for (const clinicId of clinicIds) {
-            // Check if the user is already associated (optional, but safer)
-            // The original JS only performed a get to check existence before updating, 
-            // but the update logic doesn't strictly need the get.
-            
-            // The UpdateItemCommand below implements the original DocumentClient logic:
-            // UpdateExpression: "SET AssociatedUsers = list_append(if_not_exists(AssociatedUsers, :empty_list), :userSub)"
-            // This appends the new userSub to the list, initializing the list if it doesn't exist.
-            
             const clinicUpdateParams: UpdateItemCommandInput = {
                 TableName: CLINICS_TABLE_NAME,
-                Key: { clinicId: { S: clinicId } }, // Key must be typed for V3 client
+                Key: { clinicId: { S: clinicId } }, 
                 UpdateExpression: "SET AssociatedUsers = list_append(if_not_exists(AssociatedUsers, :empty_list), :userSub)",
                 ExpressionAttributeValues: {
-                    ":userSub": { L: [{ S: userSub }] }, // Append a list containing the new userSub
+                    ":userSub": { L: [{ S: userSub }] }, 
                     ":empty_list": { L: [] },
                 },
                 ReturnValues: "UPDATED_NEW",

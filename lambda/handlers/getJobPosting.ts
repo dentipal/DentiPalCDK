@@ -1,10 +1,10 @@
-"use strict";
 import {
     DynamoDBClient,
     QueryCommand,
     GetItemCommand,
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { validateToken } from "./utils";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -17,21 +17,11 @@ interface DynamoItem {
     [key: string]: AttributeValue;
 }
 
-interface LambdaEvent {
-    pathParameters?: {
-        proxy?: string;
-    };
-    headers?: {
-        Authorization?: string;
-    };
-    body?: string;
-    [key: string]: any;
-}
-
-interface LambdaResponse {
-    statusCode: number;
-    body: string;
-}
+// Define CORS headers
+const CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Content-Type": "application/json",
+};
 
 // ----------------------
 // Fetch job details
@@ -99,16 +89,41 @@ const fetchApplicationCount = async (jobId: string): Promise<number> => {
 // ----------------------
 // Main handler
 // ----------------------
-export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
-    try {
-        const userSub = await validateToken(event);
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // FIX: Handle HTTP API (v2) structure where method is in requestContext.http
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 
-        const pathParts = event.pathParameters?.proxy?.split("/");
-        const jobId = pathParts?.[1];
+    // Preflight
+    if (method === "OPTIONS") {
+        return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+    }
+
+    try {
+        // Cast event to any to ensure compatibility with validateToken utility
+        const userSub = await validateToken(event as any);
+
+        // Extract jobId from proxy path or directly from pathParameters
+        // Path structure usually: /jobs/{jobId} or /jobs/permanent/{jobId}
+        let jobId = event.pathParameters?.jobId;
+
+        if (!jobId && event.pathParameters?.proxy) {
+             const pathParts = event.pathParameters.proxy.split("/");
+             // Adjust index based on your routing. 
+             // If path is /jobs/{id}, it might be index 1. 
+             // If path is /jobs/permanent/{id}, it might be index 2.
+             // Trying to grab the last segment is usually safe for ID lookups.
+             jobId = pathParts[pathParts.length - 1];
+             
+             // Fallback logic from original code if specific index was intended (index 1)
+             if (!jobId || jobId === 'permanent' || jobId === 'temporary') {
+                 jobId = pathParts[1]; 
+             }
+        }
 
         if (!jobId) {
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
                     error: "jobId is required in path parameters",
                 }),
@@ -181,6 +196,7 @@ export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
 
         return {
             statusCode: 200,
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 message: `${job.job_type?.S} job retrieved successfully`,
                 job: jobResponse,
@@ -188,11 +204,14 @@ export const handler = async (event: LambdaEvent): Promise<LambdaResponse> => {
         };
     } catch (error: any) {
         console.error("Error retrieving job posting:", error);
+        const errorMessage = error instanceof Error ? error.message : "An unknown error occurred";
+        
         return {
             statusCode: 500,
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 error: "Failed to retrieve job posting. Please try again.",
-                details: error.message,
+                details: errorMessage,
             }),
         };
     }

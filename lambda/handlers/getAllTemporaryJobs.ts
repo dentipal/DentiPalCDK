@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     ScanCommand,
@@ -110,13 +109,16 @@ async function getAppliedJobIdsForUser(userSub: string): Promise<Set<string>> {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    const method = event?.requestContext?.http?.method || event?.httpMethod || "GET";
+    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
+    const method = (event.requestContext as any)?.http?.method || event.httpMethod || "GET";
+    
     if (method === "OPTIONS") return { statusCode: 204, headers: CORS, body: "" };
 
     try {
         // Logged-in professional
         // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = await validateToken(event);
+        // We cast event to any here to ensure compatibility with whatever specific event type validateToken expects
+        const userSub: string = await validateToken(event as any);
         const today = utcToday();
 
         // Scan upcoming temporary jobs
@@ -148,7 +150,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // ---- NEW: get applied jobIds for this professional and exclude them ----
         const appliedJobIds = await getAppliedJobIdsForUser(userSub);
-        const visibleItems = (items || []).filter(it => !appliedJobIds.has(it.jobId?.S));
+        const visibleItems = (items || []).filter(it => !appliedJobIds.has(it.jobId?.S || ""));
 
         // Helpers (re-implemented for TypeScript compatibility)
         const num = (x: AttributeValue | undefined): number | undefined => 

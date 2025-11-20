@@ -161,7 +161,7 @@ function createReferralEmail(
 
     Why Join DentiPal?
     💼 Access to exclusive job opportunities
-    ⚡ Fast and easy application process  
+    ⚡ Fast and easy application process  
     💰 Competitive compensation
     🤝 Direct connection with dental clinics
     📱 User-friendly mobile platform
@@ -188,7 +188,10 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
 
     try {
         // Handle CORS preflight request
-        if (event.httpMethod === 'OPTIONS') {
+        // FIX: Cast to any to handle method access safely for both V1 and V2 types
+        const method = (event as any).requestContext?.http?.method || (event as any).httpMethod;
+        
+        if (method === 'OPTIONS') {
             return {
                 statusCode: 200,
                 headers: headers,

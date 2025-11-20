@@ -64,7 +64,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 2. HTTP Method Check
-        if (event.httpMethod !== 'DELETE') {
+        // FIX: Handle HTTP API (v2) structure where method is in requestContext.http
+        const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+        
+        if (method !== 'DELETE') {
             return resp(405, { error: 'Method not allowed. Only DELETE is supported.' });
         }
 
@@ -126,7 +129,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const applications = await dynamodb.send(new QueryCommand(applicationsQueryInput));
 
             if (applications.Items) {
-                const activeApplications = applications.Items.filter((item: QueriedItem) => { // Fixed implicit 'any'
+                const activeApplications = applications.Items.filter((item: QueriedItem) => {
                     const status = item.applicationStatus?.S || 'pending';
                     return !['withdrawn', 'rejected'].includes(status);
                 });
@@ -138,7 +141,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     });
                 }
                 // Collect applications for potential forced cleanup later
-                applications.Items.forEach((item: QueriedItem) => { // Fixed implicit 'any'
+                applications.Items.forEach((item: QueriedItem) => {
                     if (item.jobId?.S && item.applicationId?.S) {
                         itemsToDelete.push({ DeleteRequest: { Key: { jobId: { S: item.jobId.S }, applicationId: { S: item.applicationId.S } } } });
                     }
@@ -159,7 +162,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const invitations = await dynamodb.send(new QueryCommand(invitationsQueryInput));
 
             if (invitations.Items) {
-                const activeInvitations = invitations.Items.filter((item: QueriedItem) => { // Fixed implicit 'any'
+                const activeInvitations = invitations.Items.filter((item: QueriedItem) => {
                     const status = item.invitationStatus?.S || 'pending';
                     return !['declined', 'withdrawn'].includes(status);
                 });
@@ -171,7 +174,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     });
                 }
                 // Collect invitations for potential forced cleanup later
-                invitations.Items.forEach((item: QueriedItem) => { // Fixed implicit 'any'
+                invitations.Items.forEach((item: QueriedItem) => {
                     if (item.jobId?.S && item.professionalUserSub?.S) {
                         itemsToDelete.push({
                             DeleteRequest: {
@@ -206,6 +209,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 for (const app of itemsToDelete.filter(i => i.DeleteRequest.Key.applicationId && i.DeleteRequest.Key.jobId)) {
                     const appId = app.DeleteRequest.Key.applicationId.S;
                     
+                    if (!appId) continue; // FIX: Ensure appId is defined before using it
+
                     const negotiationsQueryInput: QueryCommandInput = {
                         TableName: process.env.JOB_NEGOTIATIONS_TABLE,
                         // This assumes JOB_NEGOTIATIONS_TABLE has applicationId as a GSI or PK
@@ -215,7 +220,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     const negotiations = await dynamodb.send(new QueryCommand(negotiationsQueryInput));
                     
                     if (negotiations.Items) {
-                        negotiations.Items.forEach((item: QueriedItem) => { // Fixed implicit 'any'
+                        negotiations.Items.forEach((item: QueriedItem) => {
                             if (item.applicationId?.S && item.negotiationId?.S) {
                                 itemsToDelete.push({
                                     DeleteRequest: {

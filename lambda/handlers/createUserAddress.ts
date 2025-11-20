@@ -35,8 +35,9 @@ interface AddressRequestBody {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
     const method =
-        event?.requestContext?.http?.method || event?.httpMethod || "POST";
+        (event.requestContext as any)?.http?.method || event.httpMethod || "POST";
 
     // --- CORS preflight ---
     if (method === "OPTIONS") {

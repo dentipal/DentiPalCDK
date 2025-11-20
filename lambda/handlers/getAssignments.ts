@@ -16,10 +16,11 @@ const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
 
 // Simplified type for a raw DynamoDB item
 interface DynamoDBAssignmentItem {
-    userSub: AttributeValue;
-    clinicId: AttributeValue;
-    accessLevel: AttributeValue;
-    assignedAt: AttributeValue;
+    userSub?: AttributeValue;
+    clinicId?: AttributeValue;
+    accessLevel?: AttributeValue;
+    assignedAt?: AttributeValue;
+    [key: string]: AttributeValue | undefined; // Index signature for compatibility
 }
 
 // Interface for the final mapped assignment object
@@ -75,12 +76,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const response: QueryCommandOutput = await dynamoClient.send(command);
 
         // 4. Map and Transform Results
-        const assignments: AssignmentResponseItem[] = (response.Items as DynamoDBAssignmentItem[] || []).map(item => ({
-            // Safely unwrap AttributeValue string types
-            userSub: item.userSub.S || '',
-            clinicId: item.clinicId.S || '',
-            accessLevel: item.accessLevel.S || '',
-            assignedAt: item.assignedAt.S || '',
+        // FIX: Double cast to unknown first to satisfy TypeScript compiler regarding the type mismatch
+        const items = (response.Items || []) as unknown as DynamoDBAssignmentItem[];
+        
+        const assignments: AssignmentResponseItem[] = items.map(item => ({
+            // Safely unwrap AttributeValue string types using optional chaining
+            userSub: item.userSub?.S || '',
+            clinicId: item.clinicId?.S || '',
+            accessLevel: item.accessLevel?.S || '',
+            assignedAt: item.assignedAt?.S || '',
         }));
 
         // 5. Success Response

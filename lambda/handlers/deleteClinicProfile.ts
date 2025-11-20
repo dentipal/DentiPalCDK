@@ -1,7 +1,11 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
-import { Buffer } from 'buffer'; // Node.js 'buffer' is typically available in Lambda environment
+import { 
+    DynamoDBClient, 
+    GetItemCommand, 
+    DeleteItemCommand,
+    AttributeValue 
+} from "@aws-sdk/client-dynamodb";
+import { Buffer } from 'buffer'; 
 
 // --- Type Definitions ---
 
@@ -16,9 +20,7 @@ interface Claims {
 // --- Initialization ---
 
 // Initialize Document Client using AWS SDK v3
-const ddbClient = new DynamoDBClient({ region: process.env.REGION });
-const dynamodb = DynamoDBDocumentClient.from(ddbClient);
-
+const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE;
 
 // Utility function to handle Base64 URL decoding
@@ -26,7 +28,6 @@ function b64urlToUtf8(b64url: string): string {
     // Support URL-safe base64: pad and replace characters
     const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
     const b64 = (b64url + pad).replace(/-/g, '+').replace(/_/g, '/');
-    // Note: Node.js Buffer is used for base64 conversion
     return Buffer.from(b64, "base64").toString("utf8");
 }
 
@@ -109,13 +110,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         console.info("📌 Deleting clinicId:", clinicId, "| userSub:", userSub);
 
-        // Step 3: Check existence (Document Client GetCommand)
+        // Step 3: Check existence (Standard Client GetItemCommand)
         const getParams = {
             TableName: CLINIC_PROFILES_TABLE,
-            Key: { clinicId, userSub },
+            // FIX: Use explicit AttributeValue syntax { S: value }
+            Key: { 
+                clinicId: { S: clinicId }, 
+                userSub: { S: userSub } 
+            },
         };
 
-        const existing = await dynamodb.send(new GetCommand(getParams));
+        const existing = await dynamodb.send(new GetItemCommand(getParams));
 
         if (!existing.Item) {
             return {
@@ -124,13 +129,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
-        // Step 4: Delete profile (Document Client DeleteCommand)
+        // Step 4: Delete profile (Standard Client DeleteItemCommand)
         const deleteParams = {
             TableName: CLINIC_PROFILES_TABLE,
-            Key: { clinicId, userSub },
+            // FIX: Use explicit AttributeValue syntax { S: value }
+            Key: { 
+                clinicId: { S: clinicId }, 
+                userSub: { S: userSub } 
+            },
         };
 
-        await dynamodb.send(new DeleteCommand(deleteParams));
+        await dynamodb.send(new DeleteItemCommand(deleteParams));
         console.info(`✅ Clinic account deleted for clinicId: ${clinicId}, userSub: ${userSub}`);
 
         return {
