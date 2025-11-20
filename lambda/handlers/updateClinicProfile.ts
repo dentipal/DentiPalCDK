@@ -1,7 +1,12 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { 
+    DynamoDBClient, 
+    GetItemCommand, 
+    UpdateItemCommand, 
+    AttributeValue,
+    UpdateItemCommandInput
+} from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { Buffer } from 'node:buffer'; // Used for base64url decoding
+import { Buffer } from 'buffer'; 
 
 // --- Type Definitions ---
 
@@ -28,7 +33,7 @@ interface UpdateFields {
     free_parking_available?: boolean;
     parking_type?: string;
     description?: string;
-    specialties?: string[] | string;
+    specialties?: string[];
     business_hours?: Record<string, any>;
     [key: string]: any; 
 }
@@ -40,11 +45,7 @@ interface RequestBody extends UpdateFields {
 
 // --- Client Initialization ---
 
-// Use DynamoDBClient for the underlying client
-const ddbClient = new DynamoDBClient({}); 
-// Use DocumentClient (lib-dynamodb) for easier object handling
-const dynamodb = DynamoDBDocumentClient.from(ddbClient);
-
+const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const CLINIC_PROFILES_TABLE: string | undefined = process.env.CLINIC_PROFILES_TABLE;
 
 // --- Constants ---
@@ -81,11 +82,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         const token = authHeader.split(" ")[1];
-        const payload = token.split(".")[1];
+        const parts = token.split(".");
+        if (parts.length < 2) {
+             return {
+                statusCode: 401,
+                body: JSON.stringify({ error: "Invalid token format" }),
+            };
+        }
+        
+        const payload = parts[1];
         
         // Decode the Base64URL payload
         const decodedClaims: JwtClaims = JSON.parse(
-            Buffer.from(payload, "base64url").toString("utf8")
+            Buffer.from(payload, "base64").toString("utf8")
         );
 
         const userSub: string = decodedClaims.sub;
@@ -100,7 +109,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         const userType: string = decodedClaims["custom:user_type"] || "professional";
 
-        // Step 2: Get clinicId from API Gateway proxy path (replicating original path split logic)
+        // Step 2: Get clinicId from API Gateway proxy path
+        // Expected path: /clinic-profiles/{clinicId} or via proxy
         const pathParts: string[] = event.path?.split("/") || [];
         const clinicId: string | undefined = pathParts.pop();
 
@@ -139,12 +149,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
-        // Step 5: Confirm profile exists (using GetCommand for DocumentClient)
-        const getCommand = new GetCommand({
+        // Step 5: Confirm profile exists
+        const getCommand = new GetItemCommand({
             TableName: CLINIC_PROFILES_TABLE,
             Key: {
-                clinicId,
-                userSub
+                clinicId: { S: clinicId },
+                userSub: { S: userSub }
             },
         });
 
@@ -158,49 +168,66 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
-        // Step 6: Prepare allowed fields
-        const validUpdateFields: Partial<UpdateFields> = {};
-        const updatedFields: string[] = [];
+        // Step 6: Prepare update fields
+        const expressionAttributeNames: Record<string, string> = { "#updatedAt": "updatedAt" };
+        const expressionAttributeValues: Record<string, AttributeValue> = { ":updatedAt": { S: new Date().toISOString() } };
+        const updateExpressions: string[] = [];
 
-        for (const key of Object.keys(updateFields) as (keyof UpdateFields)[]) {
-            if (ALLOWED_FIELDS.includes(key)) {
-                const value = updateFields[key];
-                if (value !== undefined && value !== null) {
-                    validUpdateFields[key] = value as any;
-                    updatedFields.push(key as string);
+        // Process allowed fields
+        for (const key of ALLOWED_FIELDS) {
+            const value = updateFields[key];
+            if (value !== undefined && value !== null) {
+                const attrName = `#${key}`;
+                const attrValue = `:${key}`;
+                
+                expressionAttributeNames[attrName] = key as string;
+                
+                // Convert JS types to DynamoDB AttributeValues
+                if (typeof value === 'string') {
+                    expressionAttributeValues[attrValue] = { S: value };
+                } else if (typeof value === 'number') {
+                    expressionAttributeValues[attrValue] = { N: String(value) };
+                } else if (typeof value === 'boolean') {
+                    expressionAttributeValues[attrValue] = { BOOL: value };
+                } else if (Array.isArray(value) && key === 'specialties') {
+                    // Assuming string set for specialties
+                     const strList = value.filter(v => typeof v === 'string');
+                     if (strList.length > 0) {
+                        expressionAttributeValues[attrValue] = { SS: strList };
+                     }
+                } else if (typeof value === 'object' && key === 'business_hours') {
+                    // Simple serialization for map/object types if specific structure isn't enforced,
+                    // or build a Map Attribute Value. Here we use M (Map).
+                    const mapAttr: Record<string, AttributeValue> = {};
+                    Object.entries(value).forEach(([k, v]) => {
+                        if (typeof v === 'string') mapAttr[k] = { S: v };
+                        // Add more type checks if business_hours is complex
+                    });
+                    expressionAttributeValues[attrValue] = { M: mapAttr };
+                }
+
+                // Only add to expression if value was successfully marshalled
+                if (expressionAttributeValues[attrValue]) {
+                    updateExpressions.push(`${attrName} = ${attrValue}`);
                 }
             }
         }
 
-        if (updatedFields.length === 0) {
+        if (updateExpressions.length === 0) {
             return {
                 statusCode: 400,
                 body: JSON.stringify({ error: "No valid fields provided for update" }),
             };
         }
 
-        // Step 7: Build update expression
-        const updateExpressionParts: string[] = [];
-        const expressionAttributeNames: Record<string, string> = { "#updatedAt": "updatedAt" };
-        const expressionAttributeValues: Record<string, any> = { ":updatedAt": new Date().toISOString() };
+        // Step 7: Execute Update
+        const updateExpression = "SET " + updateExpressions.join(", ") + ", #updatedAt = :updatedAt";
 
-        updatedFields.forEach(field => {
-            const aliasName = `#${field}`;
-            const aliasValue = `:${field}`;
-            
-            updateExpressionParts.push(`${aliasName} = ${aliasValue}`);
-            
-            expressionAttributeNames[aliasName] = field;
-            expressionAttributeValues[aliasValue] = validUpdateFields[field as keyof UpdateFields];
-        });
-        
-        const updateExpression = "SET " + updateExpressionParts.join(", ");
-
-        const updateCommand = new UpdateCommand({
+        const updateCommand = new UpdateItemCommand({
             TableName: CLINIC_PROFILES_TABLE,
             Key: {
-                clinicId,
-                userSub
+                clinicId: { S: clinicId },
+                userSub: { S: userSub }
             },
             UpdateExpression: updateExpression,
             ExpressionAttributeNames: expressionAttributeNames,
@@ -210,22 +237,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const result = await dynamodb.send(updateCommand);
 
-        console.info("✅ Clinic profile updated:", result.Attributes);
+        console.info("✅ Clinic profile updated");
 
         return {
             statusCode: 200,
             body: JSON.stringify({
                 message: "Clinic profile updated successfully",
                 profileId,
-                updatedFields,
                 updatedAt: new Date().toISOString(),
-                profile: result.Attributes,
+                profile: result.Attributes, // Note: Attributes will be in DynamoDB JSON format
             }),
         };
     } catch (error) {
         console.error("❌ Error in updateClinicProfile:", error);
-        
-        // Use a type guard for better error handling
         const errorMessage = (error as Error).message;
         
         if (errorMessage.includes("Missing or invalid Authorization")) {
@@ -234,7 +258,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 500,
-            body: JSON.stringify({ error: "Failed to update clinic profile" }),
+            body: JSON.stringify({ error: "Failed to update clinic profile", details: errorMessage }),
         };
     }
 };
