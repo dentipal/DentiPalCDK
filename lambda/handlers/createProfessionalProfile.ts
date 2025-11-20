@@ -7,6 +7,9 @@ import {
 import { validateToken } from "./utils"; 
 import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles"; 
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // --- Type Definitions ---
 
 // Interface for the expected request body data structure
@@ -19,14 +22,12 @@ interface ProfessionalProfileData {
     [key: string]: any;
 }
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 // Type for CORS headers
 interface CorsHeaders {
     [header: string]: string;
 }
-
-// --- Initialization ---
-
-const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 const CORS_HEADERS: CorsHeaders = {
     "Access-Control-Allow-Origin": "*",
@@ -35,6 +36,11 @@ const CORS_HEADERS: CorsHeaders = {
     "Access-Control-Allow-Methods": "OPTIONS,POST",
     "Content-Type": "application/json",
 };
+*/
+
+// --- Initialization ---
+
+const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // --- Lambda Handler ---
 
@@ -46,6 +52,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // --- CORS preflight ---
     if (method === "OPTIONS") {
+        // ✅ Uses imported headers
         return { statusCode: 204, headers: CORS_HEADERS, body: "" };
     }
 
@@ -59,7 +66,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("[VALIDATION] Missing required fields: first_name, last_name, or role.");
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "role, first_name, and last_name are required",
                 }),
@@ -71,7 +78,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn(`[VALIDATION] Invalid role provided: ${profileData.role}`);
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: `Invalid role. Valid options: ${VALID_ROLE_VALUES.map(
                         (role) => DB_TO_DISPLAY_MAPPING[role] || role
@@ -136,7 +143,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 8. Success Response
         return {
             statusCode: 201,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Professional profile created successfully",
                 userSub,
@@ -152,7 +159,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (err.name === "ConditionalCheckFailedException") {
             return {
                 statusCode: 409,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Professional profile already exists for this user",
                 }),
@@ -161,7 +168,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({ error: err.message || "An unexpected error occurred" }),
         };
     }

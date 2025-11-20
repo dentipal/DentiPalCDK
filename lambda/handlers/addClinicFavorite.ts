@@ -8,21 +8,12 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
-// Assuming utils.ts contains a definition for validateToken
-// To make the code compile, we'll import it from a placeholder:
 import { validateToken } from "./utils";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
-
-/* === CORS (added) === */
-const CORS_HEADERS: Record<string, string> = {
-    "Access-Control-Allow-Origin": "*", // replace with your origin in prod
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization,x-api-key",
-    "Access-Control-Allow-Credentials": "true",
-    "Content-Type": "application/json",
-};
 
 // Define the expected structure for the favorite data in the request body
 interface FavoriteRequestBody {
@@ -33,16 +24,15 @@ interface FavoriteRequestBody {
 
 // Define the Lambda handler function with proper TypeScript types
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    /* Preflight (added) */
+    /* Preflight */
     if (event && event.httpMethod === "OPTIONS") {
         return { statusCode: 204, headers: CORS_HEADERS, body: "" };
     }
 
     try {
         // Step 1: Authenticate the clinic user
-        // We cast event to 'any' here because APIGatewayProxyEvent doesn't include the Cognito claims object by default,
-        // which validateToken likely relies on.
-        const userSub: string = await validateToken(event as any); // This should be a clinic user
+        // We cast event to 'any' because APIGatewayProxyEvent doesn't include the Cognito claims object by default
+        const userSub: string = await validateToken(event as any); 
 
         // Step 2: Parse the request body
         const favoriteData: FavoriteRequestBody = JSON.parse(event.body || "{}");
@@ -51,7 +41,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!favoriteData.professionalUserSub) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // added
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
                     error: "Required field: professionalUserSub"
                 })
@@ -70,7 +60,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!professionalCheck.Item) {
             return {
                 statusCode: 404,
-                headers: CORS_HEADERS, // added
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
                     error: "Professional not found"
                 })
@@ -90,7 +80,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (existingFavorite.Item) {
             return {
                 statusCode: 409,
-                headers: CORS_HEADERS, // added
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
                     error: "Professional is already in favorites"
                 })
@@ -126,7 +116,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Step 6: Return success response
         return {
             statusCode: 201,
-            headers: CORS_HEADERS, // added
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 message: "Professional added to favorites successfully",
                 clinicUserSub: userSub,
@@ -144,10 +134,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error adding professional to favorites:", err);
         return {
             statusCode: 500,
-            headers: CORS_HEADERS, // added
+            headers: CORS_HEADERS,
             body: JSON.stringify({ error: err.message })
         };
     }
 };
-
-exports.handler = handler;

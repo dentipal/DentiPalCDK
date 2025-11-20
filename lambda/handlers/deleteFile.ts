@@ -7,16 +7,18 @@ import {
     HeadObjectCommandOutput,
 } from "@aws-sdk/client-s3";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the S3 client
 const s3Client = new S3Client({ region: process.env.REGION });
 
-// Define the type for CORS headers
-const corsHeaders: Record<string, string> = {
-    "Access-Control-Allow-Origin": process.env.CORS_ALLOWED_ORIGIN || "http://localhost:5173",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // Define the map for path segments to internal file types
 const fileTypeMap: Record<string, 'profile-image' | 'certificate' | 'video-resume'> = {
@@ -35,25 +37,25 @@ interface BucketMap {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // 1. Authentication Check
         // Accessing the 'sub' claim directly from the authorizer context
         const userSub: string | undefined = event.requestContext?.authorizer?.claims?.sub;
         if (!userSub) {
-            return {
-                statusCode: 401,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: 'Unauthorized: Missing user authentication context' })
-            };
+            return json(401, { error: 'Unauthorized: Missing user authentication context' });
         }
         
-        // 2. HTTP Method Check (CORS preflight is implicitly handled by API Gateway/Router)
-        if (event.httpMethod !== 'DELETE') {
-            return {
-                statusCode: 405,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: 'Method not allowed. Only DELETE is supported.' })
-            };
+        // 2. HTTP Method Check
+        if (method !== 'DELETE') {
+            return json(405, { error: 'Method not allowed. Only DELETE is supported.' });
         }
 
         // 3. Extract File Type from path
@@ -62,21 +64,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const fileType = fileTypeMap[pathFileType]; // e.g., 'profile-image'
         
         if (!fileType) {
-            return {
-                statusCode: 400,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: 'Invalid file type in path. Must be one of: profile-images, certificates, video-resumes' })
-            };
+            return json(400, { error: 'Invalid file type in path. Must be one of: profile-images, certificates, video-resumes' });
         }
 
         // 4. Get Object Key from query parameters
         const objectKey: string | undefined = event.queryStringParameters?.key;
         if (!objectKey) {
-            return {
-                statusCode: 400,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: 'Object key is required as a query parameter' })
-            };
+            return json(400, { error: 'Object key is required as a query parameter' });
         }
 
         // 5. Determine Bucket Name
@@ -89,11 +83,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!bucket) {
             console.error(`Missing environment variable for bucket type: ${fileType}`);
-             return {
-                statusCode: 500,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: `Server configuration error: Bucket not defined for ${fileType}` })
-            };
+             return json(500, { error: `Server configuration error: Bucket not defined for ${fileType}` });
         }
 
         try {
@@ -109,11 +99,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             
             // Ownership check (metadata is stored in lowercase by S3)
             if (uploadedBy !== userSub) {
-                return {
-                    statusCode: 403,
-                    headers: corsHeaders,
-                    body: JSON.stringify({ error: 'Access denied - you can only delete your own files' })
-                };
+                return json(403, { error: 'Access denied - you can only delete your own files' });
             }
 
             // 7. Delete the file
@@ -125,31 +111,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             await s3Client.send(deleteCommand);
 
             // 8. Return success response
-            return {
-                statusCode: 200,
-                headers: corsHeaders,
-                body: JSON.stringify({
-                    message: `File of type '${fileType}' deleted successfully`,
-                    objectKey,
-                    bucket,
-                    fileType,
-                    deletedAt: new Date().toISOString(),
-                    metadata: {
-                        originalFilename: headResponse.Metadata?.['original-filename'],
-                        uploadTimestamp: headResponse.Metadata?.['upload-timestamp']
-                    }
-                })
-            };
+            return json(200, {
+                message: `File of type '${fileType}' deleted successfully`,
+                objectKey,
+                bucket,
+                fileType,
+                deletedAt: new Date().toISOString(),
+                metadata: {
+                    originalFilename: headResponse.Metadata?.['original-filename'],
+                    uploadTimestamp: headResponse.Metadata?.['upload-timestamp']
+                }
+            });
+
         } catch (error) {
             const err = error as Error & { name?: string };
             
             // Handle file not found specific S3 errors
             if (err.name === 'NoSuchKey' || err.name === 'NotFound') {
-                return {
-                    statusCode: 404,
-                    headers: corsHeaders,
-                    body: JSON.stringify({ error: 'File not found in the specified location' })
-                };
+                return json(404, { error: 'File not found in the specified location' });
             }
             
             // Re-throw if it's an unhandled error to be caught by the outer block
@@ -158,11 +137,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error & { message?: string };
         console.error('Error deleting file:', err);
-        return {
-            statusCode: 500,
-            headers: corsHeaders,
-            body: JSON.stringify({ error: err.message || 'Internal server error' })
-        };
+        return json(500, { error: err.message || 'Internal server error' });
     }
 };
 

@@ -9,6 +9,9 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils"; 
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // --- Interfaces and Type Definitions ---
 
 // Initialize the DynamoDB client
@@ -17,12 +20,15 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 // Allowed groups for job deletion
 const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 // Define CORS headers for the response
 const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Credentials": "true",
     "Content-Type": "application/json"
 };
+*/
 
 // --- Lambda Handler Function ---
 
@@ -34,7 +40,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (method === "OPTIONS") {
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: ""
         };
     }
@@ -64,7 +70,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!isAllowed) {
             return {
                 statusCode: 403,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "You do not have permission to delete this job.",
                 }),
@@ -85,7 +91,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!jobId) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "jobId is required in path parameters",
                 }),
@@ -115,7 +121,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!jobResponse.Item) {
             return {
                 statusCode: 404,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Permanent job not found or access denied",
                 }),
@@ -128,7 +134,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (job.job_type?.S !== "permanent") {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "This is not a permanent job. Use the appropriate endpoint for this job type.",
                 }),
@@ -218,7 +224,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const affectedApplicationsCount = activeApplications.length;
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Permanent job deleted successfully",
                 jobId,
@@ -235,7 +241,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 error: "Failed to delete permanent job. Please try again.",
                 details: errorMessage,
@@ -243,3 +249,5 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
     }
 };
+
+exports.handler = handler;

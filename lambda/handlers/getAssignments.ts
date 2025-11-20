@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     QueryCommand,
@@ -8,9 +7,18 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { isRoot } from "./utils"; 
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize DynamoDB client (AWS SDK v3)
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // Define interfaces for type safety
 
@@ -36,11 +44,6 @@ interface RequestBody {
     userSub?: string;
 }
 
-// Define common headers (assuming no CORS helper logic needed, as in original)
-const HEADERS = {
-    "Content-Type": "application/json",
-};
-
 /**
  * AWS Lambda handler to retrieve clinic assignments for the authenticated user, 
  * or for a target user if the caller is a Root user.
@@ -48,15 +51,28 @@ const HEADERS = {
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // 1. Extract User/Auth Info
         // Assumes Cognito Authorizer is used and populates claims
-        const userSub: string = (event.requestContext.authorizer as any)?.claims?.sub;
-        const groupsRaw = (event.requestContext.authorizer as any)?.claims['cognito:groups'];
+        const claims = (event.requestContext.authorizer as any)?.claims;
+        const userSub: string = claims?.sub;
+        const groupsRaw = claims?.['cognito:groups'];
         
         const groups: string[] = (typeof groupsRaw === 'string' ? groupsRaw.split(',') : [])
-            .map(s => s.trim())
+            .map((s: string) => s.trim())
             .filter(Boolean);
+
+        if (!userSub) {
+            return json(401, { error: "Unauthorized: Missing user context" });
+        }
 
         // 2. Determine Target UserSub
         // Root users can query for another user's assignments via the request body.
@@ -88,19 +104,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }));
 
         // 5. Success Response
-        return {
-            statusCode: 200,
-            headers: { ...HEADERS, "Access-Control-Allow-Origin": "*" },
-            body: JSON.stringify({ status: "success", assignments }),
-        };
+        return json(200, { status: "success", assignments });
     }
     catch (error: any) {
         // 6. Error Response
         console.error("Error retrieving assignments:", error);
-        return { 
-            statusCode: 400, 
-            headers: { ...HEADERS, "Access-Control-Allow-Origin": "*" },
-            body: JSON.stringify({ error: `Failed to retrieve assignments: ${error.message}` }) 
-        };
+        return json(400, { error: `Failed to retrieve assignments: ${error.message}` });
     }
 };

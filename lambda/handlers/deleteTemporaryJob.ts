@@ -10,14 +10,20 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils"; 
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 // Define CORS headers
 const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Content-Type": "application/json",
 };
+*/
 
 /**
  * AWS Lambda handler to delete a temporary job posting and update its active applications.
@@ -30,6 +36,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // Preflight
     if (method === "OPTIONS") {
+        // ✅ Uses imported headers
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
@@ -46,6 +53,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!jobId && event.pathParameters?.proxy) {
              const pathParts: string[] = event.pathParameters.proxy.split("/");
              // Expected path: /jobs/temporary/{jobId} -> parts[2]
+             // Adjust index based on your actual API Gateway routing
              jobId = pathParts[pathParts.length - 1]; 
         }
 
@@ -54,7 +62,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!jobId) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "jobId is required in path parameters",
                 }),
@@ -79,7 +87,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!job) {
             return {
                 statusCode: 404,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Temporary job not found or access denied",
                 }),
@@ -90,7 +98,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (job.job_type?.S !== 'temporary') {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "This is not a temporary job. Use the appropriate endpoint for this job type.",
                 }),
@@ -179,7 +187,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 8. Success Response
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Temporary job deleted successfully",
                 jobId,
@@ -196,7 +204,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error deleting temporary job:", err);
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 error: "Failed to delete temporary job. Please try again.",
                 details: err.message,

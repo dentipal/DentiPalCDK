@@ -7,12 +7,10 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { validateToken } from "./utils"; // Assumed dependency
 
-// --- Type Definitions ---
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
 
-// Type for CORS headers
-interface CorsHeaders {
-    [header: string]: string;
-}
+// --- Type Definitions ---
 
 // Interface for the DynamoDB Item structure we expect from the Scan result
 interface ApplicationItem {
@@ -28,12 +26,20 @@ interface ApplicationItem {
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
+// Type for CORS headers
+interface CorsHeaders {
+    [header: string]: string;
+}
+
 // CORS headers
 const CORS: CorsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type,Authorization",
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS"
 };
+*/
 
 // --- Lambda Handler ---
 
@@ -44,11 +50,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     try {
         // 1. Handle CORS preflight
         if (method === "OPTIONS") {
-            return {
-                statusCode: 200,
-                headers: CORS,
-                body: JSON.stringify({ message: "CORS preflight OK" })
-            };
+            // ✅ Uses imported headers
+            return { statusCode: 200, headers: CORS_HEADERS, body: "" };
         }
 
         // 2. Authenticate professional user
@@ -63,7 +66,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("[VALIDATION] Missing applicationId in path parameters.");
             return {
                 statusCode: 400,
-                headers: CORS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "applicationId is required in path parameters"
                 })
@@ -86,7 +89,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn(`[DB] Application not found: ${applicationId}`);
             return {
                 statusCode: 404,
-                headers: CORS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Job application not found"
                 })
@@ -102,7 +105,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn(`[AUTH] User ${userSub} attempted to delete application belonging to ${professionalUserSubFound}`);
             return {
                 statusCode: 403,
-                headers: CORS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "You can only delete your own job applications"
                 })
@@ -115,7 +118,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn(`[VALIDATION] Cannot withdraw accepted application ${applicationId}`);
             return {
                 statusCode: 400,
-                headers: CORS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Cannot withdraw an accepted job application. Please contact the clinic directly."
                 })
@@ -127,7 +130,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error(`[DATA_ERROR] Application item ${applicationId} is missing jobId.`);
             return {
                 statusCode: 500,
-                headers: CORS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Internal data error: Application record is incomplete."
                 })
@@ -155,7 +158,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 8. Success Response
         return {
             statusCode: 200,
-            headers: CORS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Job application withdrawn successfully",
                 applicationId,
@@ -170,7 +173,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (err.name === "ConditionalCheckFailedException") {
             return {
                 statusCode: 404,
-                headers: CORS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Job application not found or already deleted"
                 })
@@ -179,7 +182,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 500,
-            headers: CORS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 error: "Failed to withdraw job application. Please try again.",
                 details: err.message

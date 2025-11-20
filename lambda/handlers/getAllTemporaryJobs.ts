@@ -10,14 +10,20 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { validateToken } from "./utils"; 
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 const CORS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type,Authorization",
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
 };
+*/
 
 // --- Type Definitions ---
 
@@ -112,7 +118,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
     const method = (event.requestContext as any)?.http?.method || event.httpMethod || "GET";
     
-    if (method === "OPTIONS") return { statusCode: 204, headers: CORS, body: "" };
+    // ✅ ADDED PREFLIGHT CHECK
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
 
     try {
         // Logged-in professional
@@ -218,7 +227,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Temporary jobs (today or in the future) retrieved successfully",
                 excludedCount: appliedJobIds.size, // helpful for debugging
@@ -230,7 +239,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error retrieving temporary jobs:", error);
         return {
             statusCode: 500,
-            headers: CORS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 error: "Failed to retrieve temporary jobs. Please try again.",
                 details: error?.message || String(error),

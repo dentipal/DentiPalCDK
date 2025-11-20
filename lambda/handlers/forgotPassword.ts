@@ -1,4 +1,3 @@
-// index.ts
 import {
     CognitoIdentityProviderClient,
     ListUsersCommand,
@@ -9,15 +8,21 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // Initialize the Cognito client (AWS SDK v3)
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 const CORS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "OPTIONS,POST",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Content-Type": "application/json"
 };
+*/
 
 // Configure group mapping via env (no hardcoding in code)
 const CLINIC_GROUPS: string[] = (process.env.CLINIC_GROUPS || "Root,ClinicAdmin,ClinicManager,ClinicViewer")
@@ -107,8 +112,9 @@ function deriveUserTypeFromGroups(groups: string[]): 'clinic' | 'professional' |
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     console.log("=== /auth/forgot START ===");
     
+    // ✅ ADDED PREFLIGHT CHECK
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS, body: "{}" };
+        return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
     }
 
     try {
@@ -118,11 +124,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("[forgot] input:", { email, expectedUserType });
 
         if (!email) {
-            return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "Email is required" }) };
+            return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Email is required" }) };
         }
         if (!CLIENT_ID || !USER_POOL_ID) {
             console.error("[forgot] missing env CLIENT_ID or USER_POOL_ID");
-            return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: "Server misconfiguration" }) };
+            return { statusCode: 500, headers: CORS_HEADERS, body: JSON.stringify({ error: "Server misconfiguration" }) };
         }
 
         const emailLower = String(email).toLowerCase();
@@ -133,7 +139,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         if (!username) {
             // Return generic success to prevent email enumeration attack
-            return { statusCode: 200, headers: CORS, body: JSON.stringify({ message: "If the email exists, a reset code has been sent." }) };
+            return { statusCode: 200, headers: CORS_HEADERS, body: JSON.stringify({ message: "If the email exists, a reset code has been sent." }) };
         }
 
         // 2) Determine userType from groups
@@ -142,7 +148,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             groups = await getGroups(username);
         } catch (e: any) {
             console.warn("[forgot] AdminListGroupsForUser failed:", e?.name, e?.message);
-            return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: "Role check failed" }) };
+            return { statusCode: 500, headers: CORS_HEADERS, body: JSON.stringify({ error: "Role check failed" }) };
         }
 
         const userType = deriveUserTypeFromGroups(groups);
@@ -154,7 +160,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const portalType = userType === "clinic" ? "Clinic" : "Professional";
             return {
                 statusCode: 400,
-                headers: CORS,
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
                     error: `This account is a ${userType} account. Please use the ${portalType} portal.`
                 })
@@ -169,14 +175,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS,
+            headers: CORS_HEADERS,
             body: JSON.stringify({ message: "If the email exists, a reset code has been sent." })
         };
     } catch (err: any) {
         console.error("[forgot] ERROR:", err?.name, err?.message);
         return {
             statusCode: 500,
-            headers: CORS,
+            headers: CORS_HEADERS,
             body: JSON.stringify({ error: "An error occurred while initiating the password reset. Please try again." })
         };
     }

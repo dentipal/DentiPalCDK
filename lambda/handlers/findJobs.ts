@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     ScanCommand,
@@ -8,6 +7,9 @@ import {
     GetItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
@@ -52,12 +54,15 @@ interface JobPosting {
     [key: string]: any; // Allow other properties
 }
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 // Define CORS headers
 const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent",
     "Access-Control-Allow-Methods": "OPTIONS,GET",
 };
+*/
 
 /**
  * Helper to fetch clinic info given clinic userSub.
@@ -96,6 +101,11 @@ async function fetchClinicInfo(clinicUserSub: string): Promise<ClinicInfo | unde
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // ✅ ADDED PREFLIGHT CHECK
+    if (event.httpMethod === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         const jobPostings: JobPosting[] = [];
         let ExclusiveStartKey: Record<string, AttributeValue> | undefined = undefined;
@@ -183,7 +193,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Response
         return {
             statusCode: 200,
-            headers: headers,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 status: "success",
                 jobPostings,
@@ -194,7 +204,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error retrieving active job postings:", error);
         return {
             statusCode: 500,
-            headers: headers,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 error: `Failed to retrieve active job postings: ${error.message || "unknown"}`,
             }),

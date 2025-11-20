@@ -1,17 +1,26 @@
-// index.ts
 import {
     DynamoDBClient,
     GetItemCommand,
     AttributeValue,
     GetItemCommandOutput,
+    GetItemCommandInput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { validateToken } from "./utils"; 
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE as string;
+
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // --- Type Definitions ---
 
@@ -86,14 +95,6 @@ interface ClinicProfile {
     notes: string;
 }
 
-// Define CORS headers
-const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "OPTIONS,GET",
-    "Content-Type": "application/json", // Added for non-OPTIONS responses
-};
-
 // --- Helper Function ---
 
 /**
@@ -149,36 +150,33 @@ const unmarshallClinic = (clinic: DynamoDBClinicItem | undefined): ClinicProfile
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    try {
-        if (event.httpMethod === "OPTIONS") {
-            return {
-                statusCode: 200,
-                headers: corsHeaders,
-                body: JSON.stringify({}),
-            };
-        }
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
+    try {
         // 1. Authentication
         // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = await validateToken(event);
+        const userSub: string = await validateToken(event as any);
 
         // 2. Extract Clinic ID from Path
         const path = event.path || "";
-        const clinicId = path.split("/").filter(Boolean).pop(); // Gets the last segment
+        // Fallback logic for getting ID from path if pathParameters isn't populated
+        const clinicId = event.pathParameters?.clinicId || path.split("/").filter(Boolean).pop();
 
         if (!clinicId) {
             console.error("Clinic ID is missing from the path.");
-            return { 
-                statusCode: 400, 
-                headers: corsHeaders, 
-                body: JSON.stringify({ error: "Clinic ID missing in request path." }) 
-            };
+            return json(400, { error: "Clinic ID missing in request path." });
         }
 
         // 3. Fetch Item (using composite key for strict ownership check)
         // Key: { clinicId (SK), userSub (PK) } OR { clinicId (PK), userSub (SK) }
-        // Assuming { clinicId (PK), userSub (SK) } for this GetItem structure.
-        const getItemParams = {
+        // Based on your code, assuming: Key: { clinicId: { S: clinicId }, userSub: { S: userSub } }
+        const getItemParams: GetItemCommandInput = {
             TableName: CLINIC_PROFILES_TABLE,
             Key: {
                 clinicId: { S: clinicId },
@@ -192,41 +190,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 4. Check Existence
         if (!item) {
             console.error(`❌ No profile found for clinicId ${clinicId} and userSub ${userSub}`);
-            return {
-                statusCode: 404,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: `Clinic profile not found` }),
-            };
+            return json(404, { error: `Clinic profile not found` });
         }
 
         // 5. Authorization Check (already implicitly performed by GetItem's use of userSub as key)
+        // However, explicit check safeguards against Schema changes where userSub might not be part of the key.
         const fetchedUserSub = item.userSub?.S;
         if (fetchedUserSub !== userSub) {
             console.error(`Authorization failed: Clinic userSub (${fetchedUserSub}) does not match token userSub (${userSub})`);
-            return {
-                statusCode: 403,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: "Forbidden: You do not own this clinic profile." }),
-            };
+            return json(403, { error: "Forbidden: You do not own this clinic profile." });
         }
 
         // 6. Format Data and Respond
         const clinicData = unmarshallClinic(item);
 
-        return {
-            statusCode: 200,
-            headers: corsHeaders,
-            body: JSON.stringify({
-                message: "Clinic profile retrieved successfully",
-                profile: clinicData,
-            }),
-        };
+        return json(200, {
+            message: "Clinic profile retrieved successfully",
+            profile: clinicData,
+        });
+
     } catch (error: any) {
         console.error("DETAILED ERROR:", error);
-        return {
-            statusCode: 500,
-            headers: corsHeaders,
-            body: JSON.stringify({ error: "Failed to retrieve clinic profile" }),
-        };
+        return json(500, { 
+            error: "Failed to retrieve clinic profile",
+            details: error.message
+        });
     }
 };

@@ -10,6 +10,9 @@ import { v4 as uuidv4 } from "uuid";
 import { validateToken } from "./utils"; 
 import { VALID_ROLE_VALUES } from "./professionalRoles";
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // --- Type Definitions ---
 
 // 1. Base Job Interface (Common Fields)
@@ -149,6 +152,11 @@ const validatePermanentJob = (jobData: PermanentJobData): string | null => {
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // ✅ ADDED PREFLIGHT CHECK
+    if (event.httpMethod === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
+    }
+
     try {
         // 1. Authorization and Parsing
         const userSub: string = await validateToken(event); 
@@ -158,6 +166,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!jobData.job_type || !jobData.professional_role || !jobData.shift_speciality || !jobData.clinicId) {
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({
                     error: "Required fields: clinicId, job_type, professional_role, shift_speciality"
                 })
@@ -169,6 +178,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!validJobTypes.includes(jobData.job_type)) {
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({
                     error: `Invalid job_type. Valid options: ${validJobTypes.join(', ')}`
                 })
@@ -179,6 +189,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!VALID_ROLE_VALUES.includes(jobData.professional_role)) {
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({
                     error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES.join(', ')}`
                 })
@@ -202,6 +213,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (validationError) {
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({ error: validationError })
             };
         }
@@ -221,6 +233,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!clinicResponse.Item) {
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({ error: `Clinic not found with ID: ${jobData.clinicId}` })
             };
         }
@@ -232,6 +245,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
              console.error("[DB_ERROR] Clinic item is missing required address fields.", cItem);
              return {
                 statusCode: 500,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({ error: "Clinic data is incomplete in the database." })
             };
         }
@@ -259,6 +273,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!profileResponse.Item) {
             return {
                 statusCode: 400,
+                headers: CORS_HEADERS, // ✅ Added CORS
                 body: JSON.stringify({ error: "Profile not found for this clinic user. Please complete your clinic profile first." })
             };
         }
@@ -394,10 +409,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return {
             statusCode: 201,
             body: JSON.stringify(responseData),
-            headers: {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-            }
+            headers: CORS_HEADERS // ✅ Updated to use CORS_HEADERS
         };
 
     } catch (error) {
@@ -406,10 +418,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return {
             statusCode: 500,
             body: JSON.stringify({ error: err.message || "An unexpected error occurred" }),
-            headers: {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-            }
+            headers: CORS_HEADERS // ✅ Updated to use CORS_HEADERS
         };
     }
 };

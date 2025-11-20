@@ -10,6 +10,8 @@ import {
 import { v4 as uuidv4 } from "uuid";
 // Assuming validateToken is a utility function in a local file
 import { validateToken } from "./utils";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -28,28 +30,26 @@ interface ApplicationData {
     notes?: string;
 }
 
-// Type for CORS headers
-interface CorsHeaders {
-    [header: string]: string;
-}
-
 // --- Initialization ---
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-const corsHeaders: CorsHeaders = {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*", // Allow all origins
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // Handle OPTIONS (preflight) request
-    if (event.httpMethod === 'OPTIONS') {
-        return { statusCode: 200, headers: corsHeaders, body: '' };
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === 'OPTIONS') {
+        return { statusCode: 200, headers: CORS_HEADERS, body: '' };
     }
 
     try {
@@ -60,18 +60,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 1. Authorization
         // validateToken must return the user's sub (string)
-        const professionalUserSub: string = await validateToken(event);
+        const professionalUserSub: string = await validateToken(event as any);
 
         const applicationData: ApplicationData = JSON.parse(event.body || '{}');
         console.log("Request body:", applicationData);
 
         if (!applicationData.jobId) {
             console.warn("[VALIDATION] Missing required field: jobId");
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "Required field: jobId" }),
-                headers: corsHeaders
-            };
+            return json(400, { error: "Required field: jobId" });
         }
 
         const jobId = applicationData.jobId;
@@ -89,11 +85,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobQueryResult = await dynamodb.send(jobQuery);
         if (!jobQueryResult.Items || jobQueryResult.Items.length === 0) {
             console.warn(`[VALIDATION] Job posting not found for jobId: ${jobId}`);
-            return {
-                statusCode: 404,
-                body: JSON.stringify({ error: "Job posting not found" }),
-                headers: corsHeaders
-            };
+            return json(404, { error: "Job posting not found" });
         }
 
         const jobItem = jobQueryResult.Items[0];
@@ -102,20 +94,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!clinicId) {
             console.error(`[DATA_ERROR] Job posting ${jobId} is missing clinicId.`);
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: "Clinic ID not found in job posting" }),
-                headers: corsHeaders
-            };
+            return json(400, { error: "Clinic ID not found in job posting" });
         }
 
         if (jobStatus !== "active") {
             console.warn(`[VALIDATION] Job status is '${jobStatus}'. Cannot apply.`);
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: `Cannot apply to ${jobStatus} job posting` }),
-                headers: corsHeaders
-            };
+            return json(400, { error: `Cannot apply to ${jobStatus} job posting` });
         }
 
         // 3. ✅ Check if application already exists (PK: jobId, SK: professionalUserSub assumed)
@@ -133,11 +117,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existingApplication = await dynamodb.send(existingApplicationCommand);
         if (existingApplication.Items && existingApplication.Items.length > 0) {
             console.warn(`[CONFLICT] User ${professionalUserSub} already applied to job ${jobId}.`);
-            return {
-                statusCode: 409,
-                body: JSON.stringify({ error: "You have already applied to this job" }),
-                headers: corsHeaders
-            };
+            return json(409, { error: "You have already applied to this job" });
         }
 
         // 4. ✅ Prepare application item
@@ -250,29 +230,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
 
         // 9. ✅ Final response
-        return {
-            statusCode: 201,
-            body: JSON.stringify({
-                message: "Job application submitted successfully",
-                applicationId,
-                jobId,
-                status: hasProposedRate ? "negotiating" : "pending",
-                appliedAt: timestamp,
-                job: jobInfo,
-                clinic: clinicInfo
-            }),
-            headers: corsHeaders
-        };
+        return json(201, {
+            message: "Job application submitted successfully",
+            applicationId,
+            jobId,
+            status: hasProposedRate ? "negotiating" : "pending",
+            appliedAt: timestamp,
+            job: jobInfo,
+            clinic: clinicInfo
+        });
+
     } catch (error) {
         const err = error as Error;
         console.error("Error creating job application:", err);
-        return {
-            statusCode: 500,
-            body: JSON.stringify({
-                error: "Failed to submit job application. Please try again.",
-                details: err.message
-            }),
-            headers: corsHeaders
-        };
+        return json(500, {
+            error: "Failed to submit job application. Please try again.",
+            details: err.message
+        });
     }
 };

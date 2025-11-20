@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     GetItemCommand,
@@ -8,6 +7,9 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { validateToken, isRoot, hasClinicAccess } from "./utils"; 
+
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
@@ -47,12 +49,14 @@ interface ClinicResponse {
     updatedAt: string;
 }
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 // Define common headers
 const HEADERS = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*", // Allow cross-origin requests
 };
-
+*/
 
 /**
  * AWS Lambda handler to retrieve details for a specific clinic, subject to access control.
@@ -60,10 +64,18 @@ const HEADERS = {
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // ✅ ADDED PREFLIGHT CHECK
+    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // 1. Authentication & Authorization Setup
         // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = validateToken(event);
+        // Added await to ensure async handling matches other files
+        const userSub: string = await validateToken(event as any);
         
         const groupsRaw = (event.requestContext.authorizer as any)?.claims['cognito:groups'];
         const groups: string[] = (typeof groupsRaw === 'string' ? groupsRaw.split(',') : [])
@@ -83,7 +95,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!clinicId) {
             return { 
                 statusCode: 400, 
-                headers: HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ error: "Clinic ID is required in path parameters" }) 
             };
         }
@@ -93,7 +105,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!isRoot(groups) && !(await hasClinicAccess(userSub, clinicId))) {
             return { 
                 statusCode: 403, 
-                headers: HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ error: "Access denied to clinic" }) 
             };
         }
@@ -112,7 +124,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!item) {
             return { 
                 statusCode: 404, 
-                headers: HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({ error: "Clinic not found" }) 
             };
         }
@@ -135,7 +147,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 status: "success",
                 clinic: clinic,
@@ -146,7 +158,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error retrieving clinic:", error);
         return { 
             statusCode: 400, 
-            headers: HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({ error: `Failed to retrieve clinic: ${error.message}` }) 
         };
     }

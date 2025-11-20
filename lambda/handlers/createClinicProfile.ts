@@ -3,15 +3,14 @@ import {
     DynamoDBClient, 
     GetItemCommand, 
     PutItemCommand, 
-    AttributeValue // Import this from the SDK
+    AttributeValue 
 } from "@aws-sdk/client-dynamodb";
 // Assuming validateToken is a utility function in a local file
 import { validateToken } from "./utils";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Type Definitions ---
-
-// DELETE THE MANUAL INTERFACE 'AttributeValue' HERE. 
-// We use the one imported from @aws-sdk/client-dynamodb instead.
 
 // Interface for the expected request body data structure
 interface ClinicProfileData {
@@ -30,32 +29,31 @@ interface ClinicProfileData {
     [key: string]: any;
 }
 
-// Type for CORS headers
-interface CorsHeaders {
-    [header: string]: string;
-}
-
 // --- Initialization ---
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-const corsHeaders: CorsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // Handle OPTIONS (preflight) request
-    if (event.httpMethod === 'OPTIONS') {
-        return { statusCode: 200, headers: corsHeaders, body: '' };
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === 'OPTIONS') {
+        return { statusCode: 200, headers: CORS_HEADERS, body: '' };
     }
 
     try {
         // 1. Authorization and Input Parsing
-        const userSub: string = await validateToken(event);
+        const userSub: string = await validateToken(event as any);
         const profileData: ClinicProfileData = JSON.parse(event.body || '{}');
 
         // Required fields check
@@ -67,13 +65,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             !profileData.primary_contact_last_name
         ) {
             console.warn("[VALIDATION] Missing required fields in body.");
-            return {
-                statusCode: 400,
-                headers: corsHeaders,
-                body: JSON.stringify({
-                    error: "Required fields: clinicId, practice_type, primary_practice_area, primary_contact_first_name, primary_contact_last_name"
-                })
-            };
+            return json(400, {
+                error: "Required fields: clinicId, practice_type, primary_practice_area, primary_contact_first_name, primary_contact_last_name"
+            });
         }
 
         const timestamp = new Date().toISOString();
@@ -88,22 +82,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!clinicItem) {
             console.warn(`[AUTH] Clinic not found: ${profileData.clinicId}`);
-            return {
-                statusCode: 404,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: "Clinic not found with provided clinicId" })
-            };
+            return json(404, { error: "Clinic not found with provided clinicId" });
         }
 
         // Check if userSub is in the AssociatedUsers list
         const associatedUsers = clinicItem.AssociatedUsers?.L?.map(u => u.S) || [];
         if (!associatedUsers.includes(userSub)) {
             console.warn(`[AUTH] User ${userSub} is not associated with clinic ${profileData.clinicId}.`);
-            return {
-                statusCode: 403,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: "User is not authorized to create a profile for this clinic" })
-            };
+            return json(403, { error: "User is not authorized to create a profile for this clinic" });
         }
 
         // 3. ✅ Build the item using Record<string, AttributeValue>
@@ -132,6 +118,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 4. ✅ Add optional dynamic fields
         Object.entries(profileData).forEach(([key, value]) => {
+            // Skip fields we already manually mapped or standard fields to prevent overwriting with raw values
             if (!item[key] && value !== undefined) {
                 if (typeof value === "string") {
                     item[key] = { S: value };
@@ -141,7 +128,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     item[key] = { N: value.toString() };
                 } else if (Array.isArray(value)) {
                     const stringArray = value.filter(v => typeof v === 'string') as string[];
-                    item[key] = { SS: stringArray.length > 0 ? stringArray : [""] };
+                    if (stringArray.length > 0) {
+                        item[key] = { SS: stringArray };
+                    }
                 }
             }
         });
@@ -153,33 +142,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             ConditionExpression: "attribute_not_exists(clinicId) AND attribute_not_exists(userSub)"
         }));
 
-        return {
-            statusCode: 201,
-            headers: corsHeaders,
-            body: JSON.stringify({
-                message: "Clinic profile created successfully",
-                clinicId: profileData.clinicId
-            })
-        };
+        return json(201, {
+            message: "Clinic profile created successfully",
+            clinicId: profileData.clinicId
+        });
 
     } catch (error) {
         const err = error as Error;
         console.error("Error creating clinic profile:", err);
 
         if (err.name === "ConditionalCheckFailedException") {
-            return {
-                statusCode: 409,
-                headers: corsHeaders,
-                body: JSON.stringify({
-                    error: "A profile already exists for this clinic and user"
-                })
-            };
+            return json(409, {
+                error: "A profile already exists for this clinic and user"
+            });
         }
 
-        return {
-            statusCode: 500,
-            headers: corsHeaders,
-            body: JSON.stringify({ error: err.message || "An unexpected error occurred" })
-        };
+        return json(500, {
+            error: err.message || "An unexpected error occurred"
+        });
     }
 };

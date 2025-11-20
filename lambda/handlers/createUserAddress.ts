@@ -7,9 +7,14 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils"; // Assuming validateToken is in utils.ts
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 // Define shared CORS headers
 const CORS_HEADERS: Record<string, string> = {
     "Access-Control-Allow-Origin": "*", // or restrict to your domain in prod
@@ -18,6 +23,7 @@ const CORS_HEADERS: Record<string, string> = {
     "Access-Control-Allow-Methods": "OPTIONS,POST",
     "Content-Type": "application/json",
 };
+*/
 
 // Define the expected structure for the request body
 interface AddressRequestBody {
@@ -41,6 +47,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // --- CORS preflight ---
     if (method === "OPTIONS") {
+        // ✅ Uses imported headers
         return { statusCode: 204, headers: CORS_HEADERS, body: "" };
     }
 
@@ -60,7 +67,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         ) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Required fields: addressLine1, city, state, pincode",
                 }),
@@ -106,7 +113,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Step 5: Return success response
         return {
             statusCode: 201,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "User address created successfully",
                 userSub,
@@ -121,7 +128,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (err.name === "ConditionalCheckFailedException") {
             return {
                 statusCode: 409,
-                headers: CORS_HEADERS,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "User address already exists. Use PUT to update.",
                 }),
@@ -131,7 +138,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Handle other errors
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({ error: err.message || "Internal Server Error" }),
         };
     }

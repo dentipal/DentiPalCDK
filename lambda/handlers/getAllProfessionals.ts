@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     ScanCommand,
@@ -10,6 +9,9 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { validateToken } from "./utils"; 
+
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -52,6 +54,8 @@ interface ProfileResponseItem {
     zipcode: string;
 }
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 // Define common headers
 const COMMON_HEADERS = {
     "Content-Type": "application/json",
@@ -59,7 +63,7 @@ const COMMON_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
-
+*/
 
 /**
  * AWS Lambda handler to retrieve all professional profiles and enrich them with address details.
@@ -67,6 +71,13 @@ const COMMON_HEADERS = {
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // ✅ ADDED PREFLIGHT CHECK
+    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // 1. Validate the token to ensure the user is authenticated
         // validateToken is assumed to return the userSub (string) and throw on failure.
@@ -130,7 +141,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 profiles,
                 count: profiles.length
             }),
-            headers: COMMON_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
         };
     } catch (error: any) {
         // 5. Handle and return error response
@@ -143,7 +154,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 message: 'Error fetching professional profiles',
                 error: error.message
             }),
-            headers: COMMON_HEADERS,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
         };
     }
 };

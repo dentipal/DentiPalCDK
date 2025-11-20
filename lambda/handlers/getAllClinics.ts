@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     ScanCommand,
@@ -9,6 +8,9 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { validateToken, isRoot } from "./utils"; 
+
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
@@ -44,12 +46,15 @@ interface DynamoDBClinicItem {
     [key: string]: AttributeValue | undefined;
 }
 
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 // Define CORS headers
 const headers = {
     "Access-Control-Allow-Origin": "*", // Allow any origin, modify for stricter security
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS", // Allow specific methods
     "Access-Control-Allow-Headers": "Content-Type, Authorization" // Allow specific headers
 };
+*/
 
 /**
  * AWS Lambda handler to retrieve a list of clinics based on user permissions and filters.
@@ -57,10 +62,18 @@ const headers = {
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    // ✅ ADDED PREFLIGHT CHECK
+    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // 1. Validate token and retrieve user information
         // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = validateToken(event);
+        // Added 'await' and 'as any' cast to match patterns in other files
+        const userSub: string = await validateToken(event as any);
         
         // Get user groups from authorizer claims (assuming groups is a comma-separated string)
         const groupsRaw = (event.requestContext.authorizer?.claims as any)?.['cognito:groups'];
@@ -135,7 +148,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!response.Items || response.Items.length === 0) {
             return {
                 statusCode: 200,
-                headers,
+                headers: CORS_HEADERS, // ✅ Uses imported headers
                 body: JSON.stringify({
                     status: "success",
                     clinics: [],
@@ -185,7 +198,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 7. Success Response
         return {
             statusCode: 200,
-            headers,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 status: "success",
                 clinics: clinics,
@@ -209,7 +222,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("❌ Error retrieving clinics:", error);
         return {
             statusCode: 500,
-            headers,
+            headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
                 error: "Failed to retrieve clinics. Please try again.",
                 details: error.message

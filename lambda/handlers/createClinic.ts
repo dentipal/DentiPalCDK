@@ -10,19 +10,22 @@ import { v4 as uuidv4 } from "uuid";
 // Assuming utils.ts contains definitions for validateToken and buildAddress
 import { validateToken, buildAddress } from "./utils";
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // Initialize the DynamoDB client
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
 
-// Define the type for the CORS headers
+// ❌ REMOVED INLINE HEADERS DEFINITION
+/*
 type CorsHeaders = Record<string, string>;
-
-// Shared headers for the response
 const HEADERS: CorsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Content-Type": "application/json",
 };
+*/
 
 // Define the expected structure for the request body
 interface ClinicRequestBody {
@@ -96,7 +99,8 @@ function canCreateClinic(groups: string[]): boolean {
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     // Handle CORS preflight
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: HEADERS, body: "{}" };
+        // ✅ Updated to use CORS_HEADERS
+        return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
     }
 
     try {
@@ -108,7 +112,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!canCreateClinic(groups)) {
             return {
                 statusCode: 403,
-                headers: HEADERS,
+                headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
                 body: JSON.stringify({ error: "Only Root or Clinic Admin can create clinics" }),
             };
         }
@@ -120,7 +124,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!name || !addressLine1 || !city || !state || !pincode) {
             return {
                 statusCode: 400,
-                headers: HEADERS,
+                headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
                 body: JSON.stringify({
                     error: "Missing required fields: name, addressLine1, city, state, pincode",
                 }),
@@ -178,7 +182,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Step 5: Return Success Response
         return {
             statusCode: 200,
-            headers: HEADERS,
+            headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
             body: JSON.stringify({
                 status: "success",
                 message: "Clinic created successfully",
@@ -207,7 +211,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error creating clinic:", err);
         return {
             statusCode: 400,
-            headers: HEADERS,
+            headers: CORS_HEADERS, // ✅ Updated to use CORS_HEADERS
             body: JSON.stringify({
                 error: "Failed to create clinic",
                 details: err.message || String(error),

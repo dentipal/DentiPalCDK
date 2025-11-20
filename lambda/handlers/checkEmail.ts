@@ -2,13 +2,17 @@
 import { CognitoIdentityServiceProvider } from 'aws-sdk';
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 
+// ✅ ADDED THIS LINE:
+import { CORS_HEADERS } from "./corsHeaders";
+
 // --- Initialization ---
 
 // Note: AWS.config.update() isn't strictly necessary here as the region is passed
 // directly to the CognitoIdentityServiceProvider constructor.
 const cognito = new CognitoIdentityServiceProvider({ region: process.env.REGION });
 
-// Define an interface for the CORS headers for type safety
+// ❌ REMOVED INLINE CORS DEFINITION
+/*
 interface CorsHeaders {
   [header: string]: string | number | boolean;
 }
@@ -19,6 +23,7 @@ const CORS: CorsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Content-Type": "application/json"
 };
+*/
 
 // --- Utility Functions ---
 
@@ -129,7 +134,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   // Handle preflight OPTIONS request
   if (event.httpMethod === "OPTIONS") {
     console.log("[cors] Preflight OPTIONS handled.");
-    return { statusCode: 200, headers: CORS, body: "{}" };
+    // ✅ Updated to use CORS_HEADERS
+    return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
   }
 
   try {
@@ -140,7 +146,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     if (!email) {
       console.warn("[validate] Missing email in body.");
-      return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "Email is required" }) };
+      // ✅ Updated to use CORS_HEADERS
+      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Email is required" }) };
     }
 
     // Extract id token from Authorization header
@@ -149,9 +156,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     if (!authHeader.startsWith("Bearer ")) {
       console.warn("[auth] Missing or invalid Bearer token.");
+      // ✅ Updated to use CORS_HEADERS
       return {
         statusCode: 401,
-        headers: CORS,
+        headers: CORS_HEADERS,
         body: JSON.stringify({ error: "Authorization Bearer ID token is required" })
       };
     }
@@ -160,7 +168,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const parts = idToken.split(".");
     if (parts.length !== 3) {
       console.warn("[decode] ID token does not have 3 JWT parts.");
-      return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "Invalid ID token format" }) };
+      // ✅ Updated to use CORS_HEADERS
+      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Invalid ID token format" }) };
     }
 
     // Decode JWT payload
@@ -203,14 +212,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const result = {
       message: "Email verified against token",
-      userType,     // "professional" or "clinic" (default)
-      groups: groupNames,  // Just for visibility
-      tokenEmail    // Useful for debugging mismatches
+      userType,     // "professional" or "clinic" (default)
+      groups: groupNames,  // Just for visibility
+      tokenEmail    // Useful for debugging mismatches
     };
     console.log("[resp] result:", JSON.stringify(result, null, 2));
     console.log("=== /auth/check-email REQUEST END (200) ===");
 
-    return { statusCode: 200, headers: CORS, body: JSON.stringify(result) };
+    // ✅ Updated to use CORS_HEADERS
+    return { statusCode: 200, headers: CORS_HEADERS, body: JSON.stringify(result) };
 
   } catch (err) {
     const error = err as AWS.AWSError;
@@ -222,8 +232,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const code = error?.code || error?.name;
     if (code === "UserNotFoundException") {
-      return { statusCode: 404, headers: CORS, body: JSON.stringify({ error: "User not found" }) };
+      // ✅ Updated to use CORS_HEADERS
+      return { statusCode: 404, headers: CORS_HEADERS, body: JSON.stringify({ error: "User not found" }) };
     }
-    return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: `Error verifying email: ${error?.message}` }) };
+    // ✅ Updated to use CORS_HEADERS
+    return { statusCode: 500, headers: CORS_HEADERS, body: JSON.stringify({ error: `Error verifying email: ${error?.message}` }) };
   }
 };

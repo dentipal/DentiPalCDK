@@ -11,6 +11,9 @@ import { v4 as uuidv4 } from "uuid";
 
 // Assuming these modules exist and export the correct functions/values
 import { validateToken } from "./utils";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
+
 // We must assume the type and existence of VALID_ROLE_VALUES
 // import { VALID_ROLE_VALUES } from "./professionalRoles"; 
 declare const VALID_ROLE_VALUES: string[];
@@ -19,19 +22,11 @@ declare const VALID_ROLE_VALUES: string[];
 const REGION: string = process.env.REGION || process.env.AWS_REGION || "us-east-1";
 const dynamodb = new DynamoDBClient({ region: REGION });
 
-// Define shared CORS headers
-const CORS_HEADERS: Record<string, string> = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
-    "Content-Type": "application/json",
-};
-
-// Helper for quick response creation
-const response = (statusCode: number, data: any): APIGatewayProxyResult => ({
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
     headers: CORS_HEADERS,
-    body: typeof data === "string" ? data : JSON.stringify(data),
+    body: JSON.stringify(bodyObj)
 });
 
 // --- Type Definitions for Job Data ---
@@ -158,8 +153,13 @@ async function getClinicProfileByUser(clinicId: string, userSub: string): Promis
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // Handle OPTIONS preflight
-    if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+    // --- CORS preflight ---
+    // Check standard REST method or HTTP API v2 method
+    const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
 
     try {
         const userSub: string = await validateToken(event as any); // clinic user
@@ -170,7 +170,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isAllowed: boolean = normalized.some(g => ALLOWED_GROUPS.has(g));
         
         if (!isAllowed) {
-            return response(403, { error: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs" });
+            return json(403, { error: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs" });
         }
         // --------------------------------------------------------------------
 
@@ -178,7 +178,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Validate common required fields
         if (!jobData.job_type || !jobData.professional_role || !jobData.shift_speciality || !jobData.clinicIds || !Array.isArray(jobData.clinicIds) || jobData.clinicIds.length === 0) {
-            return response(400, {
+            return json(400, {
                 error: "Required fields: job_type, professional_role, shift_speciality, clinicIds (non-empty array)"
             });
         }
@@ -186,14 +186,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate job type
         const validJobTypes = ["temporary", "multi_day_consulting", "permanent"];
         if (!validJobTypes.includes(jobData.job_type)) {
-            return response(400, {
+            return json(400, {
                 error: `Invalid job_type. Valid options: ${validJobTypes.join(", ")}`
             });
         }
 
         // Validate professional role
         if (!VALID_ROLE_VALUES || !VALID_ROLE_VALUES.includes(jobData.professional_role)) {
-            return response(400, {
+            return json(400, {
                 error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES ? VALID_ROLE_VALUES.join(", ") : "Not available"}`
             });
         }
@@ -212,7 +212,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (validationError) {
-            return response(400, { error: validationError });
+            return json(400, { error: validationError });
         }
 
         const timestamp: string = new Date().toISOString();
@@ -337,14 +337,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         await Promise.all(postJobsPromises);
 
-        return response(201, {
+        return json(201, {
             message: "Job posting created for multiple clinics",
             jobIds: jobIds
         });
     } catch (error) {
         const err = error as Error;
         console.error("Error creating job posting:", err);
-        return response(500, { error: err.message });
+        return json(500, { error: err.message });
     }
 };
 

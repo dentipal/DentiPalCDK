@@ -1,4 +1,3 @@
-// index.ts
 import {
     DynamoDBClient,
     QueryCommand,
@@ -6,19 +5,20 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+// Import shared CORS headers
+import { CORS_HEADERS } from "./corsHeaders";
 // Assuming the utility file exports the necessary functions and types
-import { validateToken } from "./utils"; 
+import { validateToken } from "./utils";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-// CORS headers to be included in all responses
-const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Credentials": true,
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "OPTIONS,GET,POST,PUT,DELETE"
-};
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // --- Type Definitions ---
 
@@ -147,24 +147,27 @@ const getPermanentStartDate = (job: UnmarshalledJobItem): PermanentStartDate => 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     console.log("📥 Incoming Event:", JSON.stringify(event, null, 2));
 
+    // --- CORS preflight ---
+    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
         // 1. Authentication
         // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = await validateToken(event);
+        const userSub: string = await validateToken(event as any);
         console.log("✅ User authenticated. userSub:", userSub);
 
         // 2. Extract clinicId from proxy path: e.g. "jobs/clinicpermanent/{clinicId}"
+        // NOTE: This assumes the route structure matches the index positions
         const pathParts = event.pathParameters?.proxy?.split('/') || [];
         const clinicId = pathParts[2];
         console.log("🔍 Extracted clinicId:", clinicId);
 
         if (!clinicId) {
             console.warn("⚠️ clinicId missing in path");
-            return {
-                statusCode: 400,
-                headers: corsHeaders,
-                body: JSON.stringify({ error: "clinicId is required in path" })
-            };
+            return json(400, { error: "clinicId is required in path" });
         }
 
         // 3. Query using ClinicIdIndex (GSI)
@@ -182,8 +185,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("📦 Raw query result count:", result?.Count || 0);
 
         // 4. Unmarshall and Filter
-        // FIX: Wrap unmarshall in a function to correctly pass only the item argument
-        const allJobs: UnmarshalledJobItem[] = (result.Items || []).map((item) => unmarshall(item)) as UnmarshalledJobItem[];
+        // Convert DynamoDB AttributeValues ({ S: "val" }) to plain JS objects
+        const allJobs: UnmarshalledJobItem[] = (result.Items || []).map((item) => unmarshall(item));
         
         // Accept both snake_case and camelCase for job type
         const permanentJobs = allJobs.filter(
@@ -194,7 +197,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 5. Format and Clean Data
         const formattedJobs: FormattedJobItem[] = permanentJobs.map((job, idx) => {
             const { startDate, source } = getPermanentStartDate(job);
-            console.log(`🗓️  Job[${idx}] startDate ->`, { value: startDate, source });
+            console.log(`🗓️  Job[${idx}] startDate ->`, { value: startDate, source });
 
             // Prefer snake_case -> camelCase fallbacks everywhere
             const salaryMinRaw = job.salary_min ?? job.salaryMin;
@@ -252,24 +255,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("✅ All permanent jobs formatted successfully");
 
         // 6. Success Response
-        return {
-            statusCode: 200,
-            headers: corsHeaders,
-            body: JSON.stringify({
-                message: `Retrieved ${formattedJobs.length} permanent job(s) for clinicId: ${clinicId}`,
-                jobs: formattedJobs
-            })
-        };
+        return json(200, {
+            message: `Retrieved ${formattedJobs.length} permanent job(s) for clinicId: ${clinicId}`,
+            jobs: formattedJobs
+        });
 
     } catch (error: any) {
         console.error("❌ Error during Lambda execution:", error);
-        return {
-            statusCode: 500,
-            headers: corsHeaders,
-            body: JSON.stringify({
-                error: "Failed to retrieve permanent jobs",
-                details: error.message
-            })
-        };
+        return json(500, {
+            error: "Failed to retrieve permanent jobs",
+            details: error.message
+        });
     }
 };
