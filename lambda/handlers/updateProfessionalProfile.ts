@@ -5,16 +5,17 @@ import {
     AttributeValue,
     GetItemCommandInput,
     UpdateItemCommandInput,
-    GetItemCommandOutput
+    GetItemCommandOutput,
+    UpdateItemCommandOutput // <--- Added this import
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { validateToken } from "./utils"; 
-import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles"; // Dependency imports
+import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles"; 
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
 const dynamodb: DynamoDBClient = new DynamoDBClient({ region: REGION });
-const PROFESSIONAL_PROFILES_TABLE: string = process.env.PROFESSIONAL_PROFILES_TABLE!; // Non-null assertion for env var
+const PROFESSIONAL_PROFILES_TABLE: string = process.env.PROFESSIONAL_PROFILES_TABLE!; 
 
 // --- 2. Constants and Type Definitions ---
 
@@ -24,36 +25,21 @@ const corsHeaders: Record<string, string> = {
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
 };
 
-/** Interface for the data expected in the request body (allows any key) */
+/** Interface for the data expected in the request body */
 interface UpdateProfileBody {
     role?: string;
     full_name?: string;
     email?: string;
     is_active?: boolean;
     hourly_rate?: number;
-    // Allows any other key passed in the request body
     [key: string]: any; 
-}
-
-/** Interface for the DynamoDB Profile Item structure (partial view) */
-interface ProfileItem {
-    userSub?: { S: string };
-    role?: { S: string };
-    full_name?: { S: string };
-    updatedAt?: { S: string };
-    [key: string]: AttributeValue | undefined;
 }
 
 // --- 3. Handler Function ---
 
-/**
- * Updates a professional user's profile in DynamoDB.
- * Enforces token validation and checks for valid role updates.
- */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     try {
-        // Validate the token and get the userSub (clinic owner)
-        // Since the original JS used `await`, we assume it returns a Promise<string>
+        // Validate the token
         const userSub: string = await validateToken(event); 
 
         if (!event.body) {
@@ -110,7 +96,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Handle all possible fields from updateData
         Object.entries(updateData).forEach(([key, value]) => {
-            // Ensure the key isn't 'userSub' or 'createdAt' which should not be updated directly
             if (value !== undefined && key !== 'userSub' && key !== 'createdAt') {
                 const attrKey = `:${key}`;
                 const nameKey = `#${key}`;
@@ -127,17 +112,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 } else if (typeof value === 'number') {
                     expressionAttributeValues[attrKey] = { N: value.toString() };
                 } else if (Array.isArray(value)) {
-                    // Assuming string array maps to String Set (SS) or List (L). 
-                    // Using SS as it was the pattern in other handlers.
                     if (value.every(item => typeof item === 'string')) {
-                         // DynamoDB SS requires at least one non-empty string for valid set
-                         expressionAttributeValues[attrKey] = { SS: value.length > 0 ? value : [''] };
+                          expressionAttributeValues[attrKey] = { SS: value.length > 0 ? value : [''] };
                     } else {
-                         // Log or handle non-string array elements if necessary
-                         console.warn(`Skipping field ${key}: Array must contain only strings for SS type.`);
-                         fieldsUpdatedCount--; // Decrement count since this field is skipped
-                         delete expressionAttributeNames[nameKey];
-                         updateExpressions.pop();
+                          console.warn(`Skipping field ${key}: Array must contain only strings for SS type.`);
+                          fieldsUpdatedCount--; 
+                          delete expressionAttributeNames[nameKey];
+                          updateExpressions.pop();
                     }
                 }
             }
@@ -161,7 +142,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             ReturnValues: "ALL_NEW"
         };
 
-        const result: GetItemCommandOutput = await dynamodb.send(new UpdateItemCommand(updateCommand));
+        // FIX: Changed type from GetItemCommandOutput to UpdateItemCommandOutput
+        const result: UpdateItemCommandOutput = await dynamodb.send(new UpdateItemCommand(updateCommand));
+        
+        // Now .Attributes is valid
         const updatedAttributes = result.Attributes;
 
         // --- Step 4: Return success response ---

@@ -200,6 +200,8 @@ export const handler = async (event: any): Promise<LambdaResponse> => {
             
             if (endTimeFormatted) {
                 let datePart: string | null = null;
+                // FIX 1: Define the potential ISO date here so TypeScript knows it exists
+                const isoDateRef = job.date || job.start_date;
 
                 if ((jobType === 'multi_day_consulting' || jobType === 'multi_day')) {
                     // Prioritize the latest date from the 'dates' array
@@ -225,9 +227,9 @@ export const handler = async (event: any): Promise<LambdaResponse> => {
                         datePart = tempDateRef.split('T')[0];
                         console.log(` - Using Logic B: Combined simple date (${datePart}) with end_time.`);
                     }
-                } else if ((job.date || job.start_date) && typeof (job.date || job.start_date) === 'string') {
+                } else if (isoDateRef && typeof isoDateRef === 'string') {
+                    // FIX 1 (continued): Used the variable 'isoDateRef' which is now guaranteed string in this block
                     // Logic A: For other jobs where date is an ISO string (extract date part)
-                    const isoDateRef = job.date || job.start_date;
                     datePart = isoDateRef.split('T')[0];
                     console.log(` - Using Logic A: Combined date part (${datePart}) with end_time.`);
                 }
@@ -245,7 +247,7 @@ export const handler = async (event: any): Promise<LambdaResponse> => {
 
             if (!shiftEndDateTime || isNaN(shiftEndDateTime.getTime())) {
                 console.warn(`⚠️ SKIPPING: Failed to create a valid shiftEndDateTime for Job ID: ${app.jobId}. 
-                     Job Type: ${jobType}, End Time: ${job.end_time}.`);
+                      Job Type: ${jobType}, End Time: ${job.end_time}.`);
                 continue;
             }
 
@@ -312,12 +314,6 @@ export const handler = async (event: any): Promise<LambdaResponse> => {
                         const actualCompletedShiftsCount: number = completedShiftsResult.Count || 0;
                         console.log(` - 5e. Professional ${professionalUserSub} has ${actualCompletedShiftsCount} actual completed shifts.`);
 
-                        // The logic should award the bonus if this is truly the *first* completed shift.
-                        // Since we are *about* to mark the current shift as completed, if the count *before* this moment
-                        // (which is what the query provides, potentially including this job if it was already updated 
-                        // by a previous run or concurrent process) is 1 or less, we proceed. 
-                        // A safer check relies on the status of the referral record itself (`signed_up`).
-                        
                         const referrerUserSub: string = referralRecord.referrerUserSub;
 
                         // Update referrer's profile (add bonus)
@@ -336,21 +332,17 @@ export const handler = async (event: any): Promise<LambdaResponse> => {
                         updatesToPerform.push(dynamo.send(new UpdateItemCommand(updateReferrerProfileParams)));
 
                         // Update referral record status (conditional update for safety)
+                        // FIX 2: Consolidated ExpressionAttributeValues and removed duplicate key
                         const updateReferralStatusParams: UpdateItemCommandInput = {
                             TableName: REFERRALS_TABLE,
                             Key: marshall({ referralId: referralRecord.referralId }) as Record<string, AttributeValue>,
                             UpdateExpression: "SET #status = :bonusStatus, firstShiftCompletedAt = :now, updatedAt = :now",
                             ExpressionAttributeNames: { "#status": "status" },
-                            ExpressionAttributeValues: marshall({
-                                ":bonusStatus": "bonus_due",
-                                ":now": now.toISOString(),
-                                // Note: ":signedUpStatus" must be of type S for ConditionExpression
-                            }) as Record<string, AttributeValue>,
                             ConditionExpression: "#status = :signedUpStatus", 
                             ExpressionAttributeValues: {
                                 ...marshall({ ":bonusStatus": "bonus_due", ":now": now.toISOString() }),
                                 ":signedUpStatus": { S: "signed_up" }
-                            } as Record<string, AttributeValue> // Overwrite for ConditionExpression types
+                            } as Record<string, AttributeValue>
                         };
                         
                         console.log(` - 5g. Queuing update for referral record ${referralRecord.referralId} to status 'bonus_due'.`);
@@ -383,6 +375,3 @@ export const handler = async (event: any): Promise<LambdaResponse> => {
         throw error;
     }
 };
-
-// Original JS export style. Using `export const handler` is more common in TS/ESM.
-// exports.handler = handler;
