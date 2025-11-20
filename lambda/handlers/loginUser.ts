@@ -96,9 +96,9 @@ export const handler = async (
       });
     }
 
-    // Decode id token (no external deps)
-    const idToken = tokens.IdToken!;
-    const payloadBase64 = idToken.split(".")[1];
+    // Decode access token (no external deps) - use accessToken for authorization
+    const accessToken = tokens.AccessToken!;
+    const payloadBase64 = accessToken.split(".")[1];
     const decodedPayload = JSON.parse(Buffer.from(payloadBase64, "base64").toString("utf-8"));
 
     const userSub: string = decodedPayload.sub;

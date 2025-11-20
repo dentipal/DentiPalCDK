@@ -146,7 +146,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       };
     }
 
-    // Extract id token from Authorization header
+    // Extract access token from Authorization header
     const authHeader = event.headers?.authorization || event.headers?.Authorization || "";
     console.log("[auth] Authorization header:", authHeader ? "(present)" : "(missing)");
 
@@ -158,24 +158,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         body: JSON.stringify({
           error: "Unauthorized",
           statusCode: 401,
-          message: "Authorization Bearer ID token is required",
+          message: "Authorization Bearer access token is required",
           details: { missingHeader: "Authorization: Bearer <token>" },
           timestamp: new Date().toISOString()
         })
       };
     }
 
-    const idToken = authHeader.slice("Bearer ".length).trim();
-    const parts = idToken.split(".");
+    const accessToken = authHeader.slice("Bearer ".length).trim();
+    const parts = accessToken.split(".");
     if (parts.length !== 3) {
-      console.warn("[decode] ID token does not have 3 JWT parts.");
+      console.warn("[decode] Access token does not have 3 JWT parts.");
       return {
         statusCode: 400,
         headers: CORS_HEADERS,
         body: JSON.stringify({
           error: "Bad Request",
           statusCode: 400,
-          message: "Invalid ID token format",
+          message: "Invalid access token format",
           details: { reason: "JWT must contain 3 parts separated by dots" },
           timestamp: new Date().toISOString()
         })

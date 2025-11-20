@@ -80,8 +80,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 }));
             }
         }
-
-        // ❌ Stop using accessToken
         // ✅ Use AdminDeleteUserCommand with userSub
         await cognitoClient.send(new AdminDeleteUserCommand({
             UserPoolId: process.env.USER_POOL_ID, // Ensure this env var is set

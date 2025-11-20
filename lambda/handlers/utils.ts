@@ -98,13 +98,7 @@ export const hasClinicAccess = async (userSub: string, clinicId: string, require
     }
 };
 
-/**
- * Ensures the user is authenticated by checking for the 'sub' claim and throws an error if missing.
- * Handles both REST API (claims) and HTTP API (jwt.claims) structures.
- * @param event - The Lambda event object.
- * @returns The user's unique identifier (userSub).
- * @throws {Error} if the user is not authenticated.
- */
+
 export const validateToken = (event: APIGatewayProxyEvent): string => {
     // Cast to any to handle both REST Authorizer structure and HTTP API JWT structure
     const authorizer = (event.requestContext as any).authorizer;
@@ -117,11 +111,6 @@ export const validateToken = (event: APIGatewayProxyEvent): string => {
     return userSub;
 };
 
-/**
- * Retrieves and normalizes essential user information from the Cognito claims.
- * @param event - The Lambda event object.
- * @returns A UserInfo object containing claims or null if not authenticated.
- */
 export const verifyToken = async (event: APIGatewayProxyEvent): Promise<UserInfo | null> => {
     // Cast to any to handle both REST Authorizer structure and HTTP API JWT structure
     const authorizer = (event.requestContext as any).authorizer;
@@ -144,4 +133,79 @@ export const verifyToken = async (event: APIGatewayProxyEvent): Promise<UserInfo
         email: claims.email,
         groups: groups,
     };
+};
+
+/**
+ * Extracts and decodes the JWT payload from Bearer token in Authorization header.
+ * @param authHeader - Authorization header value (e.g., "Bearer eyJhbGc...")
+ * @returns Decoded JWT claims object
+ * @throws Error if header is missing, invalid format, or token cannot be decoded
+ */
+export const extractAndDecodeAccessToken = (authHeader: string | undefined): Record<string, any> => {
+    if (!authHeader) {
+        throw new Error("Authorization header missing");
+    }
+
+    const parts = authHeader.split(" ");
+    if (parts.length !== 2 || parts[0].toLowerCase() !== "bearer") {
+        throw new Error("Invalid authorization header format. Expected 'Bearer <token>'");
+    }
+
+    const token = parts[1];
+    const tokenParts = token.split(".");
+    if (tokenParts.length !== 3) {
+        throw new Error("Invalid access token format");
+    }
+
+    try {
+        // Decode the payload (second part of JWT)
+        const payload = tokenParts[1];
+        // Base64 URL decode
+        const decoded = Buffer.from(payload, "base64url").toString("utf-8");
+        return JSON.parse(decoded);
+    } catch (error) {
+        throw new Error("Failed to decode access token");
+    }
+};
+
+/**
+ * Extracts user information and groups from JWT claims.
+ * Normalizes cognito:groups from comma-separated string or array to array format.
+ * @param claims - Decoded JWT claims object
+ * @returns Normalized UserInfo object with sub and groups
+ * @throws Error if sub is missing
+ */
+export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo => {
+    if (!claims.sub) {
+        throw new Error("User sub not found in token claims");
+    }
+
+    const groupsClaim = claims['cognito:groups'];
+    let groups: string[] = [];
+    
+    if (typeof groupsClaim === 'string') {
+        // Handle comma-separated string
+        groups = groupsClaim.split(',').map((g: string) => g.trim()).filter((g: string) => g.length > 0);
+    } else if (Array.isArray(groupsClaim)) {
+        // Already an array
+        groups = groupsClaim;
+    }
+
+    return {
+        sub: claims.sub,
+        userType: claims['custom:user_type'] || 'professional',
+        email: claims.email,
+        groups: groups,
+    };
+};
+
+/**
+ * One-line wrapper: Extracts and decodes Bearer token, then returns normalized UserInfo.
+ * @param authHeader - Authorization header value
+ * @returns UserInfo with sub and groups
+ * @throws Error with descriptive message if extraction/decoding fails
+ */
+export const extractUserFromBearerToken = (authHeader: string | undefined): UserInfo => {
+    const claims = extractAndDecodeAccessToken(authHeader);
+    return extractUserInfoFromClaims(claims);
 };

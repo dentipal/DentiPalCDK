@@ -20,25 +20,13 @@ import { CORS_HEADERS } from "./corsHeaders";
 const REGION: string = process.env.REGION || process.env.AWS_REGION || "us-east-1";
 const dynamodb = new DynamoDBClient({ region: REGION });
 
-
-/**
- * Helper to construct the API Gateway response object.
- * @param statusCode The HTTP status code.
- * @param data The response body data (object or string).
- * @returns APIGatewayProxyResult object.
- */
 const resp = (statusCode: number, data: any): APIGatewayProxyResult => ({
     statusCode,
     headers: CORS_HEADERS, // ✅ Uses imported headers
     body: typeof data === "string" ? data : JSON.stringify(data),
 });
 
-// ---------- group helpers ----------
-/**
- * Parses Cognito user groups from the API Gateway event authorizer claims.
- * @param event The API Gateway Proxy Event.
- * @returns An array of string group names.
- */
+// ---------- Helper Functions ----------
 function parseGroupsFromAuthorizer(event: APIGatewayProxyEvent): string[] {
     const claims = event?.requestContext?.authorizer?.claims || {};
     let raw: unknown = claims["cognito:groups"] ?? claims["cognito:Groups"] ?? "";
@@ -94,12 +82,7 @@ function parseMealBreakMinutes(input: string | undefined | null): number | null 
     return null; // keep original string only
 }
 
-/**
- * read one clinic profile row by composite key
- * @param clinicId The ID of the clinic.
- * @param userSub The userSub of the profile owner.
- * @returns The DynamoDB Item or null.
- */
+// Fetch clinic profile by clinicId and userSub
 async function getClinicProfileByUser(clinicId: string, userSub: string): Promise<Record<string, AttributeValue> | null> {
     const getItemInput: GetItemCommandInput = {
         TableName: process.env.CLINIC_PROFILES_TABLE,
