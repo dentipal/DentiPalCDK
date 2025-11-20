@@ -1,7 +1,7 @@
 import { DynamoDBClient, UpdateItemCommand, AttributeValue } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken, hasClinicAccess, buildAddress } from "./utils"; 
-// Assuming utils.ts exports validateToken, hasClinicAccess, and buildAddress
+// 1. Added AccessLevel to imports to fix the type error
+import { validateToken, hasClinicAccess, buildAddress, AccessLevel } from "./utils"; 
 
 // --- Type Definitions ---
 
@@ -102,8 +102,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 4. Clinic-Scoped Access Check
         // Root bypasses clinic-scoped check; ClinicAdmin must have clinic access
         if (!isRootGroup) {
-            // hasClinicAccess should take userSub, clinicId, and requiredLevel
-            const hasAccess: boolean = await hasClinicAccess(userSub, clinicId, "ClinicAdmin");
+            // FIX: Cast string to AccessLevel to satisfy TypeScript
+            // Note: Ensure "ClinicAdmin" matches the spelling expected by your AccessLevel type/enum
+            const hasAccess: boolean = await hasClinicAccess(userSub, clinicId, "ClinicAdmin" as AccessLevel);
+            
             if (!hasAccess) {
                 return { statusCode: 403, body: JSON.stringify({ error: "Access denied to update clinic" }) };
             }

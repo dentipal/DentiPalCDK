@@ -61,7 +61,8 @@ const json = (code: number, body: any): APIGatewayProxyResult => ({
 });
 
 const getMethod = (e: APIGatewayProxyEvent): string =>
-    e?.httpMethod || e?.requestContext?.http?.method || "GET";
+    // FIX: Cast requestContext to 'any' to access 'http' (HTTP API v2 property) safely
+    e?.httpMethod || (e?.requestContext as any)?.http?.method || "GET";
 
 const parseBody = (e: APIGatewayProxyEvent): FeedbackBody => {
     if (!e?.body) return {};
@@ -77,13 +78,18 @@ const parseBody = (e: APIGatewayProxyEvent): FeedbackBody => {
 };
 
 function escapeHtml(str: string = ""): string {
+    // FIX: Replaced .replaceAll with .replace(/.../g) for compatibility with older TS targets
     return String(str)
-        .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 }
 
 function escapeHtmlMultiline(str: string = ""): string {
-    return escapeHtml(str).replaceAll("\n", "<br/>");
+    // FIX: Replaced .replaceAll with .replace(/.../g)
+    return escapeHtml(str).replace(/\n/g, "<br/>");
 }
 
 /** Robustly extract full claims (validateToken, API Gateway authorizer, or decode Bearer payload) */
@@ -164,7 +170,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const sample =
                 claims?.["address.formatted"] ??
                 (typeof claims?.address === "string" ? claims.address :
-                   (claims?.address?.formatted ?? ""));
+                    (claims?.address?.formatted ?? ""));
             console.log("address.formatted sample:", sample);
             console.log("derived userType:", userType);
         }
@@ -202,11 +208,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             CreatedAt:  { S: nowIso },
             // metadata
             UserType:   { S: userType },
-            UserSub:   { S: userSub || "anonymous" }, // ensure S is not empty string
+            UserSub:    { S: userSub || "anonymous" }, // ensure S is not empty string
             UserEmail:  { S: userEmailFromToken || fallbackEmail || "unknown" }, // ensure S is not empty string
             UserAgent:  { S: event.headers?.["user-agent"] || event.headers?.["User-Agent"] || "" },
-            Referer:   { S: event.headers?.referer || event.headers?.Referer || "" },
-            SourceIP:   { S: event.requestContext?.identity?.sourceIp || event.requestContext?.http?.sourceIp || "" }
+            Referer:    { S: event.headers?.referer || event.headers?.Referer || "" },
+            // FIX: Added cast to 'any' for http.sourceIp access
+            SourceIP:   { S: event.requestContext?.identity?.sourceIp || (event.requestContext as any)?.http?.sourceIp || "" }
         };
 
         await ddb.send(new PutItemCommand({

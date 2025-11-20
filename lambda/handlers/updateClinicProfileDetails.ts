@@ -2,7 +2,6 @@ import { DynamoDB } from "aws-sdk";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
 // --- 1. AWS and Environment Setup ---
-// We use the non-null assertion operator (!) as these are expected to be set in the Lambda environment.
 const CLINIC_PROFILES_TABLE: string = process.env.CLINIC_PROFILES_TABLE!; 
 const dynamodb = new DynamoDB.DocumentClient();
 
@@ -30,7 +29,7 @@ interface ClinicProfileBody {
     numHygienists?: number;
     assistedHygieneAvailable?: boolean;
     freeParkingAvailable?: boolean;
-    insurancePlansAccepted?: string[]; // Assuming string array, adjust if needed
+    insurancePlansAccepted?: string[];
     notes?: string;
     website?: string;
     dentalAssociation?: string;
@@ -83,7 +82,6 @@ interface CognitoClaims {
     "custom:user_type"?: string;
     [key: string]: any;
 }
-
 
 // --- 3. Transformer Function ---
 
@@ -271,7 +269,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
              // We check if the value is explicitly provided in the request (even if null/empty string)
              if (dynamoBody.hasOwnProperty(field)) {
                 validUpdateFields[field] = value;
-                updatedFields.push(field);
+                updatedFields.push(field as string);
              }
         }
         
@@ -293,9 +291,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Add updated fields to expressions and attributes
         updatedFields.forEach(field => {
             setExpressions.push(`#${field} = :${field}`);
-            expressionAttributeNames[`#${field}`] = field;
-            // The type assertion 'as keyof DynamoBody' is safe here because 'field' comes from 'updatedFields', 
-            // which in turn comes from the keys of 'validUpdateFields' (a DynamoBody).
+            
+            // FIX: Cast 'field' to string to satisfy Record<string, string>
+            expressionAttributeNames[`#${field}`] = field as string;
+            
             expressionAttributeValues[`:${field}`] = validUpdateFields[field as keyof DynamoBody];
         });
 
@@ -344,6 +343,3 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
     }
 };
-
-// The export is now handled by the 'export const handler'
-// Original JS: exports.handler = handler;

@@ -4,8 +4,8 @@ import {
     UpdateItemCommand, 
     AttributeValue,
     GetItemCommandOutput,
-    UpdateItemCommandInput,
-    AttributeValueList
+    UpdateItemCommandInput
+    // Removed 'AttributeValueList' as it does not exist in v3
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming 'validateToken' is defined in './utils' and returns the userSub string.
@@ -96,8 +96,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             TableName: JOB_POSTINGS_TABLE,
             Key: {
                 // PK and SK used here imply a composite key on (clinicUserSub, jobId)
-                // If the PK is just jobId, this query needs adjustment, but based on the original JS, 
-                // this setup is used for ownership validation.
                 clinicUserSub: { S: userSub },
                 jobId: { S: jobId }
             }

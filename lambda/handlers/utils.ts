@@ -34,7 +34,7 @@ export interface UserInfo {
 }
 
 /** Access level constants */
-type AccessLevel = 'Admin' | 'Manager' | 'Viewer';
+export type AccessLevel = "ClinicAdmin" | "Doctor" | "Receptionist";
 
 // --- 3. Exported Utility Functions ---
 
