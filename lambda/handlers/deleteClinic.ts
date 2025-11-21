@@ -5,7 +5,7 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken, isRoot } from "./utils"; // Assuming isRoot and validateToken are in utils.ts
+import { extractUserFromBearerToken, isRoot } from "./utils"; 
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -32,13 +32,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     try {
         // Step 1: Authenticate user
-        // We cast event to 'any' for the validateToken utility
-        const userSub: string = await validateToken(event as any);
-
-        // Step 2: Get user groups and clinic ID
-        // Groups are often passed as a comma-separated string in claims
-        const rawGroups: string | undefined = event.requestContext?.authorizer?.claims?.['cognito:groups'];
-        const groups: string[] = rawGroups ? rawGroups.split(',').map(g => g.trim()).filter(Boolean) : [];
+        // Extract Bearer token from Authorization header
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
+        const groups = userInfo.groups;
         
         let clinicId: string | undefined = event.pathParameters?.clinicId || event.pathParameters?.proxy;
 

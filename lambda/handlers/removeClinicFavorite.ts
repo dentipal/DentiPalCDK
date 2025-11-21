@@ -8,7 +8,8 @@ import {
   APIGatewayProxyEventV2,
   APIGatewayProxyStructuredResultV2
 } from "aws-lambda";
-import { validateToken } from "./utils";
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -40,9 +41,10 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     // Debug: log the entire event to check the structure
     console.log('Received event:', JSON.stringify(event, null, 2));
 
-    // 1. Validate Token (Authentication)
-    // We use 'as any' because validateToken likely expects APIGatewayProxyEvent (V1)
-    const userSub: string = await validateToken(event as any);
+    // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    const userInfo = extractUserFromBearerToken(authHeader);
+    const userSub = userInfo.sub;
 
     // Debug: log pathParameters to see the structure
     console.log('pathParameters:', JSON.stringify(event.pathParameters, null, 2));
@@ -96,6 +98,19 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
   } catch (error: any) {
     console.error("Error removing professional from favorites:", error);
+
+    // ✅ Check for Auth errors and return 401
+    if (error.message === "Authorization header missing" || 
+        error.message?.startsWith("Invalid authorization header") ||
+        error.message === "Invalid access token format" ||
+        error.message === "Failed to decode access token" ||
+        error.message === "User sub not found in token claims") {
+        
+        return json(401, {
+            error: "Unauthorized",
+            details: error.message
+        });
+    }
 
     // Safely access the message property of the error object
     const errorMessage: string = error.message || "An unknown error occurred";

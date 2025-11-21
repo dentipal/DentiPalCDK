@@ -7,8 +7,8 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming the utility file exports the necessary functions and types
-import { validateToken } from "./utils"; 
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -93,9 +93,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Authentication
-        // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = await validateToken(event);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
 
         // 2. Get query parameters
         const queryParams = event.queryStringParameters || {};
@@ -235,6 +236,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     catch (error: any) {
         console.error("Error getting clinic favorites:", error);
+        
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    details: error.message
+                })
+            };
+        }
+
         return {
             statusCode: 500,
             headers: CORS_HEADERS, // ✅ Uses imported headers

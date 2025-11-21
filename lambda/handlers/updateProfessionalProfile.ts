@@ -9,7 +9,8 @@ import {
     UpdateItemCommandOutput // <--- Added this import
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils"; 
+// ✅ UPDATE: Changed import to use the new token utility
+import { extractUserFromBearerToken } from "./utils"; 
 import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles"; 
 
 // ✅ ADDED THIS LINE:
@@ -42,8 +43,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Validate the token
-        const userSub: string = await validateToken(event); 
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub; 
 
         if (!event.body) {
              return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Request body is required." }) };
@@ -165,18 +168,32 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 }
             })
         };
-    } catch (error) {
+    } catch (error: any) {
         const err = error as Error;
         console.error("Error updating professional profile:", err.message, err.stack);
         
-        const isAuthError = err.message.includes("Unauthorized") || err.message.includes("token");
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: error.message,
+                    details: error.message
+                })
+            };
+        }
 
         return {
-            statusCode: isAuthError ? 401 : 500,
+            statusCode: 500,
             headers: CORS_HEADERS, // ✅ Uses imported headers
             body: JSON.stringify({
-                error: isAuthError ? err.message : "Failed to update professional profile. Please try again.",
-                details: isAuthError ? undefined : err.message
+                error: "Failed to update professional profile. Please try again.",
+                details: err.message
             })
         };
     }

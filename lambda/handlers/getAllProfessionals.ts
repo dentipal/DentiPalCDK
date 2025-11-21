@@ -7,10 +7,9 @@ import {
     QueryCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming the utility file exports the necessary functions and types
-import { validateToken } from "./utils"; 
+// ✅ UPDATE: Changed import to use the new token utility
+import { extractUserFromBearerToken } from "./utils"; 
 
-// ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize DynamoDB client (AWS SDK v3)
@@ -70,9 +69,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Validate the token to ensure the user is authenticated
-        // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = await validateToken(event);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        // Validate token but ignore result if userSub is not used for filtering
+        extractUserFromBearerToken(authHeader);
 
         // 2. Scan professional profiles table
         const scanCommand = new ScanCommand({
@@ -135,8 +135,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             timestamp: new Date().toISOString()
         });
     } catch (error: any) {
-        // 5. Handle and return error response
         console.error("Error fetching professional profiles:", error);
+
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
 
         return json(500, {
             error: "Internal Server Error",

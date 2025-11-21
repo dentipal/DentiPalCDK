@@ -1,21 +1,23 @@
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import {
-    DynamoDBClient,
-    GetItemCommand,
-    PutItemCommand,
-    AttributeValue,
-    GetItemCommandOutput,
-    GetItemCommandInput
-} from "@aws-sdk/client-dynamodb";
 import { v4 as uuidv4 } from "uuid";
-import { validateToken } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils"; 
 import { VALID_ROLE_VALUES } from "./professionalRoles"; 
-// Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
+
+// --- Configuration ---
+const REGION = process.env.REGION || "us-east-1";
+const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
+const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-ClinicProfiles";
+const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
+
+// --- Initialization ---
+const client = new DynamoDBClient({ region: REGION });
+const ddbDoc = DynamoDBDocumentClient.from(client);
 
 // --- Type Definitions ---
 
-// Interface for the expected request body data structure (temporary job)
 interface MultiJobData {
     clinicIds: string[]; // List of clinics to post to
     professional_role: string;
@@ -25,72 +27,63 @@ interface MultiJobData {
     hourly_rate: number;
     start_time: string;
     end_time: string;
-    meal_break?: string; // Stored as string in original JS
+    meal_break?: string; 
     job_title?: string;
     job_description?: string;
     requirements?: string[]; // Array of strings
     assisted_hygiene?: boolean;
 }
 
-// --- Initialization ---
+interface ClinicAddress {
+    addressLine1: string;
+    addressLine2: string;
+    addressLine3: string;
+    city: string;
+    state: string;
+    pincode: string;
+    fullAddress: string;
+}
 
-const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+interface ProfileData {
+    bookingOutPeriod: string;
+    practiceType: string;
+    primaryPracticeArea: string;
+    clinicSoftware: string;
+    freeParkingAvailable: boolean;
+    parkingType: string;
+}
 
-// Helper to build JSON responses with shared CORS
+// --- Helpers ---
+
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
     headers: CORS_HEADERS,
     body: JSON.stringify(bodyObj)
 });
 
-/* ----------------- group helpers ----------------- */
-
-/**
- * Parses Cognito groups from the Lambda event's authorizer claims.
- * @param event The API Gateway event.
- * @returns An array of group names.
- */
-function parseGroupsFromAuthorizer(event: APIGatewayProxyEvent): string[] {
-    const claims = event?.requestContext?.authorizer?.claims || {};
-    let raw = claims["cognito:groups"] ?? claims["cognito:Groups"] ?? "";
-    if (Array.isArray(raw)) return raw as string[];
-    if (typeof raw === "string") {
-        const val = raw.trim();
-        if (!val) return [];
-        if (val.startsWith("[") && val.endsWith("]")) {
-            try { const arr = JSON.parse(val); return Array.isArray(arr) ? arr.filter(s => typeof s === 'string') : []; } catch { }
-        }
-        return val.split(",").map(s => s.trim()).filter(Boolean);
-    }
-    return [];
-}
-
-const normalizeGroup = (g: string) => g.toLowerCase().replace(/[^a-z0-9]/g, ""); // "Clinic Manager" -> "clinicmanager"
+const normalizeGroup = (g: string) => g.toLowerCase().replace(/[^a-z0-9]/g, ""); 
 const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
-
-/* ------------------------------------------------- */
 
 /**
  * Reads one clinic profile row by composite key (clinicId + userSub).
- * @param clinicId The ID of the clinic.
- * @param userSub The user's Cognito sub.
- * @returns The DynamoDB item or null.
  */
-async function getClinicProfileByUser(clinicId: string, userSub: string): Promise<Record<string, AttributeValue> | null> {
-    const res: GetItemCommandOutput = await dynamodb.send(
-        new GetItemCommand({
-            TableName: process.env.CLINIC_PROFILES_TABLE,
-            Key: { clinicId: { S: clinicId }, userSub: { S: userSub } },
-        } as GetItemCommandInput) 
-    );
-    return res.Item || null;
+async function getClinicProfileByUser(clinicId: string, userSub: string): Promise<Record<string, any> | null> {
+    try {
+        const res = await ddbDoc.send(new GetCommand({
+            TableName: CLINIC_PROFILES_TABLE,
+            Key: { clinicId: clinicId, userSub: userSub },
+        }));
+        return res.Item || null;
+    } catch (e) {
+        console.warn(`Failed to fetch profile for ${userSub} in ${clinicId}`, e);
+        return null;
+    }
 }
 
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     // --- CORS preflight ---
-    // Check standard REST method or HTTP API v2 method
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
@@ -98,29 +91,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Authorization
-        const userSub: string = await validateToken(event as any); // This should be a clinic user
+        // 1. Authentication (Access Token)
+        let userSub: string;
+        let userGroups: string[] = [];
+        
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+            userGroups = userInfo.groups || [];
+        } catch (authError: any) {
+            console.error("Auth Error:", authError.message);
+            return json(401, { error: authError.message || "Invalid access token" });
+        }
 
-        // ---- Group authorization (Root, ClinicAdmin, ClinicManager only) ----
-        const rawGroups = parseGroupsFromAuthorizer(event);
-        const normalized = rawGroups.map(normalizeGroup);
+        // ---- Group Authorization ----
+        const normalized = userGroups.map(normalizeGroup);
         const isAllowed = normalized.some(g => ALLOWED_GROUPS.has(g));
         
         if (!isAllowed) {
-            console.warn(`[AUTH] User ${userSub} is not in an allowed group. Groups: [${rawGroups.join(', ')}]`);
+            console.warn(`[AUTH] User ${userSub} denied. Groups: [${userGroups.join(', ')}]`);
             return json(403, {
                 error: "Forbidden",
-                statusCode: 403,
                 message: "Access denied",
-                details: { requiredGroups: ["Root", "ClinicAdmin", "ClinicManager"], userGroups: rawGroups },
-                timestamp: new Date().toISOString()
+                details: { requiredGroups: Array.from(ALLOWED_GROUPS), userGroups }
             });
         }
-        // --------------------------------------------------------------------
 
+        // 2. Parse Body
         const jobData: MultiJobData = JSON.parse(event.body || '{}');
 
-        // 2. Validate Required Fields (Temporary Job Specifics)
+        // 3. Validate Required Fields
         if (
             !jobData.clinicIds ||
             !Array.isArray(jobData.clinicIds) ||
@@ -133,29 +134,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             !jobData.start_time ||
             !jobData.end_time
         ) {
-            console.warn("[VALIDATION] Missing required fields in body.");
             return json(400, {
                 error: "Bad Request",
-                statusCode: 400,
                 message: "Missing required fields",
                 details: {
                     requiredFields: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "hourly_rate", "start_time", "end_time"]
-                },
-                timestamp: new Date().toISOString()
+                }
             });
         }
 
-        // 3. Validate Data Integrity
+        // 4. Validate Data Integrity
         
         // Validate professional role
         if (!VALID_ROLE_VALUES.includes(jobData.professional_role)) {
-            console.warn(`[VALIDATION] Invalid professional_role: ${jobData.professional_role}`);
             return json(400, {
                 error: "Bad Request",
-                statusCode: 400,
                 message: "Invalid professional role",
-                details: { validRoles: VALID_ROLE_VALUES, providedRole: jobData.professional_role },
-                timestamp: new Date().toISOString()
+                details: { validRoles: VALID_ROLE_VALUES, providedRole: jobData.professional_role }
             });
         }
 
@@ -164,21 +159,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (isNaN(jobDate.getTime())) {
             return json(400, {
                 error: "Bad Request",
-                statusCode: 400,
                 message: "Invalid date format",
-                details: { providedDate: jobData.date, expectedFormat: "ISO 8601 date string" },
-                timestamp: new Date().toISOString()
+                details: { providedDate: jobData.date, expectedFormat: "ISO 8601 date string" }
             });
         }
+        
         const today = new Date();
         today.setHours(0, 0, 0, 0); 
         if (jobDate < today) {
             return json(400, {
                 error: "Bad Request",
-                statusCode: 400,
                 message: "Job date must be in the future",
-                details: { providedDate: jobData.date, minimumDate: today.toISOString() },
-                timestamp: new Date().toISOString()
+                details: { providedDate: jobData.date, minimumDate: today.toISOString() }
             });
         }
 
@@ -186,141 +178,125 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (jobData.hours < 1 || jobData.hours > 12) {
             return json(400, {
                 error: "Bad Request",
-                statusCode: 400,
                 message: "Invalid hours value",
-                details: { providedHours: jobData.hours, validRange: "1-12" },
-                timestamp: new Date().toISOString()
+                details: { providedHours: jobData.hours, validRange: "1-12" }
             });
         }
         if (jobData.hourly_rate < 10 || jobData.hourly_rate > 200) {
             return json(400, {
                 error: "Bad Request",
-                statusCode: 400,
                 message: "Invalid hourly rate",
-                details: { providedRate: `$${jobData.hourly_rate}`, validRange: "$10-$200" },
-                timestamp: new Date().toISOString()
+                details: { providedRate: `$${jobData.hourly_rate}`, validRange: "$10-$200" }
             });
         }
 
         const timestamp = new Date().toISOString();
-        const jobIds: string[] = []; // To store the generated jobIds for all clinics
+        const jobIds: string[] = []; 
 
-        // 4. Loop through each clinicId and post the job concurrently
+        // 5. Process Each Clinic
         const postJobsPromises = jobData.clinicIds.map(async (clinicId) => {
-            const jobId = uuidv4(); // Generate unique job ID for each clinic
-            jobIds.push(jobId); // Collect jobId for response
+            const jobId = uuidv4();
+            jobIds.push(jobId);
 
-            // Fetch clinic address details from CLINICS_TABLE
-            const clinicResponse: GetItemCommandOutput = await dynamodb.send(new GetItemCommand({
-                TableName: process.env.CLINICS_TABLE,
-                Key: { clinicId: { S: clinicId } },
+            // Fetch clinic (address + owner)
+            const clinicResponse = await ddbDoc.send(new GetCommand({
+                TableName: CLINICS_TABLE,
+                Key: { clinicId: clinicId }
             }));
             
             const clinic = clinicResponse.Item;
             if (!clinic) {
-                // Throwing here will stop Promise.all and trigger the catch block with the clinic error
                 throw new Error(`Clinic not found: ${clinicId}`);
             }
 
-            // Extract clinic address details safely
-            const addressLine1 = clinic.addressLine1?.S || "";
-            const addressLine2 = clinic.addressLine2?.S || "";
-            const addressLine3 = clinic.addressLine3?.S || "";
-            const city = clinic.city?.S || "";
-            const state = clinic.state?.S || "";
-            const pincode = clinic.pincode?.S || "";
-            const clinicOwnerSub = clinic.createdBy?.S;
-            
-            // 5. Fetch profile details (for job metadata)
-            // Try current user's profile first, then fall back to clinic owner's profile
+            // Extract clinic address details
+            const addressLine1 = clinic.addressLine1 || "";
+            const addressLine2 = clinic.addressLine2 || "";
+            const addressLine3 = clinic.addressLine3 || "";
+            const city = clinic.city || "";
+            const state = clinic.state || "";
+            const pincode = clinic.pincode || "";
+            const clinicOwnerSub = clinic.createdBy;
+
+            // Fetch profile details (for job metadata)
             let profileItem = await getClinicProfileByUser(clinicId, userSub);
+            // Fallback logic
             if (!profileItem && clinicOwnerSub && clinicOwnerSub !== userSub) {
-                 // Suppress error if fallback fails, as original JS used a try/catch
-                 profileItem = await getClinicProfileByUser(clinicId, clinicOwnerSub).catch(() => null);
+                 profileItem = await getClinicProfileByUser(clinicId, clinicOwnerSub);
             }
 
             const p = profileItem || {};
-            
-            // Extract profile details safely with defaults
-            const bookingOutPeriod = p.booking_out_period?.S || p.bookingOutPeriod?.S || "immediate";
-            const clinicSoftware = p.clinic_software?.S || p.software_used?.S || "Unknown";
-            const freeParkingAvailable = p.free_parking_available?.BOOL || false;
-            const parkingType = p.parking_type?.S || "N/A";
-            const primaryPracticeArea = p.primary_practice_area?.S || "General";
-            const practiceType = p.practice_type?.S || "General";
-
-
-            // 6. Build DynamoDB item using Record<string, AttributeValue>
-            const item: Record<string, AttributeValue> = {
-                clinicId: { S: clinicId },
-                clinicUserSub: { S: userSub },
-                jobId: { S: jobId },
-                job_type: { S: "temporary" },
-                professional_role: { S: jobData.professional_role },
-                date: { S: jobData.date },
-                shift_speciality: { S: jobData.shift_speciality },
-                hours: { N: jobData.hours.toString() },
-                meal_break: { S: jobData.meal_break || "" }, // Original stored as string, preserving logic
-                hourly_rate: { N: jobData.hourly_rate.toString() },
-                start_time: { S: jobData.start_time },
-                end_time: { S: jobData.end_time },
-                
-                // Address details
-                addressLine1: { S: addressLine1 },
-                addressLine2: { S: addressLine2 },
-                addressLine3: { S: addressLine3 },
-                fullAddress: { 
-                    S: `${addressLine1} ${addressLine2} ${addressLine3}, ${city}, ${state} ${pincode}`
-                        .replace(/\s+/g, " ").trim() 
-                },
-                city: { S: city },
-                state: { S: state },
-                pincode: { S: pincode },
-                
-                // Profile details
-                bookingOutPeriod: { S: bookingOutPeriod },
-                clinicSoftware: { S: clinicSoftware },
-                freeParkingAvailable: { BOOL: freeParkingAvailable },
-                parkingType: { S: parkingType },
-                practiceType: { S: practiceType },
-                primaryPracticeArea: { S: primaryPracticeArea },
-                
-                // Job metadata
-                status: { S: "active" },
-                createdAt: { S: timestamp },
-                updatedAt: { S: timestamp },
+            const profileData: ProfileData = {
+                bookingOutPeriod: p.booking_out_period || p.bookingOutPeriod || "immediate",
+                clinicSoftware: p.clinic_software || p.software_used || "Unknown",
+                freeParkingAvailable: p.free_parking_available ?? false,
+                parkingType: p.parking_type || "N/A",
+                practiceType: p.practice_type || p.practiceType || "General",
+                primaryPracticeArea: p.primary_practice_area || p.primaryPracticeArea || "General Dentistry"
             };
 
-            // Add optional fields
-            if (jobData.job_title) item.job_title = { S: jobData.job_title };
-            if (jobData.job_description) item.job_description = { S: jobData.job_description };
-            if (jobData.requirements && jobData.requirements.length > 0) {
-                item.requirements = { SS: jobData.requirements };
-            }
+            // Build item (No {S:}, {N:} needed for DocumentClient)
+            const item: Record<string, any> = {
+                clinicId: clinicId,
+                clinicUserSub: userSub,
+                jobId: jobId,
+                job_type: "temporary",
+                professional_role: jobData.professional_role,
+                date: jobData.date,
+                shift_speciality: jobData.shift_speciality,
+                hours: jobData.hours,
+                hourly_rate: jobData.hourly_rate,
+                start_time: jobData.start_time,
+                end_time: jobData.end_time,
+                meal_break: jobData.meal_break || "",
+                
+                // Address details
+                addressLine1: addressLine1,
+                addressLine2: addressLine2,
+                addressLine3: addressLine3,
+                city: city,
+                state: state,
+                pincode: pincode,
+                fullAddress: `${addressLine1} ${addressLine2} ${addressLine3}, ${city}, ${state} ${pincode}`.replace(/\s+/g, " ").trim(),
+                
+                // Profile details
+                bookingOutPeriod: profileData.bookingOutPeriod,
+                clinicSoftware: profileData.clinicSoftware,
+                freeParkingAvailable: profileData.freeParkingAvailable,
+                parkingType: profileData.parkingType,
+                practiceType: profileData.practiceType,
+                primaryPracticeArea: profileData.primaryPracticeArea,
+                
+                // Metadata
+                status: "active",
+                createdAt: timestamp,
+                updatedAt: timestamp,
+            };
+
+            // Optional fields
+            if (jobData.job_title) item.job_title = jobData.job_title;
+            if (jobData.job_description) item.job_description = jobData.job_description;
             if (jobData.assisted_hygiene !== undefined) {
-                 // Original logic did not explicitly include assisted_hygiene, but it is standard for job posts
-                 item.assisted_hygiene = { BOOL: jobData.assisted_hygiene };
+                item.assisted_hygiene = jobData.assisted_hygiene;
+            }
+            if (jobData.requirements && jobData.requirements.length > 0) {
+                item.requirements = new Set(jobData.requirements); // Sets map to SS
             }
 
-
-            // 7. Insert the job into DynamoDB
-            await dynamodb.send(
-                new PutItemCommand({
-                    TableName: process.env.JOB_POSTINGS_TABLE,
-                    Item: item,
-                })
-            );
+            // Save
+            await ddbDoc.send(new PutCommand({
+                TableName: JOB_POSTINGS_TABLE,
+                Item: item,
+            }));
         });
 
-        // Wait for all jobs to be posted
         await Promise.all(postJobsPromises);
 
-        // 8. Final success response
         const totalPay = jobData.hours * jobData.hourly_rate;
 
+        // 6. Response
         return json(201, {
             status: "success",
-            statusCode: 201,
             message: "Temporary job postings created successfully",
             data: {
                 jobIds,
@@ -331,7 +307,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 hourlyRate: jobData.hourly_rate,
                 totalPay: `$${totalPay.toFixed(2)}`
             },
-            timestamp: new Date().toISOString()
+            timestamp: timestamp
         });
 
     } catch (error) {
@@ -339,10 +315,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error creating temporary job postings:", err);
         return json(500, {
             error: "Internal Server Error",
-            statusCode: 500,
             message: "Failed to create temporary job postings",
-            details: { reason: err.message },
-            timestamp: new Date().toISOString()
+            details: { reason: err.message }
         });
     }
 };

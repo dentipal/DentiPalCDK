@@ -21,6 +21,8 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -208,12 +210,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Auth: Check if user is Root or ClinicAdmin
-        // Handle various structures of claims
-        const claims = (event.requestContext.authorizer as any)?.claims;
-        const groupsClaim: string | string[] = claims?.['cognito:groups'] || "";
-        const groups: string[] = Array.isArray(groupsClaim) ? groupsClaim : String(groupsClaim).split(",").filter(g => g.trim().length > 0);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const groups = userInfo.groups || [];
         
+        // 2. Check if user is Root or ClinicAdmin
         const isRootUser: boolean = groups.includes("Root");
         const isClinicAdmin: boolean = groups.includes("ClinicAdmin");
         
@@ -356,13 +358,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             data: { username },
             timestamp: new Date().toISOString()
         });
-    } catch (error) {
+    } catch (error: any) {
         console.error("Error updating user:", error);
+
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
+
         return json(500, {
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to update user",
-            details: { reason: (error as Error)?.message },
+            details: { reason: error.message },
             timestamp: new Date().toISOString()
         });
     }

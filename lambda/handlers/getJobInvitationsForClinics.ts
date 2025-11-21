@@ -11,7 +11,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -145,7 +145,12 @@ export const handler = async (
     }
 
     // --- FIX: Add Validation Here ---
-    await validateToken(event);
+    try {
+      const authHeader = event.headers?.Authorization || event.headers?.authorization;
+      extractUserFromBearerToken(authHeader);
+    } catch (authError: any) {
+      return json(401, { error: authError.message || "Invalid access token" });
+    }
 
     const fullPath = event.pathParameters?.proxy;
     const clinicId = fullPath ? fullPath.split("/")[1] : null;

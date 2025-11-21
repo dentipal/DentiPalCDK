@@ -7,8 +7,8 @@ import {
     ScanCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming the utility file exports the necessary functions and types
-import { validateToken } from "./utils"; 
+// ✅ UPDATE: Changed import to use the new token utility
+import { extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -114,10 +114,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Logged-in professional
-        // validateToken is assumed to return the userSub (string) and throw on failure.
-        // We cast event to any here to ensure compatibility with whatever specific event type validateToken expects
-        const userSub: string = await validateToken(event as any);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
+        
         const today = utcToday();
 
         // Scan upcoming temporary jobs
@@ -227,6 +228,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
     } catch (error: any) {
         console.error("Error retrieving temporary jobs:", error);
+        
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    details: error.message
+                }),
+            };
+        }
+
         return {
             statusCode: 500,
             headers: CORS_HEADERS, // ✅ Uses imported headers

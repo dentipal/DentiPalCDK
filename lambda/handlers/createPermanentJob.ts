@@ -10,7 +10,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 
 // Assuming these modules exist and export the correct functions/values
-import { validateToken, extractUserFromBearerToken } from "./utils";
+import {  extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 

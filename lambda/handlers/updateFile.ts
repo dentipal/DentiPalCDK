@@ -1,7 +1,8 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, UpdateCommand, UpdateCommandInput } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils";
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
@@ -40,9 +41,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 2. Authentication
-        // validateToken returns the userSub string
-        const userSub = await validateToken(event);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
         
         // 3. Parse Body
         if (!event.body) {
@@ -110,8 +112,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             updatedAttributes: result.Attributes
         });
 
-    } catch (error) {
+    } catch (error: any) {
         console.error("Error updating file metadata:", error);
-        return json(500, { error: (error as Error).message || "Internal Server Error" });
+        
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
+
+        return json(500, { error: error.message || "Internal Server Error" });
     }
 };

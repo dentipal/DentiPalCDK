@@ -9,8 +9,8 @@ import {
     QueryCommandInput
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming the utility file exports the necessary functions and types
-import { validateToken } from "./utils"; 
+// ✅ UPDATE: Changed import to use the new token utility
+import { extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -173,7 +173,6 @@ function toStrArr(attr: AttributeValue | undefined): string[] {
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     // --- CORS preflight ---
-    // Check standard REST method or HTTP API v2 method
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === "OPTIONS") {
@@ -181,8 +180,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Validate token and get the actual user sub
-        const userSub: string = await validateToken(event as any);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
 
         // 2. Get all multi-day consulting jobs (SCAN)
         const scanInput: ScanCommandInput = {
@@ -281,6 +282,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     } catch (error: any) {
         console.error("Error retrieving multi-day consulting jobs:", error);
+        
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
+
         return json(500, {
             error: "Failed to retrieve multi-day consulting jobs. Please try again.",
             details: error?.message || String(error)

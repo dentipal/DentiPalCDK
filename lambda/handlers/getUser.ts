@@ -1,18 +1,46 @@
-import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { DynamoDB } from "aws-sdk";
+import {
+    DynamoDBClient,
+    ScanCommand,
+    ScanCommandInput,
+    AttributeValue
+} from "@aws-sdk/client-dynamodb";
+import { unmarshall } from "@aws-sdk/util-dynamodb";
 import {
     CognitoIdentityProviderClient,
     AdminGetUserCommand,
     AttributeType
 } from "@aws-sdk/client-cognito-identity-provider";
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { CORS_HEADERS } from "./corsHeaders";
-// Initialize AWS SDK v2 for DynamoDB DocumentClient
-const dynamodb = new DynamoDB.DocumentClient();
+// ✅ ADDED: Import auth utility
+import { extractUserFromBearerToken } from "./utils";
 
-// Initialize AWS SDK v3 for CognitoIdentityProviderClient
-const cognitoClient = new CognitoIdentityProviderClient({
-    region: process.env.REGION
-});
+// --- Configuration ---
+const REGION = process.env.REGION || "us-east-1";
+const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
+const USER_POOL_ID = process.env.USER_POOL_ID;
+
+// Initialize AWS SDK v3 Clients
+const dynamodbClient = new DynamoDBClient({ region: REGION });
+const cognitoClient = new CognitoIdentityProviderClient({ region: REGION });
+
+// --- Types ---
+interface AssociatedClinic {
+    clinicId: string;
+    AssociatedUsers?: string[];
+    [key: string]: any;
+}
+
+interface UserDetails {
+    sub: string;
+    name: string;
+    email: string;
+    phone: string;
+    status?: string;
+    error?: string;
+}
+
+// --- Helpers ---
 
 // Helper function to extract a specific attribute from Cognito's UserAttributes array
 const getAttribute = (attributes: AttributeType[] = [], name: string): string | undefined => {
@@ -20,224 +48,180 @@ const getAttribute = (attributes: AttributeType[] = [], name: string): string | 
     return attribute ? attribute.Value : undefined;
 };
 
-// Common CORS Headers
+// Helper to build JSON responses
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
-
-export const handler = async (
-    event: APIGatewayProxyEvent
-): Promise<APIGatewayProxyResult> => {
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     // Handle OPTIONS preflight requests
     if (event.httpMethod === "OPTIONS") {
-        console.log("Received OPTIONS request for preflight.");
-        return {
-            statusCode: 200,
-            headers: CORS_HEADERS,
-            body: ""
-        };
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
-        // Step 1: Extract requesterSub from JWT token
-        const requesterSub =
-            event.requestContext.authorizer?.claims?.["sub"];
-
-        if (!requesterSub) {
-            console.error("Requester not authenticated: 'sub' claim missing.");
-            return {
-                statusCode: 401,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    error: "Unauthorized",
-                    statusCode: 401,
-                    message: "User authentication required",
-                    details: { issue: "Missing 'sub' claim in JWT token" },
-                    timestamp: new Date().toISOString()
-                })
-            };
-        }
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        
+        // This extracts and validates the token. Throws error if invalid.
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const requesterSub = userInfo.sub;
 
         console.log(`Authenticated requester: ${requesterSub}`);
 
         // Step 2: Scan clinics table to find clinics associated with requester
-        const scanClinicsParams = {
-            TableName: "DentiPal-Clinics",
+        // Note: Scanning filter logic allows finding clinics where the user is listed in AssociatedUsers.
+        // For efficiency in production, a GSI on AssociatedUsers is recommended.
+        const scanClinicsParams: ScanCommandInput = {
+            TableName: CLINICS_TABLE,
             ProjectionExpression: "clinicId, AssociatedUsers"
         };
 
-        console.log(
-            `Scanning DentiPal-Clinics table for clinics associated with ${requesterSub}...`
+        console.log(`Scanning ${CLINICS_TABLE} table for clinics associated with ${requesterSub}...`);
+
+        const scanCommand = new ScanCommand(scanClinicsParams);
+        const scanClinicsResponse = await dynamodbClient.send(scanCommand);
+
+        // Unmarshall DynamoDB items to plain JS objects for easier handling
+        const allClinics = (scanClinicsResponse.Items || []).map(item => 
+            unmarshall(item) as AssociatedClinic
         );
 
-        const scanClinicsResponse = await dynamodb
-            .scan(scanClinicsParams)
-            .promise();
+        console.log(`Scan completed. Found ${allClinics.length} total clinics.`);
 
-        console.log(
-            `Scan completed. Found ${scanClinicsResponse.Items?.length || 0} clinics.`
-        );
-
-        const clinicsAccessibleByRequester = (scanClinicsResponse.Items || []).filter(
-            clinic =>
-                clinic.AssociatedUsers &&
-                Array.isArray(clinic.AssociatedUsers) &&
-                clinic.AssociatedUsers.includes(requesterSub)
+        // Filter in memory (if not using FilterExpression)
+        const clinicsAccessibleByRequester = allClinics.filter(clinic => 
+            clinic.AssociatedUsers &&
+            Array.isArray(clinic.AssociatedUsers) &&
+            clinic.AssociatedUsers.includes(requesterSub)
         );
 
         if (clinicsAccessibleByRequester.length === 0) {
-            console.log(
-                `Requester ${requesterSub} is not associated with any clinics.`
-            );
-            return {
+            console.log(`Requester ${requesterSub} is not associated with any clinics.`);
+            return json(200, {
+                status: "success",
                 statusCode: 200,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    status: "success",
-                    statusCode: 200,
-                    message: "No clinics found for requester",
-                    data: {
-                        users: [],
-                        requesterId: requesterSub
-                    },
-                    timestamp: new Date().toISOString()
-                })
-            };
+                message: "No clinics found for requester",
+                data: {
+                    users: [],
+                    requesterId: requesterSub
+                },
+                timestamp: new Date().toISOString()
+            });
         }
 
-        console.log(
-            `Requester ${requesterSub} is associated with ${clinicsAccessibleByRequester.length} clinics.`
-        );
+        console.log(`Requester ${requesterSub} is associated with ${clinicsAccessibleByRequester.length} clinics.`);
 
         // Step 3: Collect all unique userSubs to fetch from Cognito
         const uniqueUserSubsToFetch = new Set<string>();
 
         clinicsAccessibleByRequester.forEach(clinic => {
-            (clinic.AssociatedUsers || []).forEach((userSub: string) => {
+            (clinic.AssociatedUsers || []).forEach((userSub) => {
                 uniqueUserSubsToFetch.add(userSub);
             });
         });
 
         if (uniqueUserSubsToFetch.size === 0) {
-            console.log("No associated users found.");
-            return {
+            return json(200, {
+                status: "success",
                 statusCode: 200,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    status: "success",
-                    statusCode: 200,
-                    message: "No associated users found",
-                    data: {
-                        users: [],
-                        requesterId: requesterSub
-                    },
-                    timestamp: new Date().toISOString()
-                })
-            };
+                message: "No associated users found",
+                data: {
+                    users: [],
+                    requesterId: requesterSub
+                },
+                timestamp: new Date().toISOString()
+            });
         }
 
-        console.log(
-            `Found ${uniqueUserSubsToFetch.size} unique users. Fetching details from Cognito...`
-        );
+        console.log(`Found ${uniqueUserSubsToFetch.size} unique users. Fetching details from Cognito...`);
 
         // Step 4: Fetch user details from Cognito
-        const userDetailsPromises = Array.from(uniqueUserSubsToFetch).map(
-            async userSubToFetch => {
-                try {
-                    if (!process.env.USER_POOL_ID) {
-                        throw new Error(
-                            "USER_POOL_ID environment variable is not set."
-                        );
-                    }
+        if (!USER_POOL_ID) {
+            console.error("USER_POOL_ID environment variable is not set.");
+            return json(500, { error: "Configuration error: USER_POOL_ID missing" });
+        }
 
-                    const getUserCommand = new AdminGetUserCommand({
-                        UserPoolId: process.env.USER_POOL_ID,
-                        Username: userSubToFetch
-                    });
+        const userDetailsPromises = Array.from(uniqueUserSubsToFetch).map(async (userSubToFetch): Promise<UserDetails> => {
+            try {
+                const getUserCommand = new AdminGetUserCommand({
+                    UserPoolId: USER_POOL_ID,
+                    Username: userSubToFetch
+                });
 
-                    const userResponse = await cognitoClient.send(
-                        getUserCommand
-                    );
+                const userResponse = await cognitoClient.send(getUserCommand);
 
-                    const userName =
-                        getAttribute(userResponse.UserAttributes, "name") ||
-                        `${getAttribute(
-                            userResponse.UserAttributes,
-                            "given_name"
-                        ) || ""} ${getAttribute(
-                            userResponse.UserAttributes,
-                            "family_name"
-                        ) || ""}`.trim();
+                const userName =
+                    getAttribute(userResponse.UserAttributes, "name") ||
+                    `${getAttribute(userResponse.UserAttributes, "given_name") || ""} ${getAttribute(userResponse.UserAttributes, "family_name") || ""}`.trim();
 
-                    const userEmail = getAttribute(
-                        userResponse.UserAttributes,
-                        "email"
-                    );
-                    const userPhoneNumber = getAttribute(
-                        userResponse.UserAttributes,
-                        "phone_number"
-                    );
+                const userEmail = getAttribute(userResponse.UserAttributes, "email");
+                const userPhoneNumber = getAttribute(userResponse.UserAttributes, "phone_number");
 
-                    return {
-                        sub: userSubToFetch,
-                        name: userName || "N/A",
-                        email: userEmail || "N/A",
-                        phone: userPhoneNumber || "N/A",
-                        status: userResponse.UserStatus
-                    };
-                } catch (cognitoError: any) {
-                    console.error(
-                        `Error fetching details for user ${userSubToFetch}:`,
-                        cognitoError.message
-                    );
-                    return {
-                        sub: userSubToFetch,
-                        name: "Error Fetching",
-                        email: "Error Fetching",
-                        phone: "Error Fetching",
-                        error: cognitoError.message
-                    };
-                }
+                return {
+                    sub: userSubToFetch,
+                    name: userName || "N/A",
+                    email: userEmail || "N/A",
+                    phone: userPhoneNumber || "N/A",
+                    status: userResponse.UserStatus
+                };
+            } catch (cognitoError: any) {
+                console.error(`Error fetching details for user ${userSubToFetch}:`, cognitoError.message);
+                return {
+                    sub: userSubToFetch,
+                    name: "Error Fetching",
+                    email: "Error Fetching",
+                    phone: "Error Fetching",
+                    error: cognitoError.message
+                };
             }
-        );
+        });
 
         const usersList = await Promise.all(userDetailsPromises);
-
         const successfulUsers = usersList.filter(u => !u.error);
         const usersWithErrors = usersList.filter(u => u.error);
 
         if (usersWithErrors.length > 0) {
-            console.warn(
-                `Could not fetch details for ${usersWithErrors.length} user(s).`
-            );
+            console.warn(`Could not fetch details for ${usersWithErrors.length} user(s).`);
         }
 
         // Step 5: Return final response
-        return {
+        return json(200, {
+            status: "success",
             statusCode: 200,
-            headers: CORS_HEADERS,
-            body: JSON.stringify({
-                status: "success",
-                statusCode: 200,
-                message: `Retrieved ${successfulUsers.length} user(s)`,
-                data: {
-                    users: successfulUsers,
-                    requesterId: requesterSub,
-                    failedCount: usersWithErrors.length
-                },
-                timestamp: new Date().toISOString()
-            })
-        };
+            message: `Retrieved ${successfulUsers.length} user(s)`,
+            data: {
+                users: successfulUsers,
+                requesterId: requesterSub,
+                failedCount: usersWithErrors.length
+            },
+            timestamp: new Date().toISOString()
+        });
+
     } catch (error: any) {
         console.error("Critical error in handler:", error);
-        return {
+
+        // Auth specific error handling
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
+
+        return json(500, {
+            error: "Internal Server Error",
             statusCode: 500,
-            headers: CORS_HEADERS,
-            body: JSON.stringify({
-                error: "Internal Server Error",
-                statusCode: 500,
-                message: "Failed to retrieve user(s) details",
-                details: { reason: error.message },
-                timestamp: new Date().toISOString()
-            })
-        };
+            message: "Failed to retrieve user(s) details",
+            details: { reason: error.message },
+            timestamp: new Date().toISOString()
+        });
     }
 };

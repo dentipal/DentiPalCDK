@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
@@ -23,7 +23,9 @@ export const handler = async (
     // ---------------- AUTH ----------------
     let userSub: string;
     try {
-      userSub = await validateToken(event);
+      const authHeader = event.headers?.Authorization || event.headers?.authorization;
+      const userInfo = extractUserFromBearerToken(authHeader);
+      userSub = userInfo.sub;
       console.log("✅ User authenticated. userSub:", userSub);
     } catch (authErr) {
       console.warn("🚫 Token validation failed:", authErr);

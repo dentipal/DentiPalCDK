@@ -7,7 +7,8 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils"; 
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -44,8 +45,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Verify JWT token and get user info
-        const userSub: string = await validateToken(event as any);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
         
         const requestBody = JSON.parse(event.body || '{}');
         // Cast to unknown first to safely cast to our interface without index signature issues
@@ -156,18 +159,32 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 address: unmarshalledAttributes
             })
         };
-    } catch (error) {
+    } catch (error: any) {
         const err = error as Error;
         console.error('Error updating user address:', err.message, err.stack);
         
-        const isAuthError = err.message.includes("Unauthorized") || err.message.includes("token");
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    details: error.message
+                }),
+            };
+        }
 
         return {
-            statusCode: isAuthError ? 401 : 500,
+            statusCode: 500,
             headers: CORS_HEADERS, 
             body: JSON.stringify({ 
-                error: err.message || 'Failed to update user address',
-                details: isAuthError ? undefined : err.message
+                error: err.message || 'Failed to update user address'
             })
         };
     }

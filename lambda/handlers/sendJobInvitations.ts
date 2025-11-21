@@ -11,8 +11,9 @@ import {
     APIGatewayProxyResultV2,
     APIGatewayProxyEvent,
 } from "aws-lambda";
-import { validateToken } from "./utils"; // Assuming ./utils exports validateToken
-import { v4 as uuidv4 } from "uuid"; // Assuming uuid package is installed
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils"; 
+import { v4 as uuidv4 } from "uuid"; 
 
 // --- Type Definitions ---
 
@@ -83,9 +84,11 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
             return { statusCode: 200, headers, body: "" };
         }
 
-        // 1. Authentication
-        // Casting event as 'any' since validateToken might be designed for V1 or V2 events interchangeably.
-        const userSub: string = await validateToken(event as any); 
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub; 
+        
         console.log("Authenticated clinic userSub:", userSub);
 
         // 2. Path Parsing (Extract jobId)
@@ -282,8 +285,26 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
                 professionals: professionalDetails,
             }),
         };
-    } catch (error) {
+    } catch (error: any) {
         console.error("Fatal error in Lambda:", error);
+        
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    details: error.message
+                }),
+            };
+        }
+
         const errorMessage: string = (error as Error).message || "Internal Server Error";
         
         return {

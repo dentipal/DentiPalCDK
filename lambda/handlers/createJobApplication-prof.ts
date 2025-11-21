@@ -1,220 +1,185 @@
-import {
-    DynamoDBClient,
-    PutItemCommand,
-    PutItemCommandInput,
-    AttributeValue,
-} from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, QueryCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
-
-// Assuming utils.ts contains definitions for validateToken and buildAddress
-import { validateToken, buildAddress } from "./utils";
-
-// ✅ ADDED THIS LINE:
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 
-// Initialize the DynamoDB client
-const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
+// --- 1. Configuration ---
+const REGION = process.env.REGION || "us-east-1";
+// Using separate tables for Postings and Applications is best practice
+const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings"; 
+const APPLICATIONS_TABLE = process.env.APPLICATIONS_TABLE || "DentiPal-JobApplications";
 
-// Helper to build JSON responses with shared CORS
+const client = new DynamoDBClient({ region: REGION });
+const ddbDoc = DynamoDBDocumentClient.from(client);
+
+// --- 2. Helpers ---
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
     headers: CORS_HEADERS,
     body: JSON.stringify(bodyObj)
 });
 
-
-
-// Define the expected structure for the request body
-interface ClinicRequestBody {
-    name: string;
-    addressLine1: string;
-    addressLine2?: string;
-    addressLine3?: string;
-    city: string;
-    state: string;
-    pincode: string;
-    // Add other optional fields if necessary
+// --- 3. Types ---
+interface ApplyJobBody {
+    message: string;
+    proposedRate: number;
+    availability: string;
+    startDate?: string;
+    notes?: string;
     [key: string]: any;
 }
 
-/* ----------------- group helpers ----------------- */
-
-/**
- * Parses Cognito user groups from the API Gateway event authorizer claims.
- * @param event The API Gateway Proxy Event.
- * @returns An array of string group names.
- */
-function parseGroupsFromAuthorizer(event: APIGatewayProxyEvent): string[] {
-    const claims = event?.requestContext?.authorizer?.claims || {};
-    // Check for both 'cognito:groups' and 'cognito:Groups'
-    let raw: unknown = claims["cognito:groups"] ?? claims["cognito:Groups"] ?? "";
-    
-    // Original JS logic replicated for handling various raw types
-    if (Array.isArray(raw)) return raw.map(String); // Ensure array of strings
-    if (typeof raw === "string") {
-        const val = raw.trim();
-        if (!val) return [];
-        
-        // Attempt to parse if it looks like a JSON array string
-        if (val.startsWith("[") && val.endsWith("]")) {
-            try { 
-                const arr = JSON.parse(val); 
-                return Array.isArray(arr) ? arr.map(String) : []; 
-            } catch (e) {
-                // Ignore JSON parse error, fall through to comma separation
-            }
-        }
-        // Fallback to comma separation
-        return val.split(",").map(s => s.trim()).filter(Boolean);
-    }
-    return [];
-}
-
-/**
- * Normalizes a group name by converting to lowercase and removing non-alphanumeric characters.
- * @param g The group name.
- * @returns The normalized string.
- */
-const normalize = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, ""); 
-
-const ALLOWED_CREATORS: Set<string> = new Set(["root", "clinicadmin"]);
-
-/**
- * Checks if the user's groups permit the creation of a clinic.
- * @param groups The user's Cognito groups.
- * @returns True if creation is allowed, otherwise false.
- */
-function canCreateClinic(groups: string[]): boolean {
-    const normalized: string[] = groups.map(normalize);
-    const ok: boolean = normalized.some(g => ALLOWED_CREATORS.has(g));
-    console.log("[auth] groups raw:", groups, "normalized:", normalized, "canCreateClinic:", ok);
-    return ok;
-}
-/* -------------------------------------------------- */
-
-// Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // Handle CORS preflight
-    if (event.httpMethod === "OPTIONS") {
-        // ✅ Updated to use CORS_HEADERS
-        return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
+
+    // 1. Handle CORS Preflight
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
-        // Step 1: Authentication and Authorization
-        // We cast event to 'any' here because APIGatewayProxyEvent doesn't include the Cognito claims object by default.
-        const userSub: string = await validateToken(event as any);
-        const groups: string[] = parseGroupsFromAuthorizer(event);
+        console.log("Received event path:", event.path);
 
-        if (!canCreateClinic(groups)) {
-            return json(403, {
-                error: "Forbidden",
-                statusCode: 403,
-                message: "Access denied",
-                details: { requiredGroups: ["Root", "ClinicAdmin"] },
-                timestamp: new Date().toISOString()
-            });
+        // 2. Extract jobId
+        // Robust extraction handles /applications/{jobId} (REST) or proxy integration
+        let jobId = event.pathParameters?.jobId;
+
+        if (!jobId) {
+            // Fallback logic matching original code: parsing path parts
+            const fullPath = event.pathParameters?.proxy || event.path || ''; 
+            const pathParts = fullPath.split('/').filter(Boolean);
+            
+            // Assuming structure like /applications/{jobId} -> index 1
+            if (pathParts.length >= 2) {
+                 jobId = pathParts[1];
+            } else if (pathParts.length === 1) {
+                 // Fallback for structure /{jobId}
+                 jobId = pathParts[0];
+            }
         }
 
-        // Step 2: Input Validation and Parsing
-        const body: ClinicRequestBody = JSON.parse(event.body || "{}");
-        const { name, addressLine1, addressLine2, addressLine3, city, state, pincode } = body;
-
-        if (!name || !addressLine1 || !city || !state || !pincode) {
-            return json(400, {
-                error: "Bad Request",
-                statusCode: 400,
-                message: "Missing required fields",
-                details: { requiredFields: ["name", "addressLine1", "city", "state", "pincode"] },
-                timestamp: new Date().toISOString()
-            });
+        if (!jobId) {
+            return json(400, { error: "jobId is required in the path parameters" });
         }
 
-        // Step 3: Prepare data
-        // Assumes buildAddress is a utility that concatenates the address parts
-        const address: string = buildAddress({ addressLine1, addressLine2, addressLine3, city, state, pincode });
+        console.log("Job ID extracted:", jobId);
 
-        const clinicId: string = uuidv4();
-        const timestamp: string = new Date().toISOString();
+        // 3. Authentication (Switched to Access Token)
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
+        console.log("User authenticated:", userSub);
 
-        // Determine DynamoDB attribute type for AssociatedUsers based on env var
-        const assocType: string = (process.env.ASSOCIATED_USERS_TYPE || "L").toUpperCase();
-
-        let AssociatedUsers: AttributeValue;
-
-        if (assocType === "SS") {
-            // String Set (SS)
-            AssociatedUsers = { SS: [userSub] };
-        } else {
-            // List (L) - Default behavior, matching the original JS code's structure
-            AssociatedUsers = { L: [{ S: userSub }] }; 
+        // 4. Parse & Validate Body
+        if (!event.body) {
+            return json(400, { error: "Request body is required" });
+        }
+        
+        let applicationData: ApplyJobBody;
+        try {
+            applicationData = JSON.parse(event.body);
+        } catch {
+            return json(400, { error: "Invalid JSON in request body" });
         }
 
-        // Build the DynamoDB Item
-        const item: Record<string, AttributeValue> = {
-            clinicId:      { S: clinicId },
-            name:          { S: name },
-            addressLine1:  { S: addressLine1 },
-            addressLine2:  { S: addressLine2 || "" },
-            addressLine3:  { S: addressLine3 || "" },
-            city:          { S: (city || "").trim() },
-            state:         { S: (state || "").trim() },
-            pincode:       { S: (pincode || "").trim() },
-            address:       { S: address },
-            createdBy:     { S: userSub },
-            createdAt:     { S: timestamp },
-            updatedAt:     { S: timestamp },
-            AssociatedUsers, // <- ensure creator is included on create
+        if (!applicationData.message || !applicationData.proposedRate || !applicationData.availability) {
+            return json(400, { error: "Missing required fields (message, proposedRate, availability)." });
+        }
+
+        // 5. Check if Job Exists
+        // Note: We query the JOB_POSTINGS_TABLE, not the applications table, to verify the job.
+        const jobResult = await ddbDoc.send(new GetCommand({
+            TableName: JOB_POSTINGS_TABLE,
+            Key: { jobId: jobId }
+        }));
+        
+        if (!jobResult.Item) {
+            return json(404, { error: "Job posting not found" });
+        }
+
+        const jobItem = jobResult.Item;
+        // Support both field naming conventions commonly used
+        const clinicIdFromJob = jobItem.clinicUserSub || jobItem.clinicId; 
+
+        if (!clinicIdFromJob) {
+            return json(400, { error: "Clinic ID not found in job posting configuration." });
+        }
+
+        const jobStatus = jobItem.status || 'active';
+        if (jobStatus !== 'active') {
+            return json(400, { error: `Cannot apply to ${jobStatus} job posting` });
+        }
+
+        // 6. Check for Duplicate Application
+        // Query the Applications table to see if this user already applied to this job
+        const existingAppsResponse = await ddbDoc.send(new QueryCommand({
+            TableName: APPLICATIONS_TABLE,
+            KeyConditionExpression: "jobId = :jobId",
+            FilterExpression: "professionalUserSub = :userSub",
+            ExpressionAttributeValues: {
+                ":jobId": jobId,
+                ":userSub": userSub
+            }
+        }));
+
+        if (existingAppsResponse.Items && existingAppsResponse.Items.length > 0) {
+            return json(409, { error: "You have already applied to this job" });
+        }
+
+        // 7. Create Application
+        const applicationId = uuidv4();
+        const timestamp = new Date().toISOString();
+
+        const applicationItem = {
+            jobId: jobId,               // Partition Key
+            professionalUserSub: userSub, // Sort Key (allows querying all apps for a job)
+            applicationId: applicationId,
+            clinicId: clinicIdFromJob,
+            applicationStatus: 'pending',
+            appliedAt: timestamp,
+            updatedAt: timestamp,
+            // Application Details
+            applicationMessage: applicationData.message,
+            proposedRate: Number(applicationData.proposedRate),
+            availability: applicationData.availability,
+            startDate: applicationData.startDate || null,
+            notes: applicationData.notes || null
         };
 
-        console.log("[create-clinic] PutItem item:", JSON.stringify(item, null, 2));
+        await ddbDoc.send(new PutCommand({
+            TableName: APPLICATIONS_TABLE,
+            Item: applicationItem
+        }));
 
-        // Step 4: Write to DynamoDB
-        const putItemInput: PutItemCommandInput = {
-            TableName: process.env.CLINICS_TABLE, // e.g. "DentiPal-Clinics"
-            Item: item,
-            ConditionExpression: "attribute_not_exists(clinicId)", // don't overwrite if exists
+        console.log("Job application saved successfully.");
+
+        // 8. Construct Response
+        const jobInfo = {
+            title: jobItem.job_title || `${jobItem.professional_role || 'Professional'} Position`,
+            type: jobItem.job_type || 'unknown',
+            role: jobItem.professional_role || '',
+            hourlyRate: jobItem.hourly_rate ? Number(jobItem.hourly_rate) : undefined,
+            date: jobItem.date,
+            dates: jobItem.dates
         };
 
-        await dynamoClient.send(new PutItemCommand(putItemInput));
-
-        // Step 5: Return Success Response
         return json(201, {
-            status: "success",
-            statusCode: 201,
-            message: "Clinic created successfully",
-            data: {
-                clinic: {
-                    clinicId,
-                    name,
-                    addressLine1,
-                    addressLine2: addressLine2 || "",
-                    addressLine3: addressLine3 || "",
-                    city: (city || "").trim(),
-                    state: (state || "").trim(),
-                    pincode: (pincode || "").trim(),
-                    address,
-                    createdBy: userSub,
-                    createdAt: timestamp,
-                    updatedAt: timestamp,
-                    associatedUsers: [userSub]
-                }
-            },
-            timestamp: new Date().toISOString()
+            message: "Job application submitted successfully",
+            applicationId,
+            jobId,
+            status: "pending",
+            appliedAt: timestamp,
+            job: jobInfo
         });
-    } catch (error) {
-        // Step 6: Handle Errors
-        const err = error as Error & { message?: string };
-        console.error("Error creating clinic:", err);
-        return json(500, {
-            error: "Internal Server Error",
-            statusCode: 500,
-            message: "Failed to create clinic",
-            details: { reason: err.message || String(error) },
-            timestamp: new Date().toISOString()
+
+    } catch (err) {
+        const error = err as Error;
+        console.error("Error creating job application:", error);
+        return json(500, { 
+            error: "Failed to submit job application.", 
+            details: error.message 
         });
     }
 };
-
-exports.handler = handler;

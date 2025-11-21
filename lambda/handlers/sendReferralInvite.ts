@@ -17,7 +17,8 @@ import {
     APIGatewayProxyEvent,
 } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
-import { validateToken } from "./utils"; // Ensure this path is correct based on your file structure
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils"; 
 import { CORS_HEADERS } from "./corsHeaders";
 // --- Type Definitions ---
 
@@ -192,9 +193,11 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
             };
         }
 
-        // 1. Authentication and Body Parsing
-        // We cast event as 'any' for validateToken to ensure compatibility
-        const userSub: string = await validateToken(event as any); 
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
+
         const referralData: ReferralPayload = JSON.parse(event.body || "{}"); // Handle empty body safely
 
         // 2. Input Validation
@@ -287,9 +290,26 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
                 nextSteps: "Your friend will receive an email invitation to join DentiPal."
             })
         };
-    } catch (error) {
+    } catch (error: any) {
         console.error("Error sending referral invite:", error);
         
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    details: error.message
+                }),
+            };
+        }
+
         const errorMessage: string = (error as Error).message;
         
         return {

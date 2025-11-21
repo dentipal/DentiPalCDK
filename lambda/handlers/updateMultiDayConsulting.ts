@@ -8,8 +8,8 @@ import {
     GetItemCommandOutput
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming 'validateToken' is defined in './utils' and returns the userSub string.
-import { validateToken } from "./utils"; 
+// ✅ UPDATE: Changed import to use the new token utility
+import { extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -56,10 +56,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Assume validateToken is synchronous or safely called. Check the utils implementation.
-        // Based on other handlers, we'll keep it as a synchronous call but you may need to add 'await'
-        // depending on your actual utils.ts.
-        const userSub: string = await validateToken(event as any); 
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
 
         // Extract jobId from the proxy path (e.g., /.../jobs/multi-day-consulting/{jobId}/...)
         const pathParts: string[] | undefined = event.pathParameters?.proxy?.split('/'); 
@@ -217,14 +217,28 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 }
             })
         };
-    } catch (error) {
+    } catch (error: any) {
         const err = error as Error;
         console.error("Error updating multi-day consulting job:", err.message, err.stack);
         
+        // ✅ Check for Auth errors and return 401
+        if (err.message === "Authorization header missing" || 
+            err.message?.startsWith("Invalid authorization header") ||
+            err.message === "Invalid access token format" ||
+            err.message === "Failed to decode access token") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    details: err.message
+                }),
+            };
+        }
+        
         // Use 400 status for invalid data errors from JSON.parse or validation.
-        const statusCode = err.message.includes("Unauthorized") ? 401 : 
-                           err.message.includes("not a multi-day") ? 400 : 
-                           500;
+        const statusCode = err.message.includes("not a multi-day") ? 400 : 500;
 
         return {
             statusCode: statusCode,

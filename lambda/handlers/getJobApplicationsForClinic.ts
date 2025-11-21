@@ -9,6 +9,9 @@ import {
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import {CORS_HEADERS} from "./corsHeaders";
+// ✅ ADDED: Import auth utility
+import { extractUserFromBearerToken } from "./utils"; 
+
 // ---- env / config ----
 const REGION: string =
   process.env.REGION || process.env.AWS_REGION || "us-east-1";
@@ -216,6 +219,11 @@ export const handler = async (event: any) => {
   console.log("Raw event:", JJ(event));
 
   try {
+    // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    extractUserFromBearerToken(authHeader);
+    // ------------------------------------------------
+
     const clinicId = getClinicIdFromPath(event);
     if (!clinicId) {
       return json(400, {
@@ -317,6 +325,20 @@ export const handler = async (event: any) => {
     });
   } catch (err: any) {
     console.error("❌ Handler error:", err);
+    
+    // ✅ Added Auth error handling
+    if (err.message === "Authorization header missing" || 
+        err.message?.startsWith("Invalid authorization header") ||
+        err.message === "Invalid access token format" ||
+        err.message === "Failed to decode access token" ||
+        err.message === "User sub not found in token claims") {
+        
+        return json(401, {
+            error: "Unauthorized",
+            details: err.message
+        });
+    }
+
     console.log("============= 🟥 getJobApplicationsForClinic END (ERROR)");
     return json(500, {
       error: "Internal Server Error",

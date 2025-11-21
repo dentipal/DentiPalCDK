@@ -5,8 +5,7 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming the utility file exports the necessary functions and types
-import { validateToken, isRoot, hasClinicAccess } from "./utils"; 
+import { isRoot, hasClinicAccess, extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -63,15 +62,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Authentication & Authorization Setup
-        // validateToken is assumed to return the userSub (string) and throw on failure.
-        // Added await to ensure async handling matches other files
-        const userSub: string = await validateToken(event as any);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
         
-        const groupsRaw = (event.requestContext.authorizer as any)?.claims['cognito:groups'];
-        const groups: string[] = (typeof groupsRaw === 'string' ? groupsRaw.split(',') : [])
-            .map(s => s.trim())
-            .filter(Boolean);
+        const userSub = userInfo.sub;
+        const groups = userInfo.groups || [];
             
         let clinicId: string | undefined = event.pathParameters?.proxy;
         console.log("Extracted clinicId:", clinicId);
@@ -168,6 +164,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     catch (error: any) {
         console.error("Error retrieving clinic:", error);
+
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    details: error.message
+                })
+            };
+        }
+
         return { 
             statusCode: 500, 
             headers: CORS_HEADERS,

@@ -9,7 +9,7 @@ import {
   QueryCommandInput,
 } from "@aws-sdk/client-dynamodb";
 
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -35,7 +35,10 @@ export const handler = async (
       };
     }
 
-    const userSub = await validateToken(event);
+    // Extract Bearer token from Authorization header
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    const userInfo = extractUserFromBearerToken(authHeader);
+    const userSub = userInfo.sub;
 
     const profileId = event.queryStringParameters?.profileId;
 

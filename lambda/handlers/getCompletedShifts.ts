@@ -12,7 +12,7 @@ import {
 } from "aws-lambda";
 
 // IMPORTANT: Lambda runs JS → keep `.js`
-import { validateToken } from "./utils.js";
+import { extractUserFromBearerToken } from "./utils.js";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -135,8 +135,13 @@ export const handler = async (
       };
     }
 
-    // Auth
-    await validateToken(event);
+    // Auth - Extract access token
+    try {
+      const authHeader = event.headers?.Authorization || event.headers?.authorization;
+      extractUserFromBearerToken(authHeader);
+    } catch (authError: any) {
+      return json(401, { error: authError.message || "Invalid access token" });
+    }
 
     const clinicId = extractClinicId(event);
     if (!clinicId) {

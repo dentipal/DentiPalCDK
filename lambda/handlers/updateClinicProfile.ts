@@ -5,19 +5,12 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { Buffer } from 'buffer';
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils";
 
 // --- Type Definitions ---
-
-/** Claims decoded from the JWT payload */
-interface JwtClaims {
-    sub: string;
-    "cognito:groups"?: string | string[];
-    "custom:user_type"?: string;
-    [key: string]: any;
-}
 
 /** Fields allowed for update in the clinic profile */
 interface UpdateFields {
@@ -81,37 +74,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(500, { error: "Server configuration error: Table not defined." });
         }
 
-        // Step 1: Decode JWT token manually
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
-            console.error("❌ Missing or invalid Authorization header");
-            return json(401, { error: "Missing or invalid Authorization header" });
-        }
-
-        const token = authHeader.split(" ")[1];
-        const parts = token.split(".");
-        if (parts.length < 2) {
-             return json(401, { error: "Invalid token format" });
-        }
-
-        const payload = parts[1];
-
-        // Decode the Base64URL payload
-        const decodedClaims: JwtClaims = JSON.parse(
-            Buffer.from(payload, "base64").toString("utf8")
-        );
-
-        const userSub: string = decodedClaims.sub;
-
-        // Normalize groups into a string array
-        const rawGroups = decodedClaims["cognito:groups"];
-        const groups: string[] = Array.isArray(rawGroups)
-            ? rawGroups.map(String)
-            : (typeof rawGroups === 'string'
-                ? rawGroups.split(',').map(s => s.trim()).filter(Boolean)
-                : []);
-
-        const userType: string = decodedClaims["custom:user_type"] || "professional";
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
+        const groups = userInfo.groups || [];
+        const userType = userInfo.userType || "professional";
 
         // Step 2: Get clinicId from API Gateway proxy path
         // Expected path: /clinic-profiles/{clinicId} or via proxy
@@ -119,7 +87,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Extract the last segment as clinicId
         const clinicId: string | undefined = pathParts[pathParts.length - 1];
 
-        console.info("📦 Decoded claims:", decodedClaims);
         console.info("🏥 Extracted clinicId from path:", clinicId);
 
         if (!clinicId || !userSub) {
@@ -238,8 +205,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("❌ Error in updateClinicProfile:", error);
         const errorMessage = (error as Error).message;
 
-        if (errorMessage.includes("Missing or invalid Authorization")) {
-             return json(401, { error: errorMessage });
+        // ✅ Check for Auth errors and return 401
+        if (errorMessage === "Authorization header missing" || 
+            errorMessage?.startsWith("Invalid authorization header") ||
+            errorMessage === "Invalid access token format" ||
+            errorMessage === "Failed to decode access token" ||
+            errorMessage === "User sub not found in token claims") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: errorMessage
+            });
         }
 
         return json(500, { error: "Failed to update clinic profile", details: errorMessage });

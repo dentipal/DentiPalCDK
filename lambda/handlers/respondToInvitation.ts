@@ -13,7 +13,7 @@ import {
     APIGatewayProxyResultV2,
 } from "aws-lambda";
 // External utilities
-import { validateToken } from "./utils"; // Assuming ./utils exports validateToken
+import { extractUserFromBearerToken } from "./utils"; 
 import { v4 as uuidv4 } from "uuid"; // Assuming uuid package is installed
 
 // --- Type Definitions ---
@@ -76,9 +76,11 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<HandlerRes
     }
 
     try {
-        // 1. Authentication
-        // `validateToken` is expected to return the user's sub/ID
-        const userSub: string = await validateToken(event as any); // Type assertion if validateToken expects V1 event
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
+        
         console.log("Authenticated userSub from token:", userSub);
 
         // 2. Extract invitationId from path
@@ -370,8 +372,25 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<HandlerRes
                         : "Invitation declined. Thank you for your response.",
             }),
         };
-    } catch (error) {
+    } catch (error: any) {
         console.error("Error responding to invitation:", error);
+        
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    details: error.message
+                })
+            };
+        }
         
         // Safely access the message property of the error object
         const errorMessage: string = (error as Error).message || "An unknown error occurred";

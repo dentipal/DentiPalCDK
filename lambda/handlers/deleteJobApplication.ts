@@ -5,7 +5,7 @@ import {
     DeleteItemCommand,
     AttributeValue
 } from "@aws-sdk/client-dynamodb";
-import { validateToken } from "./utils"; // Assumed dependency
+import { extractUserFromBearerToken } from "./utils"; // Assumed dependency
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -49,7 +49,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 2. Authenticate professional user
-        const userSub: string = await validateToken(event);
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
 
         // 3. Extract applicationId from the proxy path (e.g. /applications/abc-123)
         // event.pathParameters.proxy captures the remainder of the path after the resource definition

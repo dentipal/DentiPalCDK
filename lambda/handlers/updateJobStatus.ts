@@ -7,8 +7,8 @@ import {
     UpdateItemCommandInput
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming 'validateToken' is defined in './utils' and returns the userSub string.
-import { validateToken } from "./utils"; 
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -71,8 +71,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Assume validateToken returns the verified userSub (clinic owner) and throws on failure
-        const userSub: string = await validateToken(event as any); 
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
         
         const jobId: string | undefined = event.pathParameters?.jobId;
         
@@ -288,17 +290,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             timestamp: new Date().toISOString()
         });
 
-    } catch (error) {
-        const err = error as Error;
-        console.error("Error updating job status:", err.message, err.stack);
+    } catch (error: any) {
+        console.error("Error updating job status:", error.message, error.stack);
         
-        const isAuthError = err.message.includes("Unauthorized") || err.message.includes("token");
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
 
-        return json(isAuthError ? 401 : 500, {
-            error: isAuthError ? "Unauthorized" : "Internal Server Error",
-            statusCode: isAuthError ? 401 : 500,
-            message: isAuthError ? "Authentication failed" : "Failed to update job status",
-            details: { reason: err.message },
+        return json(500, {
+            error: "Internal Server Error",
+            statusCode: 500,
+            message: "Failed to update job status",
+            details: { reason: error.message },
             timestamp: new Date().toISOString()
         });
     }

@@ -1,362 +1,281 @@
-import {
-    DynamoDBClient,
-    GetItemCommand,
-    GetItemCommandInput,
-    DeleteItemCommand,
-    DeleteItemCommandInput,
-    QueryCommand,
-    QueryCommandInput,
-    BatchWriteItemCommand,
-    BatchWriteItemCommandInput,
-    AttributeValue,
-} from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { 
+    DynamoDBDocumentClient, 
+    GetCommand, 
+    QueryCommand, 
+    DeleteCommand, 
+    BatchWriteCommand,
+    BatchWriteCommandInput
+} from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Import shared CORS headers
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 
-// Initialize the DynamoDB client
-const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+// --- Configuration ---
+const REGION = process.env.REGION || "us-east-1";
+const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
+const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-JobApplications";
+const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE || "DentiPal-JobInvitations";
+const JOB_NEGOTIATIONS_TABLE = process.env.JOB_NEGOTIATIONS_TABLE || "DentiPal-JobNegotiations";
 
-// Helper to build JSON responses with shared CORS
+// Initialize Document Client
+const client = new DynamoDBClient({ region: REGION });
+const ddbDoc = DynamoDBDocumentClient.from(client);
+
+// --- Helpers ---
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
     headers: CORS_HEADERS,
     body: JSON.stringify(bodyObj)
 });
 
-// Define the structure for the DeleteRequest item used in BatchWriteItem
-interface DeleteRequestItem {
-    DeleteRequest: {
-        Key: Record<string, AttributeValue>;
-    };
+// --- Type Definitions ---
+interface DeleteItem {
+    TableName: string;
+    Key: Record<string, any>;
 }
-
-// Define a shared structure for DynamoDB items returned by Query/Scan commands.
-// This resolves the implicit 'any' error (7006) in filter/forEach callbacks.
-interface QueriedItem extends Record<string, AttributeValue | undefined> {
-    jobId?: { S: string };
-    applicationId?: { S: string };
-    professionalUserSub?: { S: string };
-    invitationStatus?: { S: string };
-    applicationStatus?: { S: string };
-    negotiationId?: { S: string };
-    // Include other attributes as needed
-}
-
-// Define the job structure for the initial fetch
-interface JobItem extends QueriedItem {
-    clinicUserSub: { S: string };
-    job_type: { S: string };
-    status?: { S: string };
-}
-
-// --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // --- CORS preflight ---
-    // Check standard REST method or HTTP API v2 method
-    const method: string = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
+    // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
+    if (method !== 'DELETE') {
+        return json(405, { error: "Method Not Allowed", details: { allowedMethods: ["DELETE"] } });
+    }
+
     try {
-        // 1. Authentication Check (Get userSub from authorizer claims)
-        const userSub: string | undefined = event.requestContext?.authorizer?.claims?.sub;
-        if (!userSub) {
-            return json(401, {
-                error: "Unauthorized",
-                statusCode: 401,
-                message: "User authentication required",
-                details: { issue: "Missing 'sub' claim in JWT token" },
-                timestamp: new Date().toISOString()
+        // 2. Authentication (Access Token)
+        let userSub: string;
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+        } catch (authError: any) {
+            return json(401, { 
+                error: "Unauthorized", 
+                message: authError.message || "Invalid access token" 
             });
         }
 
-        // 2. HTTP Method Check
-        if (method !== 'DELETE') {
-            return json(405, {
-                error: "Method Not Allowed",
-                statusCode: 405,
-                message: "Only DELETE method is supported",
-                details: { allowedMethods: ["DELETE"] },
-                timestamp: new Date().toISOString()
-            });
-        }
-
-        // 3. Extract job ID from path parameters
-        const jobId: string | undefined = event.pathParameters?.jobId;
+        // 3. Extract job ID
+        const jobId = event.pathParameters?.jobId;
         if (!jobId) {
-            return json(400, {
-                error: "Bad Request",
-                statusCode: 400,
-                message: "Job ID is required",
-                details: { pathFormat: "/jobs/{jobId}" },
-                timestamp: new Date().toISOString()
-            });
+            return json(400, { error: "Bad Request", message: "Job ID is required" });
         }
 
         // 4. Get existing job to verify ownership and status
-        const getCommandInput: GetItemCommandInput = {
-            TableName: process.env.JOB_POSTINGS_TABLE,
-            Key: { jobId: { S: jobId } }
-        };
-        const existingJob = await dynamodb.send(new GetItemCommand(getCommandInput));
+        const jobResult = await ddbDoc.send(new GetCommand({
+            TableName: JOB_POSTINGS_TABLE,
+            Key: { jobId: jobId }
+        }));
 
-        if (!existingJob.Item) {
-            return json(404, {
-                error: "Not Found",
-                statusCode: 404,
-                message: "Job not found",
-                details: { jobId: jobId },
-                timestamp: new Date().toISOString()
-            });
-        }
-        
-        // Ensure Item properties exist before accessing
-        const item = existingJob.Item as JobItem;
-        if (!item.clinicUserSub?.S || !item.job_type?.S) {
-             return json(500, { error: 'Job data is incomplete in the database.' });
+        if (!jobResult.Item) {
+            return json(404, { error: "Not Found", message: "Job not found", details: { jobId } });
         }
 
-        const clinicUserSub: string = item.clinicUserSub.S;
-        const currentStatus: string = item.status?.S || 'active';
-        const jobType: string = item.job_type.S;
+        const job = jobResult.Item;
+        const clinicUserSub = job.clinicUserSub;
+        const currentStatus = job.status || 'active';
 
-        // 5. Security check: Only clinic owner can delete their jobs
+        // 5. Security check
         if (userSub !== clinicUserSub) {
-            return json(403, {
-                error: "Forbidden",
-                statusCode: 403,
+            return json(403, { 
+                error: "Forbidden", 
                 message: "Only job owner can delete this job",
-                details: { requiredOwner: clinicUserSub },
-                timestamp: new Date().toISOString()
+                details: { requiredOwner: clinicUserSub } 
             });
         }
 
-        // 6. Business logic: Prevent deletion of jobs in certain statuses
+        // 6. Business Logic Checks
         if (currentStatus === 'scheduled') {
-            return json(409, {
-                error: "Conflict",
-                statusCode: 409,
+            return json(409, { 
+                error: "Conflict", 
                 message: "Cannot delete scheduled jobs",
-                details: { currentStatus: currentStatus, suggestion: "Please complete or cancel the job first" },
-                timestamp: new Date().toISOString()
+                details: { suggestion: "Please complete or cancel the job first" } 
             });
         }
         if (currentStatus === 'action_needed') {
-            return json(409, {
-                error: "Conflict",
-                statusCode: 409,
+            return json(409, { 
+                error: "Conflict", 
                 message: "Cannot delete jobs with pending negotiations",
-                details: { currentStatus: currentStatus, suggestion: "Please resolve negotiations first" },
-                timestamp: new Date().toISOString()
+                details: { suggestion: "Please resolve negotiations first" } 
             });
         }
 
-        const itemsToDelete: DeleteRequestItem[] = [];
-        let hasActiveApplicationsOrInvitations: boolean = false;
-
-        // 7. Check for active applications
+        // 7. Collect items for deletion
+        const itemsToDelete: DeleteItem[] = [];
+        
+        // Check Applications
         try {
-            const applicationsQueryInput: QueryCommandInput = {
-                TableName: process.env.JOB_APPLICATIONS_TABLE,
-                IndexName: 'JobIndex', // Assumed GSI
+            const appsResult = await ddbDoc.send(new QueryCommand({
+                TableName: JOB_APPLICATIONS_TABLE,
+                // Assuming GSI 'JobIndex' exists for querying by jobId
+                IndexName: 'JobIndex', 
                 KeyConditionExpression: 'jobId = :jobId',
-                ExpressionAttributeValues: { ':jobId': { S: jobId } }
-            };
-            const applications = await dynamodb.send(new QueryCommand(applicationsQueryInput));
+                ExpressionAttributeValues: { ':jobId': jobId }
+            }));
 
-            if (applications.Items) {
-                const activeApplications = applications.Items.filter((item: QueriedItem) => {
-                    const status = item.applicationStatus?.S || 'pending';
-                    return !['withdrawn', 'rejected'].includes(status);
-                });
-                
-                if (activeApplications.length > 0) {
-                    hasActiveApplicationsOrInvitations = true;
-                    return json(400, {
-                        error: `Cannot delete job with ${activeApplications.length} active application(s). Please handle applications first.`
-                    });
-                }
-                // Collect applications for potential forced cleanup later
-                applications.Items.forEach((item: QueriedItem) => {
-                    if (item.jobId?.S && item.applicationId?.S) {
-                        itemsToDelete.push({ DeleteRequest: { Key: { jobId: { S: item.jobId.S }, applicationId: { S: item.applicationId.S } } } });
-                    }
+            const applications = appsResult.Items || [];
+            
+            // Filter active applications
+            const activeApps = applications.filter(app => {
+                const status = app.applicationStatus || 'pending';
+                return !['withdrawn', 'rejected'].includes(status);
+            });
+
+            if (activeApps.length > 0) {
+                return json(400, { 
+                    error: "Bad Request", 
+                    message: `Cannot delete job with ${activeApps.length} active application(s). Please handle applications first.` 
                 });
             }
-        } catch (error) {
-            console.log('Error checking applications (might be missing GSI or table):', (error as Error).message);
-            // Continue with deletion even if applications table has issues
-        }
 
-        // 8. Check for active invitations
-        try {
-            const invitationsQueryInput: QueryCommandInput = {
-                TableName: process.env.JOB_INVITATIONS_TABLE,
-                KeyConditionExpression: 'jobId = :jobId',
-                ExpressionAttributeValues: { ':jobId': { S: jobId } }
-            };
-            const invitations = await dynamodb.send(new QueryCommand(invitationsQueryInput));
-
-            if (invitations.Items) {
-                const activeInvitations = invitations.Items.filter((item: QueriedItem) => {
-                    const status = item.invitationStatus?.S || 'pending';
-                    return !['declined', 'withdrawn'].includes(status);
-                });
-                
-                if (activeInvitations.length > 0) {
-                    hasActiveApplicationsOrInvitations = true;
-                    return json(400, {
-                        error: `Cannot delete job with ${activeInvitations.length} active invitation(s). Please cancel invitations first.`
+            // Queue inactive applications for deletion
+            applications.forEach(app => {
+                if (app.jobId && app.applicationId) {
+                    itemsToDelete.push({
+                        TableName: JOB_APPLICATIONS_TABLE,
+                        Key: { jobId: app.jobId, applicationId: app.applicationId }
                     });
                 }
-                // Collect invitations for potential forced cleanup later
-                invitations.Items.forEach((item: QueriedItem) => {
-                    if (item.jobId?.S && item.professionalUserSub?.S) {
-                        itemsToDelete.push({
-                            DeleteRequest: {
-                                Key: { jobId: { S: item.jobId.S }, professionalUserSub: { S: item.professionalUserSub.S } }
-                            }
-                        });
-                    }
-                });
-            }
-        } catch (error) {
-            console.log('Error checking invitations:', (error as Error).message);
-            // Continue with deletion
+            });
+
+        } catch (err) {
+            console.warn('Error querying applications:', (err as Error).message);
+            // Continue if query fails (e.g., missing index), but warn
         }
 
-        // 9. Check for 'completed' status without force delete
-        const forceDelete: boolean = event.queryStringParameters?.force === 'true';
+        // Check Invitations
+        try {
+            const invitesResult = await ddbDoc.send(new QueryCommand({
+                TableName: JOB_INVITATIONS_TABLE,
+                KeyConditionExpression: 'jobId = :jobId',
+                ExpressionAttributeValues: { ':jobId': jobId }
+            }));
+
+            const invitations = invitesResult.Items || [];
+
+            const activeInvites = invitations.filter(inv => {
+                const status = inv.invitationStatus || 'pending';
+                return !['declined', 'withdrawn'].includes(status);
+            });
+
+            if (activeInvites.length > 0) {
+                return json(400, { 
+                    error: "Bad Request", 
+                    message: `Cannot delete job with ${activeInvites.length} active invitation(s). Please cancel invitations first.` 
+                });
+            }
+
+            invitations.forEach(inv => {
+                if (inv.jobId && inv.professionalUserSub) {
+                    itemsToDelete.push({
+                        TableName: JOB_INVITATIONS_TABLE,
+                        Key: { jobId: inv.jobId, professionalUserSub: inv.professionalUserSub }
+                    });
+                }
+            });
+        } catch (err) {
+            console.warn('Error querying invitations:', (err as Error).message);
+        }
+
+        // 8. Handle 'completed' status with force param
+        const forceDelete = event.queryStringParameters?.force === 'true';
 
         if (!forceDelete && currentStatus === 'completed') {
-            return json(400, {
-                error: 'Cannot delete completed jobs. Use ?force=true to force deletion (this will remove all related data).',
-                warning: 'Forced deletion will permanently remove all job history, applications, and related data.'
+            return json(400, { 
+                error: "Bad Request", 
+                message: 'Cannot delete completed jobs. Use ?force=true to force deletion.' 
             });
         }
-        
-        // 10. Perform cleanup of negotiations if force delete is requested and applications were retrieved
+
+        // 9. Cleanup Negotiations (Only if force delete and applications existed)
         if (forceDelete) {
-            // Re-query applications (since we filtered and returned previously, we need to ensure we have all items)
-            // If the original application query was successful (itemsToDelete is populated), we proceed.
             try {
-                // Iterate over collected applications to find related negotiations
-                // Filter itemsToDelete to get only application keys (jobId and applicationId)
-                for (const app of itemsToDelete.filter(i => i.DeleteRequest.Key.applicationId && i.DeleteRequest.Key.jobId)) {
-                    const appId = app.DeleteRequest.Key.applicationId.S;
-                    
+                // Find applications we are about to delete
+                const appItems = itemsToDelete.filter(i => i.TableName === JOB_APPLICATIONS_TABLE);
+                
+                for (const appItem of appItems) {
+                    const appId = appItem.Key.applicationId;
                     if (!appId) continue;
 
-                    const negotiationsQueryInput: QueryCommandInput = {
-                        TableName: process.env.JOB_NEGOTIATIONS_TABLE,
-                        // This assumes JOB_NEGOTIATIONS_TABLE has applicationId as a GSI or PK
+                    const negoResult = await ddbDoc.send(new QueryCommand({
+                        TableName: JOB_NEGOTIATIONS_TABLE,
                         KeyConditionExpression: 'applicationId = :appId',
-                        ExpressionAttributeValues: { ':appId': { S: appId } }
-                    };
-                    const negotiations = await dynamodb.send(new QueryCommand(negotiationsQueryInput));
-                    
-                    if (negotiations.Items) {
-                        negotiations.Items.forEach((item: QueriedItem) => {
-                            if (item.applicationId?.S && item.negotiationId?.S) {
+                        ExpressionAttributeValues: { ':appId': appId }
+                    }));
+
+                    if (negoResult.Items) {
+                        negoResult.Items.forEach(nego => {
+                            if (nego.applicationId && nego.negotiationId) {
                                 itemsToDelete.push({
-                                    DeleteRequest: {
-                                        Key: { applicationId: { S: item.applicationId.S }, negotiationId: { S: item.negotiationId.S } }
-                                    }
+                                    TableName: JOB_NEGOTIATIONS_TABLE,
+                                    Key: { applicationId: nego.applicationId, negotiationId: nego.negotiationId }
                                 });
                             }
                         });
                     }
                 }
-            } catch (error) {
-                console.log('Error collecting related negotiations for cleanup:', (error as Error).message);
+            } catch (err) {
+                console.warn('Error collecting negotiations:', (err as Error).message);
             }
         }
 
-        // 11. Delete the job posting
-        const deleteCommandInput: DeleteItemCommandInput = {
-            TableName: process.env.JOB_POSTINGS_TABLE,
-            Key: { jobId: { S: jobId } },
-            ReturnValues: 'ALL_OLD'
-        };
-        const deletedJob = await dynamodb.send(new DeleteItemCommand(deleteCommandInput));
+        // 10. Delete the Job Posting
+        await ddbDoc.send(new DeleteCommand({
+            TableName: JOB_POSTINGS_TABLE,
+            Key: { jobId: jobId }
+        }));
 
-        // 12. Perform batch cleanup if there are related items to delete
-        const relatedItemsDeletedCount = itemsToDelete.length;
-        if (relatedItemsDeletedCount > 0) {
+        // 11. Batch Cleanup of Related Items
+        if (itemsToDelete.length > 0) {
             const batchSize = 25;
-            
-            // Loop through all collected items in batches
-            for (let i = 0; i < relatedItemsDeletedCount; i += batchSize) {
+            for (let i = 0; i < itemsToDelete.length; i += batchSize) {
                 const batch = itemsToDelete.slice(i, i + batchSize);
                 
-                // Group by table name for BatchWriteItem
-                const requestItems: Record<string, DeleteRequestItem[]> = {};
+                // Group by TableName
+                const requestItems: Record<string, any[]> = {};
                 batch.forEach(item => {
-                    // Determine table based on key structure (using attribute name check, as in original JS)
-                    const keys = Object.keys(item.DeleteRequest.Key);
-                    let tableName: string | undefined;
-
-                    if (keys.includes('applicationId') && keys.includes('negotiationId')) {
-                        tableName = process.env.JOB_NEGOTIATIONS_TABLE;
-                    } else if (keys.includes('jobId') && keys.includes('applicationId')) {
-                        tableName = process.env.JOB_APPLICATIONS_TABLE;
-                    } else if (keys.includes('jobId') && keys.includes('professionalUserSub')) {
-                        tableName = process.env.JOB_INVITATIONS_TABLE;
+                    if (!requestItems[item.TableName]) {
+                        requestItems[item.TableName] = [];
                     }
-                    
-                    if (tableName) {
-                        if (!requestItems[tableName]) {
-                            requestItems[tableName] = [];
-                        }
-                        requestItems[tableName].push(item); 
-                    }
+                    requestItems[item.TableName].push({
+                        DeleteRequest: { Key: item.Key }
+                    });
                 });
-                
-                if (Object.keys(requestItems).length > 0) {
-                    const batchDeleteCommandInput: BatchWriteItemCommandInput = {
-                        RequestItems: requestItems,
-                    };
-                    try {
-                        await dynamodb.send(new BatchWriteItemCommand(batchDeleteCommandInput));
-                    } catch (error) {
-                        console.error('Error in batch cleanup:', (error as Error).message);
-                        // Don't fail the primary job deletion if cleanup fails
-                    }
+
+                const batchWriteInput: BatchWriteCommandInput = { RequestItems: requestItems };
+                try {
+                    await ddbDoc.send(new BatchWriteCommand(batchWriteInput));
+                } catch (err) {
+                    console.error('Batch cleanup failed:', (err as Error).message);
+                    // Don't fail main request
                 }
             }
         }
 
-        // 13. Final Response
         return json(200, {
             status: "success",
-            statusCode: 200,
-            message: 'Job deleted successfully',
+            message: "Job deleted successfully",
             data: {
                 jobId,
                 deletedAt: new Date().toISOString(),
-                jobType,
                 forceDelete,
-                cleanupPerformed: relatedItemsDeletedCount > 0,
-                relatedItemsDeleted: relatedItemsDeletedCount
-            },
-            timestamp: new Date().toISOString()
+                relatedItemsDeleted: itemsToDelete.length
+            }
         });
 
     } catch (error) {
         const err = error as Error;
-        console.error('Error deleting job posting:', err);
-        return json(500, {
-            error: "Internal Server Error",
-            statusCode: 500,
-            message: "Failed to delete job posting",
-            details: { reason: err.message },
-            timestamp: new Date().toISOString()
+        console.error("Error deleting job:", err);
+        return json(500, { 
+            error: "Internal Server Error", 
+            message: "Failed to delete job posting", 
+            details: err.message 
         });
     }
 };
-
-exports.handler = handler;

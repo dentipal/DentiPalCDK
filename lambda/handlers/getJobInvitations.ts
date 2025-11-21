@@ -6,7 +6,7 @@ import {
   QueryCommandInput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyHandler, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -54,7 +54,14 @@ export const handler: APIGatewayProxyHandler = async (
     }
 
     // Validate token and extract professionalUserSub
-    const professionalUserSub = await validateToken(event);
+    let professionalUserSub: string;
+    try {
+      const authHeader = event.headers?.Authorization || event.headers?.authorization;
+      const userInfo = extractUserFromBearerToken(authHeader);
+      professionalUserSub = userInfo.sub;
+    } catch (authError: any) {
+      return json(401, { error: authError.message || "Invalid access token" });
+    }
 
     if (!professionalUserSub) {
       return json(401, {

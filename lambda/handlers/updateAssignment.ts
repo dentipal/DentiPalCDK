@@ -1,6 +1,8 @@
 import { DynamoDBClient, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken, isRoot } from "./utils";
+import { isRoot } from "./utils";
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -36,13 +38,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Authentication & Authorization Check (Root User)
-        await validateToken(event);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userGroups = userInfo.groups || [];
 
-        const groupsString: string | undefined = event.requestContext.authorizer?.claims?.['cognito:groups'];
-        const groups: string[] = groupsString?.split(',') || [];
-        
-        if (!isRoot(groups)) {
+        // 2. Authorization Check (Root User)
+        if (!isRoot(userGroups)) {
             return json(403, { error: "Only Root users can update assignments" });
         }
 
@@ -50,7 +52,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
              return json(400, { error: "Missing request body" });
         }
         
-        // 2. Parse and Validate Body
+        // 3. Parse and Validate Body
         const { userSub, clinicId, accessLevel }: UpdateAssignmentBody = JSON.parse(event.body);
         
         if (!userSub || !clinicId || !accessLevel) {
@@ -68,7 +70,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
              return json(500, { error: "Server configuration error." });
         }
 
-        // 3. Update DynamoDB Item
+        // 4. Update DynamoDB Item
         const command = new UpdateItemCommand({
             TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
             Key: { 
@@ -86,13 +88,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         await dynamoClient.send(command);
 
-        // 4. Success Response
+        // 5. Success Response
         return json(200, { status: "success", message: "Assignment updated successfully" });
 
     } catch (err) {
         const error = err as Error;
         console.error("Error updating assignment:", error);
         
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
+
         // Check for specific DynamoDB error if needed (e.g., ConditionalCheckFailedException from the ConditionExpression)
         if (error.name === "ConditionalCheckFailedException") {
              return json(404, { error: "The assignment to be updated was not found." });

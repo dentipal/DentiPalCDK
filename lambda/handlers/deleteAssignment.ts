@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { DynamoDBClient, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
-import { isRoot } from './utils'; // Assumed dependency
+import { isRoot, extractUserFromBearerToken } from './utils'; // Assumed dependency
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -25,10 +25,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     try {
         // 1. Authorization Check (Root User Only)
-        // Extract groups from the Authorizer claims
-        const groupsString = event.requestContext.authorizer?.claims?.['cognito:groups'];
-        // Note: The groups in the claims might be comma-separated strings or arrays, splitting covers common cases.
-        const groups: string[] = typeof groupsString === 'string' ? groupsString.split(',') : [];
+        // Extract Bearer token from Authorization header
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const groups = userInfo.groups;
 
         // Use the imported utility function to check for Root group membership
         if (!isRoot(groups)) {

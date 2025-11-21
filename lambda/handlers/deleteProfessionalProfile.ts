@@ -1,19 +1,13 @@
-import { 
-    DynamoDBClient, 
-    GetItemCommand, 
-    DeleteItemCommand,
-    GetItemCommandInput,
-    DeleteItemCommandInput
-} from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Import validation utility
-import { validateToken } from "./utils";
-// Import shared CORS headers
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 
-const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+const REGION = process.env.REGION || "us-east-1";
+const client = new DynamoDBClient({ region: REGION });
+const ddbDoc = DynamoDBDocumentClient.from(client);
 
-// Helper to build JSON responses with shared CORS
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
     headers: CORS_HEADERS,
@@ -21,94 +15,80 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // --- CORS preflight ---
-    // Check standard REST method or HTTP API v2 method
-    const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
-        // Step 1: Get userSub from JWT token
-        const userSub = await validateToken(event as any);
-
-        // Step 2: Check if userSub is valid
-        if (!userSub) {
-            return json(401, {
-                error: "Unauthorized",
-                statusCode: 401,
-                message: "Invalid or expired token",
-                details: { issue: "Authentication failed" },
-                timestamp: new Date().toISOString()
+        // 1. Authentication
+        let userSub: string;
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+        } catch (authError: any) {
+            return json(401, { 
+                error: "Unauthorized", 
+                message: "Invalid or expired token", 
+                details: { issue: authError.message } 
             });
         }
 
-        // Step 3: Check if the user has a profile
-        const getParams: GetItemCommandInput = {
-            TableName: process.env.PROFESSIONAL_PROFILES_TABLE,
-            Key: {
-                userSub: { S: userSub },
-            },
-        };
-        const existingProfile = await dynamodb.send(new GetItemCommand(getParams));
+        const tableName = process.env.PROFESSIONAL_PROFILES_TABLE;
+        if (!tableName) return json(500, { error: "Server configuration error" });
+
+        // 2. Check if the user has a profile
+        const getCommand = new GetCommand({
+            TableName: tableName,
+            Key: { userSub: userSub },
+        });
+        const existingProfile = await ddbDoc.send(getCommand);
 
         if (!existingProfile.Item) {
             return json(404, {
                 error: "Not Found",
-                statusCode: 404,
                 message: "Professional profile not found",
-                details: { userSub: userSub },
-                timestamp: new Date().toISOString()
+                details: { userSub }
             });
         }
 
-        // Step 4: Check if the profile is the default profile
-        // DynamoDB attribute may come back as { BOOL: true } or { S: 'true' }
-        const isDefaultAttr = existingProfile.Item.isDefault;
-        const isDefault = !!(
-            isDefaultAttr && ((isDefaultAttr.BOOL === true) || (isDefaultAttr.S === "true"))
-        );
+        // 3. Check if default profile
+        const isDefault = existingProfile.Item.isDefault === true || existingProfile.Item.isDefault === "true";
 
         if (isDefault) {
             return json(409, {
                 error: "Conflict",
-                statusCode: 409,
                 message: "Cannot delete default profile",
-                details: { reason: "Set another profile as default first" },
-                timestamp: new Date().toISOString()
+                details: { reason: "Set another profile as default first" }
             });
         }
 
-        // Step 5: Delete the professional profile
-        const deleteParams: DeleteItemCommandInput = {
-            TableName: process.env.PROFESSIONAL_PROFILES_TABLE,
-            Key: {
-                userSub: { S: userSub },
-            },
-        };
-        await dynamodb.send(new DeleteItemCommand(deleteParams));
+        // 4. Delete the profile
+        const deleteCommand = new DeleteCommand({
+            TableName: tableName,
+            Key: { userSub: userSub },
+        });
+        await ddbDoc.send(deleteCommand);
 
-        // Step 6: Return success response
+        // 5. Success
         return json(200, {
             status: "success",
-            statusCode: 200,
             message: "Professional profile deleted successfully",
             data: {
                 deletedUserSub: userSub,
                 deletedAt: new Date().toISOString()
-            },
-            timestamp: new Date().toISOString()
+            }
         });
+
     } catch (error) {
         const err = error as Error;
         console.error("Error deleting professional profile:", err);
         return json(500, {
             error: "Internal Server Error",
-            statusCode: 500,
             message: "Failed to delete professional profile",
-            details: { reason: err.message },
-            timestamp: new Date().toISOString()
+            details: { reason: err.message }
         });
     }
 };

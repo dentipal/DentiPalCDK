@@ -2,6 +2,8 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, UpdateCommand, GetCommand, GetCommandOutput, UpdateCommandInput } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { CORS_HEADERS } from "./corsHeaders";
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || "us-east-1";
@@ -83,14 +85,6 @@ interface DynamoBody {
     [key: string]: any; // Allow other properties
 }
 
-/** Interface for the decoded Cognito JWT claims */
-interface CognitoClaims {
-    sub: string;
-    "cognito:groups"?: string[];
-    "custom:user_type"?: string;
-    [key: string]: any;
-}
-
 // --- 4. Transformer Function ---
 
 /**
@@ -166,31 +160,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Step 1: Decode JWT token manually
-        const authHeader: string | undefined = event.headers?.Authorization || event.headers?.authorization;
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
-            return json(401, { error: "Missing or invalid Authorization header" });
-        }
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
+        const groups = userInfo.groups || [];
+        const userType = userInfo.userType || "professional";
 
-        const token = authHeader.split(" ")[1];
-        const payload = token.split(".")[1];
-        
-        if (!payload) {
-             return json(401, { error: "Invalid JWT token format: missing payload" });
-        }
-
-        // Base64URL decoding: replace non-URL-safe characters before decoding
-        const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-        const decodedClaims: CognitoClaims = JSON.parse(Buffer.from(base64, "base64").toString("utf8"));
-
-        const userSub: string = decodedClaims.sub;
-        const groups: string[] = decodedClaims["cognito:groups"] || [];
-        const userType: string = decodedClaims["custom:user_type"] || "professional";
-        
-        if (typeof userSub !== 'string' || userSub.trim().length === 0) {
-             console.error("❌ userSub is missing or invalid in token claims.");
-             return json(401, { error: "Invalid user identity in token." });
-        }
+        console.log("Extracted userSub:", userSub);
 
         // Step 2: Get clinicId from API Gateway proxy path
         const pathParts: string[] = event.path?.split("/").filter(Boolean) || [];
@@ -254,8 +231,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Filter the transformed body to only include allowed DynamoDB fields
         for (const field of allowedFields) {
              const value = dynamoBody[field];
-             // The check for field existence in dynamoBody is implied by the loop over allowedFields.
-             // We check if the value is explicitly provided in the request (even if null/empty string)
              if (dynamoBody.hasOwnProperty(field)) {
                 validUpdateFields[field] = value;
                 updatedFields.push(field as string);
@@ -276,15 +251,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Add updated fields to expressions and attributes
         updatedFields.forEach(field => {
             setExpressions.push(`#${field} = :${field}`);
-            
-            // Cast 'field' to string to satisfy Record<string, string>
             expressionAttributeNames[`#${field}`] = field as string;
-            
             expressionAttributeValues[`:${field}`] = validUpdateFields[field as keyof DynamoBody];
         });
 
         updateExpression += setExpressions.join(", ");
-        updateExpression += ", #updatedAt = :updatedAt"; // Always update the 'updatedAt' field
+        updateExpression += ", #updatedAt = :updatedAt";
 
         const updateCommand = new UpdateCommand({
             TableName: CLINIC_PROFILES_TABLE,
@@ -307,16 +279,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             profile: result.Attributes, 
         });
 
-    } catch (error) {
-        const err = error as Error;
-        console.error("❌ Unhandled error in updateClinicProfile:", err);
+    } catch (error: any) {
+        console.error("❌ Unhandled error in updateClinicProfile:", error);
         
-        const errorMessage = err.message || "Failed to update clinic profile due to an unexpected error.";
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
         
-        // Differentiate between known client errors and unexpected server errors
-        const isClientError = errorMessage.includes("Authorization") || errorMessage.includes("identity") || errorMessage.includes("Missing clinicId") || errorMessage.includes("JWT");
-        const statusCode = isClientError ? 401 : 500;
-        
-        return json(statusCode, { error: errorMessage });
+        return json(500, { error: "Failed to update clinic profile", details: error.message });
     }
 };

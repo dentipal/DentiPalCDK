@@ -5,10 +5,8 @@ import {
     GetItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming the utility file exports the necessary functions and types
-import { validateToken } from "./utils";
-
-// ✅ ADDED THIS LINE:
+// ✅ UPDATE: Changed import to use the new token utility
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
@@ -86,9 +84,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Validate token and get user sub
-        // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = await validateToken(event);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
         
         // 2. Extract jobId from the proxy path
         const pathParts = event.pathParameters?.proxy?.split('/');
@@ -99,12 +98,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return {
                 statusCode: 400,
                 body: JSON.stringify({ error: "jobId is required in path parameters" }),
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: CORS_HEADERS, 
             };
         }
 
         // 3. Fetch the multiday consulting job details
         // Uses clinicUserSub (PK) and jobId (SK) for a direct GetItem
+        // Note: This query assumes 'userSub' here is the CLINIC's sub. 
+        // If a professional is viewing this, you can't use 'userSub' as the PK.
+        // Assuming the intention is for a clinic to view their own job:
         const jobCommand = new GetItemCommand({
             TableName: process.env.JOB_POSTINGS_TABLE,
             Key: {
@@ -120,7 +122,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return {
                 statusCode: 404,
                 body: JSON.stringify({ error: "Multiday job not found or access denied" }),
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: CORS_HEADERS, 
             };
         }
 
@@ -131,7 +133,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 body: JSON.stringify({
                     error: "This is not a multi-day consulting job. Use the appropriate endpoint for this job type."
                 }),
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: CORS_HEADERS, 
             };
         }
 
@@ -182,18 +184,36 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 message: "Multiday consulting job retrieved successfully",
                 job: multidayJob
             }),
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: CORS_HEADERS, 
         };
 
     } catch (error: any) {
         console.error("Error retrieving multiday consulting job:", error);
+        
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return {
+                statusCode: 401,
+                body: JSON.stringify({ 
+                    error: "Unauthorized", 
+                    details: error.message 
+                }),
+                headers: CORS_HEADERS, 
+            };
+        }
+
         return {
             statusCode: 500,
             body: JSON.stringify({
                 error: "Failed to retrieve multiday consulting job. Please try again.",
                 details: error.message
             }),
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: CORS_HEADERS, 
         };
     }
 };

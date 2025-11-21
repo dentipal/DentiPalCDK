@@ -1,5 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
@@ -469,7 +469,9 @@ export const handler = async (
     }
 
     try {
-        await validateToken(event);
+        // Extract Bearer token from Authorization header to validate user
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        extractUserFromBearerToken(authHeader);
 
         const { role } = event.queryStringParameters || {};
 

@@ -1,245 +1,177 @@
-import {
-    DynamoDBClient,
-    GetItemCommand,
-    QueryCommand,
-    UpdateItemCommand,
-    DeleteItemCommand,
-    AttributeValue,
-} from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { 
+    DynamoDBDocumentClient, 
+    GetCommand, 
+    QueryCommand, 
+    UpdateCommand, 
+    DeleteCommand 
+} from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils"; 
-
-// ✅ ADDED THIS LINE:
+import { extractUserFromBearerToken } from "./utils"; 
 import { CORS_HEADERS } from "./corsHeaders";
 
-// --- Interfaces and Type Definitions ---
+// --- Configuration ---
+const REGION = process.env.REGION || "us-east-1";
+const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
+const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-JobApplications";
 
-// Initialize the DynamoDB client
-const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+const client = new DynamoDBClient({ region: REGION });
+const ddbDoc = DynamoDBDocumentClient.from(client);
 
-// Allowed groups for job deletion
+// Allowed groups
 const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
 
-
-
-// --- Lambda Handler Function ---
+// Helper
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
-    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
-    // Handle Preflight
     if (method === "OPTIONS") {
-        return {
-            statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: ""
-        };
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
-        // Step 1: Validate token and get userSub
-        // We cast event to 'any' to ensure compatibility if validateToken expects specific properties
-        const userSub: string = await validateToken(event as any);
-        console.log("Authenticated userSub:", userSub);
-
-        // Step 2: Extract Cognito groups and perform authorization
-        const claims = event.requestContext?.authorizer?.claims || {};
-        // Handle both array (HTTP API) and string (REST API) formats for groups
-        const rawGroups = claims["cognito:groups"] || claims["groups"] || "";
+        // 1. Authentication & Authorization
+        let userSub: string;
+        let userGroups: string[] = [];
         
-        let groups: string[] = [];
-        if (Array.isArray(rawGroups)) {
-            groups = rawGroups.map(String).map(g => g.toLowerCase());
-        } else if (typeof rawGroups === 'string') {
-            groups = rawGroups.split(",").map(g => g.trim().toLowerCase()).filter(Boolean);
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+            userGroups = userInfo.groups || [];
+        } catch (authError: any) {
+            return json(401, { error: authError.message || "Invalid access token" });
         }
 
-        console.log("User groups:", groups);
-
-        const isAllowed: boolean = groups.some(g => ALLOWED_GROUPS.has(g));
+        const normalizedGroups = userGroups.map(g => g.toLowerCase());
+        const isAllowed = normalizedGroups.some(g => ALLOWED_GROUPS.has(g));
 
         if (!isAllowed) {
-            return {
-                statusCode: 403,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "You do not have permission to delete this job.",
-                }),
-            };
+            return json(403, { error: "You do not have permission to delete this job." });
         }
 
-        // Step 3: Extract jobId from proxy path or pathParameters
-        // Supports direct path parameter {jobId} or proxy path /jobs/permanent/{jobId}
+        // 2. Extract Job ID
         let jobId = event.pathParameters?.jobId;
-        
         if (!jobId && event.pathParameters?.proxy) {
-             const pathParts: string[] = event.pathParameters.proxy.split("/");
-             // Expected path: /jobs/permanent/{jobId} -> parts[2]
-             // Adjust index based on your actual API Gateway routing
+             const pathParts = event.pathParameters.proxy.split("/");
              jobId = pathParts[pathParts.length - 1]; 
         }
 
         if (!jobId) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "jobId is required in path parameters",
-                }),
-            };
+            return json(400, { error: "jobId is required in path parameters" });
         }
 
-        // Step 4: Verify the job exists and belongs to the clinic (using clinicUserSub as Partition Key)
-        const getJobCommand = new GetItemCommand({
-            TableName: process.env.JOB_POSTINGS_TABLE,
+        // 3. Verify Job Existence & Ownership
+        // Assuming Schema: PK=clinicUserSub, SK=jobId based on previous files
+        const getJobCommand = new GetCommand({
+            TableName: JOB_POSTINGS_TABLE,
             Key: {
-                // Assuming Schema: PK=clinicUserSub, SK=jobId OR just PK=jobId depending on your table.
-                // Based on previous files (deleteJobPosting.ts), it seems PK=jobId. 
-                // However, your code used clinicUserSub + jobId. I will stick to your code's logic 
-                // but usually, GetItem requires the full primary key.
-                // If your table uses ONLY jobId as PK, remove clinicUserSub from Key.
-                // If your table is PK=clinicUserSub, SK=jobId, keep both.
-                clinicUserSub: { S: userSub }, 
-                jobId: { S: jobId },           
+                clinicUserSub: userSub, 
+                jobId: jobId,           
             },
         });
         
-        // NOTE: If this GetItem fails with "The provided key element does not match the schema",
-        // check if your table actually has a Composite Key or just a Partition Key (jobId).
-        
-        const jobResponse = await dynamodb.send(getJobCommand);
-
-        if (!jobResponse.Item) {
-            return {
-                statusCode: 404,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "Permanent job not found or access denied",
-                }),
-            };
-        }
-
+        const jobResponse = await ddbDoc.send(getJobCommand);
         const job = jobResponse.Item;
 
-        // Step 5: Verify it's a permanent job
-        if (job.job_type?.S !== "permanent") {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({
-                    error: "This is not a permanent job. Use the appropriate endpoint for this job type.",
-                }),
-            };
+        if (!job) {
+            return json(404, { error: "Permanent job not found or access denied" });
         }
 
-        // Step 6: Check for active applications
+        // 4. Verify Type
+        if (job.job_type !== "permanent") {
+            return json(400, { error: "This is not a permanent job. Use the appropriate endpoint for this job type." });
+        }
+
+        // 5. Check Active Applications
         const applicationsCommand = new QueryCommand({
-            TableName: process.env.JOB_APPLICATIONS_TABLE,
-            // Assuming there is a GSI named 'JobIndex' where PK=jobId, otherwise this Query will fail
-            // if jobId is not the main table PK.
+            TableName: JOB_APPLICATIONS_TABLE,
+            // Assuming GSI 'JobIndex' exists where PK=jobId
             IndexName: 'JobIndex', 
             KeyConditionExpression: "jobId = :jobId",
             FilterExpression: "applicationStatus IN (:pending, :accepted, :negotiating)",
             ExpressionAttributeValues: {
-                ":jobId": { S: jobId },
-                ":pending": { S: "pending" },
-                ":accepted": { S: "accepted" },
-                ":negotiating": { S: "negotiating" },
+                ":jobId": jobId,
+                ":pending": "pending",
+                ":accepted": "accepted",
+                ":negotiating": "negotiating",
             },
         });
         
-        const applicationsResponse = await dynamodb.send(applicationsCommand);
-        const activeApplications = applicationsResponse.Items || [];
+        const appsResponse = await ddbDoc.send(applicationsCommand);
+        const activeApplications = appsResponse.Items || [];
 
-        // Step 7: Update active applications to "job_cancelled"
+        // 6. Cancel Active Applications
         if (activeApplications.length > 0) {
-            console.log(`Found ${activeApplications.length} active applications. Updating status to 'job_cancelled'.`);
-
+            console.log(`Found ${activeApplications.length} active applications. Updating status.`);
+            
             const updatePromises = activeApplications.map(async (application) => {
-                const applicationId = application.applicationId?.S;
-                const professionalUserSub = application.professionalUserSub?.S; // Assuming composite key
-                
-                if (!applicationId) {
-                    console.warn("Application found without applicationId, skipping update.");
-                    return;
-                }
+                const applicationId = application.applicationId;
+                // Assuming standard keys; adjust if your table schema differs
+                // Usually PK: jobId, SK: professionalUserSub OR PK: applicationId
+                if (!applicationId) return;
 
                 try {
-                    // Assuming JOB_APPLICATIONS_TABLE Key structure. 
-                    // Usually keys are (jobId, professionalUserSub) or (applicationId).
-                    // Adjust Key below to match your actual table definition.
-                    const updateKey: Record<string, AttributeValue> = {};
+                    const updateKey: Record<string, any> = {};
                     
-                    // Heuristic based on typical patterns:
-                    if (application.jobId?.S && application.professionalUserSub?.S) {
-                         updateKey.jobId = { S: application.jobId.S };
-                         updateKey.professionalUserSub = { S: application.professionalUserSub.S };
-                    } else if (application.applicationId?.S) {
-                         updateKey.applicationId = { S: application.applicationId.S };
+                    if (application.jobId && application.professionalUserSub) {
+                         updateKey.jobId = application.jobId;
+                         updateKey.professionalUserSub = application.professionalUserSub;
+                    } else if (application.applicationId) {
+                         updateKey.applicationId = application.applicationId;
                     }
 
-                    if (Object.keys(updateKey).length === 0) {
-                        console.warn("Could not determine Primary Key for application update", application);
-                        return;
-                    }
+                    if (Object.keys(updateKey).length === 0) return;
 
-                    const updateItemCommand = new UpdateItemCommand({
-                        TableName: process.env.JOB_APPLICATIONS_TABLE,
+                    const updateCommand = new UpdateCommand({
+                        TableName: JOB_APPLICATIONS_TABLE,
                         Key: updateKey,
                         UpdateExpression: "SET applicationStatus = :status, updatedAt = :updatedAt",
                         ExpressionAttributeValues: {
-                            ":status": { S: "job_cancelled" },
-                            ":updatedAt": { S: new Date().toISOString() },
+                            ":status": "job_cancelled",
+                            ":updatedAt": new Date().toISOString(),
                         },
                     });
-                    await dynamodb.send(updateItemCommand);
+                    await ddbDoc.send(updateCommand);
                 } catch (updateError) {
                     console.warn(`Failed to update application ${applicationId}:`, updateError);
                 }
             });
-            // Run all update promises concurrently
             await Promise.all(updatePromises);
         }
 
-        // Step 8: Delete the job
-        const deleteCommand = new DeleteItemCommand({
-            TableName: process.env.JOB_POSTINGS_TABLE,
+        // 7. Delete Job
+        const deleteCommand = new DeleteCommand({
+            TableName: JOB_POSTINGS_TABLE,
             Key: {
-                clinicUserSub: { S: userSub },
-                jobId: { S: jobId },
+                clinicUserSub: userSub,
+                jobId: jobId,
             },
         });
-        await dynamodb.send(deleteCommand);
+        await ddbDoc.send(deleteCommand);
 
-        // Step 9: Return success
-        const affectedApplicationsCount = activeApplications.length;
-        return {
-            statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: JSON.stringify({
-                message: "Permanent job deleted successfully",
-                jobId,
-                affectedApplications: affectedApplicationsCount,
-                applicationHandling: affectedApplicationsCount > 0
-                    ? "Active applications have been marked as 'job_cancelled'"
-                    : "No active applications were affected",
-            }),
-        };
+        // 8. Response
+        return json(200, {
+            message: "Permanent job deleted successfully",
+            jobId,
+            affectedApplications: activeApplications.length,
+            applicationHandling: activeApplications.length > 0
+                ? "Active applications have been marked as 'job_cancelled'"
+                : "No active applications were affected",
+        });
 
     } catch (error) {
-        console.error("Error deleting permanent job:", error);
-        const errorMessage = error instanceof Error ? error.message : "An unknown error occurred";
-
-        return {
-            statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
-            body: JSON.stringify({
-                error: "Failed to delete permanent job. Please try again.",
-                details: errorMessage,
-            }),
-        };
+        const err = error as Error;
+        console.error("Error deleting permanent job:", err);
+        return json(500, {
+            error: "Failed to delete permanent job. Please try again.",
+            details: err.message,
+        });
     }
 };
-
-exports.handler = handler;

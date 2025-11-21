@@ -5,7 +5,7 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
@@ -95,8 +95,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Cast event to any to ensure compatibility with validateToken utility
-        const userSub = await validateToken(event as any);
+        // Extract Bearer token from Authorization header
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
 
         // Extract jobId from proxy path or directly from pathParameters
         // Path structure usually: /jobs/{jobId} or /jobs/permanent/{jobId}

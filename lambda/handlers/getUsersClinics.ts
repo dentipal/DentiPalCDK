@@ -9,7 +9,7 @@ import {
   ScanCommandInput
 } from "@aws-sdk/client-dynamodb";
 
-import { validateToken, isRoot } from "./utils";
+import { extractUserFromBearerToken, isRoot } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -31,11 +31,11 @@ export const handler = async (
   }
 
   try {
-    const userSub = await validateToken(event);
-
-    const groupsClaim = event.requestContext.authorizer?.claims?.["cognito:groups"];
-    const groupsString = typeof groupsClaim === "string" ? groupsClaim : "";
-    const groups: string[] = groupsString ? groupsString.split(",") : [];
+    // Extract Bearer token from Authorization header
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    const userInfo = extractUserFromBearerToken(authHeader);
+    const userSub = userInfo.sub;
+    const groups = userInfo.groups;
 
     const queryParams = event.queryStringParameters || {};
 

@@ -5,8 +5,8 @@ import {
     PutItemCommand, 
     AttributeValue 
 } from "@aws-sdk/client-dynamodb";
-// Assuming validateToken is a utility function in a local file
-import { validateToken } from "./utils";
+// Updated imports to use the new token extraction utility
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -44,7 +44,6 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     // --- CORS preflight ---
-    // Check standard REST method or HTTP API v2 method
     const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === 'OPTIONS') {
@@ -52,8 +51,25 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Authorization and Input Parsing
-        const userSub: string = await validateToken(event as any);
+        // 1. Authorization and Input Parsing (Using Access Token)
+        let userSub: string;
+        
+        try {
+            // Extract Access Token from Authorization header
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            
+            // Use utility to decode Access Token
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+            // Note: We aren't strictly checking groups here because the logic below 
+            // checks if the user is associated with the clinic in the DB.
+            // However, we could add a check like: if (!isRoot(userInfo.groups) && !isClinicRole(userInfo.groups)) ...
+            
+        } catch (authError: any) {
+            console.error("Authentication failed:", authError.message);
+            return json(401, { error: authError.message || "Invalid access token" });
+        }
+
         const profileData: ClinicProfileData = JSON.parse(event.body || '{}');
 
         // Required fields check
@@ -86,6 +102,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Check if userSub is in the AssociatedUsers list
+        // Access Token 'sub' is reliable for this check
         const associatedUsers = clinicItem.AssociatedUsers?.L?.map(u => u.S) || [];
         if (!associatedUsers.includes(userSub)) {
             console.warn(`[AUTH] User ${userSub} is not associated with clinic ${profileData.clinicId}.`);
@@ -93,7 +110,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 3. ✅ Build the item using Record<string, AttributeValue>
-        // This ensures it matches the type expected by PutItemCommand
         const item: Record<string, AttributeValue> = {
             clinicId: { S: profileData.clinicId },
             userSub: { S: userSub },
@@ -155,6 +171,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(409, {
                 error: "A profile already exists for this clinic and user"
             });
+        }
+        
+        // Check for auth-specific errors thrown by extractUserFromBearerToken
+        if (err.message === "Authorization header missing" || err.message.includes("Invalid access token")) {
+             return json(401, { error: err.message });
         }
 
         return json(500, {

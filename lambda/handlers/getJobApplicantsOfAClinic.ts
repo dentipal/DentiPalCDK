@@ -25,6 +25,8 @@ const NEGOTIATION_HASH_KEY = "applicationId";
 
 const dynamodb = new DynamoDBClient({ region: REGION });
 
+// ✅ ADDED: Import auth utility
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 
 async function getTableSchema(tableName: string) {
@@ -223,8 +225,19 @@ async function fetchNegotiationsForNegotiatingApps(applications: any[], concurre
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+  // ✅ PREFLIGHT CHECK
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+  }
+
   try {
     console.log("📝 Event:", JSON.stringify(event, null, 2));
+
+    // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+    // Validate that a user is logged in before fetching sensitive applicant data
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    extractUserFromBearerToken(authHeader);
+    // ------------------------------------------------
 
     const path = event.path || "";
     const clinicId = path.split("/")[1];
@@ -397,6 +410,20 @@ export const handler = async (
     });
   } catch (error: any) {
     console.error("❌ handler error:", error);
+    
+    // ✅ Added Auth error handling
+    if (error.message === "Authorization header missing" || 
+        error.message?.startsWith("Invalid authorization header") ||
+        error.message === "Invalid access token format" ||
+        error.message === "Failed to decode access token" ||
+        error.message === "User sub not found in token claims") {
+        
+        return json(401, {
+            error: "Unauthorized",
+            details: error.message
+        });
+    }
+
     return json(500, {
       error: "Internal Server Error",
       statusCode: 500,

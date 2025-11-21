@@ -9,7 +9,8 @@ import {
   UpdateItemCommandInput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils";
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -59,9 +60,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   }
 
   try {
-    // Assume validateToken returns the verified userSub and throws on failure
-    // Using await as validateToken is typically async in this project context
-    const userSub: string = await validateToken(event);
+    // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    const userInfo = extractUserFromBearerToken(authHeader);
+    const userSub = userInfo.sub;
 
     if (!event.body) {
       return json(400, { error: "Request body is required." });
@@ -93,8 +95,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       }
     }
     catch (gsiError) {
-      // Step 1b (Fallback): If GSI query fails, try scanning the table.
-      // This is generally slow and should be fixed by ensuring the GSI exists.
       console.warn("GSI not available or query failed, attempting full table scan (SLOW):", (gsiError as Error).message);
 
       const scanParams: ScanCommandInput = {
@@ -107,7 +107,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
       const scanResponse = await dynamodb.send(new ScanCommand(scanParams));
       if (scanResponse.Items && scanResponse.Items.length > 0) {
-        // We only expect one result since applicationId should be unique
         applicationFound = scanResponse.Items[0] as ApplicationItem;
       }
     }
@@ -138,13 +137,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const addUpdateField = (key: keyof UpdateApplicationBody, dbName: string, type: 'S' | 'N', attrName?: string) => {
       const value = updateData[key];
       if (value !== undefined && value !== null) {
-        const expressionKey = attrName || dbName; // Use dbName as ExpressionAttributeValue key
+        const expressionKey = attrName || dbName;
         const expressionName = `#${dbName}`;
 
         updateExpressions.push(`${expressionName} = :${expressionKey}`);
         attributeNames[expressionName] = dbName;
 
-        // Handle string vs number typing for DynamoDB AttributeValue
         if (type === 'S') {
           attributeValues[`:${expressionKey}`] = { S: value as string };
         } else if (type === 'N') {
@@ -159,12 +157,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     addUpdateField('startDate', 'startDate', 'S', 'start');
     addUpdateField('notes', 'notes', 'S');
 
-    // Always update the updatedAt timestamp
     const nowIso: string = new Date().toISOString();
     updateExpressions.push("updatedAt = :updated");
     attributeValues[":updated"] = { S: nowIso };
 
-    // Check if any fields other than 'updatedAt' were provided
     if (updateExpressions.length === 1) {
       return json(400, {
         error: "No fields to update. Provide at least one field: message, proposedRate, availability, startDate, notes"
@@ -199,20 +195,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       applicationId: updateData.applicationId,
       updatedFields: Object.keys(updateData).filter(key => key !== 'applicationId'),
       updatedAt: nowIso,
-      // Optionally return the full updated item if needed:
-      // attributes: updateResponse.Attributes
     });
   }
   catch (error: any) {
     console.error("Error updating job application:", error.message, error.stack);
 
-    // Handle common errors like invalid token from utility function
-    const isAuthError = error.message.includes("Unauthorized") || error.message.includes("token");
+    // ✅ Check for Auth errors and return 401
+    if (error.message === "Authorization header missing" || 
+        error.message?.startsWith("Invalid authorization header") ||
+        error.message === "Invalid access token format" ||
+        error.message === "Failed to decode access token") {
+        
+        return json(401, {
+            error: "Unauthorized",
+            details: error.message
+        });
+    }
 
-    const statusCode = isAuthError ? 401 : 500;
-    return json(statusCode, {
-      error: isAuthError ? error.message : "Failed to update job application. Please try again.",
-      details: isAuthError ? undefined : error.message
+    return json(500, {
+      error: "Failed to update job application. Please try again.",
+      details: error.message
     });
   }
 };

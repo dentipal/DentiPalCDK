@@ -6,8 +6,8 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming the utility file exports the necessary functions and types
-import { validateToken } from "./utils"; 
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -123,9 +123,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Step 1: Validate the JWT token
-        // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = await validateToken(event as any);
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
+
         console.log("Extracted userSub:", userSub);
 
         // Step 2: Fetch clinic profiles
@@ -267,6 +269,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Log detailed error for debugging
         console.error("DETAILED ERROR:", error); 
         console.error("Error retrieving clinic profiles:", error);
+        
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
+
         return json(500, {
             error: "Internal Server Error",
             statusCode: 500,

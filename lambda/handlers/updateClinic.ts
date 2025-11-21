@@ -1,17 +1,11 @@
 import { DynamoDBClient, UpdateItemCommand, AttributeValue } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken, hasClinicAccess, buildAddress, AccessLevel } from "./utils"; 
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { hasClinicAccess, buildAddress, AccessLevel, extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Type Definitions ---
-
-/** Defines the claims structure expected from the API Gateway Authorizer */
-interface AuthorizerClaims {
-    "cognito:groups"?: string | string[];
-    "cognito:Groups"?: string | string[];
-    [key: string]: any;
-}
 
 /** Defines the structure of the request body for the clinic update */
 interface UpdateClinicBody {
@@ -46,37 +40,6 @@ const getMethod = (e: APIGatewayProxyEvent): string =>
 
 /** ----------------- NEW: robust groups parsing + helpers ----------------- */
 
-/**
- * Robustly parses Cognito groups from different locations/formats in the authorizer claims.
- */
-function parseGroupsFromAuthorizer(event: APIGatewayProxyEvent): string[] {
-    const claims: AuthorizerClaims = event?.requestContext?.authorizer?.claims || {};
-    
-    let raw: string | string[] = claims["cognito:groups"] ?? claims["cognito:Groups"] ?? "";
-    
-    if (Array.isArray(raw)) return raw.map(String);
-    
-    if (typeof raw === "string") {
-        const val = raw.trim();
-        if (!val) return [];
-        
-        // Handle JSON array string
-        if (val.startsWith("[") && val.endsWith("]")) {
-            try { 
-                const arr = JSON.parse(val); 
-                return Array.isArray(arr) ? arr.map(String) : []; 
-            } catch {
-                // Fallthrough to comma-separated
-            }
-        }
-        
-        // Handle comma-separated string
-        return val.split(",").map(s => s.trim()).filter(Boolean);
-    }
-    
-    return [];
-}
-
 /** Normalizes a group string for comparison (lowercase, remove non-alphanumeric) */
 const normalize = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, "");
 
@@ -94,13 +57,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 2. Authentication
-        // Assuming validateToken returns userSub (string) or throws if invalid
-        const userSub: string = await validateToken(event); 
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
+        const groups = userInfo.groups || [];
 
         // 3. Group Authorization Check (Root, ClinicAdmin)
-        const rawGroups: string[] = parseGroupsFromAuthorizer(event);
-        const normalized: string[] = rawGroups.map(normalize);
+        const normalized: string[] = groups.map(normalize);
         const isRootGroup: boolean = normalized.includes("root");
         
         const isAllowedGroup: boolean = normalized.some(g => ALLOWED_UPDATERS.has(g));
@@ -227,6 +191,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const error = err as Error;
         console.error("Error updating clinic:", error);
         
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
+
         return json(500, {
             error: "Internal Server Error",
             statusCode: 500,

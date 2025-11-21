@@ -1,41 +1,48 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { DynamoDB } from "aws-sdk";
-import { verifyToken } from "./utils";
+import { 
+    DynamoDBClient, 
+    QueryCommand, 
+    QueryCommandInput, 
+    QueryCommandOutput 
+} from "@aws-sdk/client-dynamodb";
+import { unmarshall } from "@aws-sdk/util-dynamodb";
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
-const dynamodb = new DynamoDB.DocumentClient();
+
+// Initialize DynamoDB Client V3
+const dynamodb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
 const USER_ADDRESSES_TABLE = process.env.USER_ADDRESSES_TABLE!;
-
-
 
 export const handler = async (
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    // --- CORS preflight ---
+    if (event.httpMethod === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
-        // Verify JWT token and get user info
-        const userInfo = await verifyToken(event);
-
-        if (!userInfo) {
-            return {
-                statusCode: 401,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Unauthorized - Invalid or expired token" }),
-            };
-        }
-
-        const userSub: string = userInfo.sub;
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        // Throws error if invalid
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
 
         // Query user addresses from DynamoDB
-        const params: DynamoDB.DocumentClient.QueryInput = {
+        const params: QueryCommandInput = {
             TableName: USER_ADDRESSES_TABLE,
             KeyConditionExpression: "userSub = :userSub",
             ExpressionAttributeValues: {
-                ":userSub": userSub,
+                ":userSub": { S: userSub },
             },
         };
 
-        const result = await dynamodb.query(params).promise();
+        const result: QueryCommandOutput = await dynamodb.send(new QueryCommand(params));
+        
+        // Unmarshall items from DynamoDB format to standard JSON
+        const addresses = (result.Items || []).map(item => unmarshall(item));
 
-        if (!result.Items || result.Items.length === 0) {
+        if (addresses.length === 0) {
             return {
                 statusCode: 404,
                 headers: CORS_HEADERS,
@@ -48,12 +55,30 @@ export const handler = async (
             headers: CORS_HEADERS,
             body: JSON.stringify({
                 message: "User addresses retrieved successfully",
-                addresses: result.Items,
-                totalCount: result.Items.length,
+                addresses: addresses,
+                totalCount: addresses.length,
             }),
         };
-    } catch (error) {
+    } catch (error: any) {
         console.error("Error retrieving user addresses:", error);
+
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    details: error.message
+                }),
+            };
+        }
+
         return {
             statusCode: 500,
             headers: CORS_HEADERS,

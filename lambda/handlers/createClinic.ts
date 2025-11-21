@@ -7,8 +7,8 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 
-// Assuming utils.ts contains definitions for validateToken and buildAddress
-import { validateToken, buildAddress } from "./utils";
+// Assuming utils.ts contains definitions for extractUserFromBearerToken and buildAddress
+import { extractUserFromBearerToken, buildAddress } from "./utils";
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -95,10 +95,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Step 1: Authentication and Authorization
-        // We cast event to 'any' here because APIGatewayProxyEvent doesn't include the Cognito claims object by default.
-        const userSub: string = await validateToken(event as any);
-        const groups: string[] = parseGroupsFromAuthorizer(event);
+        // Step 1: Authentication and Authorization - Extract access token
+        let userSub: string;
+        let groups: string[];
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+            groups = userInfo.groups || [];
+        } catch (authError: any) {
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: authError.message || "Invalid access token"
+                })
+            };
+        }
 
         if (!canCreateClinic(groups)) {
             return {

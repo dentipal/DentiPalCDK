@@ -19,8 +19,7 @@ import {
     SendEmailCommandInput 
 } from "@aws-sdk/client-ses";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-
-// ✅ ADDED THIS LINE:
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Initialization (using V3 clients) ---
@@ -30,7 +29,12 @@ const cognitoClient = new CognitoIdentityProviderClient({ region: REGION });
 const dynamodbClient = new DynamoDBClient({ region: REGION }); 
 const sesClient = new SESClient({ region: REGION }); 
 
-
+// Helper to build JSON responses with shared CORS
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
 
 // Define the expected structure for the request body
 interface RequestBody {
@@ -48,100 +52,74 @@ interface RequestBody {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
+
+    // Handle preflight CORS request
+    if (method === "OPTIONS") {
+        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    }
+
     try {
-        console.log("Received event:", JSON.stringify(event));
+        console.log("Received event path:", event.path);
 
-        // Handle preflight CORS request
-        if (event.httpMethod === "OPTIONS") {
-            // ✅ Uses imported headers
-            return {
-                statusCode: 200,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({}),
-            };
+        // 1️⃣ Verify Root User Authorization (Access Token)
+        let userGroups: string[] = [];
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userGroups = userInfo.groups || [];
+        } catch (authError: any) {
+            console.error("Authentication error:", authError.message);
+            return json(401, { 
+                error: "Unauthorized", 
+                message: authError.message || "Invalid access token" 
+            });
         }
-
-        // 1️⃣ Verify Root User Authorization
-        const claims = event.requestContext?.authorizer?.claims || {};
-        const rawGroups = claims['cognito:groups'];
         
-        // FIX: Cast as 'string | string[]' and allow the variable to hold either type.
-        // The groupsArray logic below normalizes it into a string[] anyway.
-        const userGroups = (rawGroups || []) as string | string[];
-        
-        const groupsArray = Array.isArray(userGroups) 
-            ? userGroups 
-            : String(userGroups).split(',').map(s => s.trim());
-        
-        if (!groupsArray.includes("Root")) {
-            console.warn("Unauthorized user tried to add new user:", groupsArray);
-            return {
-                statusCode: 403,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    error: "Unauthorized",
-                    message: "Only Root users can add new users",
-                    statusCode: 403,
-                    timestamp: new Date().toISOString(),
-                }),
-            };
+        // strict check for Root group
+        if (!userGroups.includes("Root")) {
+            console.warn("Unauthorized user tried to add new user. Groups:", userGroups);
+            return json(403, {
+                error: "Forbidden",
+                message: "Only Root users can add new users",
+                details: { requiredGroup: "Root", userGroups }
+            });
         }
 
         // 2️⃣ Parse the body and validate
         const body: RequestBody = JSON.parse(event.body || "{}");
         const { firstName, lastName, phoneNumber, email, password, verifyPassword, subgroup, clinicIds, sendWelcomeEmail } = body;
 
-        // Log fields for debugging
-        console.log("Parsed body:", body);
+        // Log fields for debugging (exclude password)
+        console.log("Parsed body:", { ...body, password: "***", verifyPassword: "***" });
 
         // Validate password match
         if (password !== verifyPassword) {
-            console.error("Passwords do not match");
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    error: "Bad Request",
-                    message: "Passwords do not match",
-                    field: "password",
-                    statusCode: 400,
-                    timestamp: new Date().toISOString(),
-                }),
-            };
+            return json(400, {
+                error: "Bad Request",
+                message: "Passwords do not match",
+                field: "password"
+            });
         }
 
         // Validate required fields
         if (!firstName || !lastName || !phoneNumber || !email || !password || !subgroup || !clinicIds || clinicIds.length === 0) {
-            console.error("Missing required fields:", { firstName, lastName, phoneNumber, email, password, subgroup, clinicIds });
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    error: "Bad Request",
-                    message: "Missing required fields",
-                    requiredFields: ["firstName", "lastName", "phoneNumber", "email", "password", "verifyPassword", "subgroup", "clinicIds"],
-                    statusCode: 400,
-                    timestamp: new Date().toISOString(),
-                }),
-            };
+            return json(400, {
+                error: "Bad Request",
+                message: "Missing required fields",
+                requiredFields: ["firstName", "lastName", "phoneNumber", "email", "password", "verifyPassword", "subgroup", "clinicIds"]
+            });
         }
 
         // Validate the subgroup
         const validGroups = ["ClinicAdmin", "ClinicManager", "ClinicViewer"];
         if (!validGroups.includes(subgroup)) {
-            console.error("Invalid subgroup:", subgroup);
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    error: "Bad Request",
-                    message: "Invalid subgroup",
-                    validOptions: validGroups,
-                    provided: subgroup,
-                    statusCode: 400,
-                    timestamp: new Date().toISOString(),
-                }),
-            };
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid subgroup",
+                validOptions: validGroups,
+                provided: subgroup
+            });
         }
 
         // 3️⃣ Create Cognito user (Admin Flow)
@@ -160,21 +138,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
 
         const createUserResponse = await cognitoClient.send(new AdminCreateUserCommand(adminCreateUserInput));
-        console.log("Cognito admin create user response:", createUserResponse);
-
+        
         // Get the new user's 'sub' (unique ID) from the response
         const userSub = createUserResponse.User?.Attributes?.find(
             (attr: AttributeType) => attr.Name === "sub"
         )?.Value;
 
         if (!userSub) {
-            console.error("Could not find UserSub in Cognito response:", createUserResponse);
             throw new Error("Could not find UserSub (sub) in Cognito response.");
         }
         console.log(`New user created with UserSub: ${userSub}`);
         
         // 3.1️⃣ Set the password as permanent
-        console.log(`Setting permanent password for ${email}...`);
         const setPasswordInput: AdminSetUserPasswordCommandInput = {
             UserPoolId: process.env.USER_POOL_ID,
             Username: email,
@@ -183,7 +158,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
 
         await cognitoClient.send(new AdminSetUserPasswordCommand(setPasswordInput));
-        console.log(`Permanent password set for ${email}.`);
         
         // 3.2️⃣ Add user to group
         const addToGroupInput: AdminAddUserToGroupCommandInput = {
@@ -194,10 +168,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await cognitoClient.send(new AdminAddUserToGroupCommand(addToGroupInput));
         console.log(`User ${email} added to group ${subgroup}`);
 
-        // 4️⃣ Store userSub in the clinics' associated users (using DynamoDBClient v3)
-        const CLINICS_TABLE_NAME = "DentiPal-Clinics"; 
+        // 4️⃣ Store userSub in the clinics' associated users
+        const CLINICS_TABLE_NAME = process.env.CLINICS_TABLE || "DentiPal-Clinics"; 
 
-        for (const clinicId of clinicIds) {
+        const updatePromises = clinicIds.map(clinicId => {
             const clinicUpdateParams: UpdateItemCommandInput = {
                 TableName: CLINICS_TABLE_NAME,
                 Key: { clinicId: { S: clinicId } }, 
@@ -208,41 +182,43 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 },
                 ReturnValues: "UPDATED_NEW",
             };
+            return dynamodbClient.send(new UpdateItemCommand(clinicUpdateParams));
+        });
 
-            await dynamodbClient.send(new UpdateItemCommand(clinicUpdateParams));
-            console.log(`Clinic ${clinicId} updated with new userSub: ${userSub}`);
-        }
+        await Promise.all(updatePromises);
+        console.log(`Updated ${clinicIds.length} clinics with new userSub.`);
 
         // 5️⃣ Send welcome email (optional)
         if (sendWelcomeEmail) {
             console.log(`Attempting to send welcome email to ${email}...`);
 
-            // Build both text and HTML bodies
             const subject = "Your DentiPal account details";
             const textBody =
                 `Hello ${firstName},\n\n` +
                 `Your DentiPal account has been created.\n\n` +
                 `Email: ${email}\n` +
-                `Password: ${password}\n` + // The password
+                `Password: ${password}\n` + 
                 `Role: ${subgroup}\n` +
                 (Array.isArray(clinicIds) && clinicIds.length ? `Clinics: ${clinicIds.join(", ")}\n` : "") +
                 `\nFor security, please sign in and change your password immediately.\n` +
                 `If you did not expect this email, please contact your administrator.\n`;
 
             const htmlBody =
+                `<div style="font-family: sans-serif;">` +
                 `<p>Hello ${firstName},</p>` +
                 `<p>Your DentiPal account has been created.</p>` +
                 `<ul>` +
                 `<li><b>Email:</b> ${email}</li>` +
-                `<li><b>Password:</b> ${password}</li>` + // The password
+                `<li><b>Password:</b> ${password}</li>` +
                 `<li><b>Role:</b> ${subgroup}</li>` +
                 (Array.isArray(clinicIds) && clinicIds.length ? `<li><b>Clinics:</b> ${clinicIds.join(", ")}</li>` : "") +
                 `</ul>` +
                 `<p><i>For security, please sign in and change your password immediately.</i></p>` +
-                `<p>If you did not expect this email, please contact your administrator.</p>`;
+                `<p>If you did not expect this email, please contact your administrator.</p>` +
+                `</div>`;
 
             const emailParams: SendEmailCommandInput = {
-                Source: "swarajparamata@gmail.com", // <-- IMPORTANT: This email MUST be verified in SES
+                Source: process.env.SES_FROM_EMAIL || "swarajparamata@gmail.com",
                 Destination: { ToAddresses: [email] },
                 Message: {
                     Subject: { Data: subject },
@@ -253,40 +229,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 }
             };
 
-            await sesClient.send(new SendEmailCommand(emailParams));
-            console.log(`Welcome email sent to ${email}`);
-        } else {
-            console.log("Skipping welcome email because sendWelcomeEmail flag was false or missing.");
+            try {
+                await sesClient.send(new SendEmailCommand(emailParams));
+                console.log(`Welcome email sent to ${email}`);
+            } catch (emailError) {
+                console.error("Failed to send welcome email:", emailError);
+                // Don't fail the request if email fails
+            }
         }
 
-        return {
-            statusCode: 201,
-            headers: CORS_HEADERS,
-            body: JSON.stringify({
-                status: "success",
-                statusCode: 201,
-                message: "User created successfully",
-                data: {
-                    userSub,
-                    email,
-                    firstName,
-                    lastName,
-                    subgroup,
-                    clinics: clinicIds,
-                    createdAt: new Date().toISOString(),
-                },
-            }),
-        };
+        return json(201, {
+            status: "success",
+            message: "User created successfully",
+            data: {
+                userSub,
+                email,
+                firstName,
+                lastName,
+                subgroup,
+                clinics: clinicIds,
+                createdAt: new Date().toISOString(),
+            },
+        });
 
     } catch (error) {
-        // Explicitly type the error
         const err = error as Error & { name?: string; message?: string };
         console.error("Error creating user:", err);
         
         // Handle specific Cognito errors
         let statusCode = 500;
         let errorMessage = "Internal Server Error";
-        let details: any = {};
+        let details: any = { message: err.message };
 
         if (err.name === "UsernameExistsException") {
             statusCode = 409;
@@ -296,39 +269,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             statusCode = 400;
             errorMessage = "Bad Request";
             details = { message: "Password does not meet requirements" };
-        } else if (err.name === "NotAuthorizedException") {
-            statusCode = 401;
-            errorMessage = "Unauthorized";
-            details = { message: "Invalid credentials or authentication failed" };
         } else if (err.name === "InvalidParameterException") {
             statusCode = 400;
             errorMessage = "Bad Request";
-            details = { message: err.message || "Invalid parameters provided" };
         } else if (err.name === "LimitExceededException") {
             statusCode = 429;
             errorMessage = "Too Many Requests";
-            details = { message: "Too many requests. Please try again later." };
-        } else if (err.name === "InternalErrorException" || err.name === "ServiceFailureException") {
-            statusCode = 503;
-            errorMessage = "Service Unavailable";
-            details = { message: "AWS service error. Please try again later." };
-        } else {
-            statusCode = 500;
-            errorMessage = "Internal Server Error";
-            details = { message: err.message || "An unexpected error occurred" };
         }
 
-        return {
-            statusCode,
-            headers: CORS_HEADERS,
-            body: JSON.stringify({
-                error: errorMessage,
-                statusCode,
-                details,
-                timestamp: new Date().toISOString(),
-            }),
-        };
+        return json(statusCode, {
+            error: errorMessage,
+            details,
+            timestamp: new Date().toISOString(),
+        });
     }
 };
-
-exports.handler = handler;

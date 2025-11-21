@@ -1,40 +1,33 @@
-import {
-    DynamoDBClient,
-    ScanCommand,
-    ScanCommandInput,
-    UpdateItemCommand,
-    UpdateItemCommandInput,
-    AttributeValue,
-} from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { 
+    DynamoDBDocumentClient, 
+    ScanCommand, 
+    ScanCommandInput, 
+    UpdateCommand,
+    UpdateCommandInput 
+} from "@aws-sdk/lib-dynamodb";
 import {
     CognitoIdentityProviderClient,
     AdminDeleteUserCommand,
     AdminGetUserCommand,
     ListUsersCommand,
-    ListUsersCommandOutput,
 } from "@aws-sdk/client-cognito-identity-provider";
-import {
-    APIGatewayProxyEvent,
-    APIGatewayProxyResult,
-    Context,
-} from "aws-lambda";
-// Import shared utils and headers
-import { isRoot } from "./utils";
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Initialization ---
+const REGION = process.env.REGION || "us-east-1";
+const client = new DynamoDBClient({ region: REGION });
+const ddbDoc = DynamoDBDocumentClient.from(client);
+const cognito = new CognitoIdentityProviderClient({ region: REGION });
 
-const dynamodb = new DynamoDBClient({ region: process.env.REGION });
-const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
-
-// Helper to build JSON responses with shared CORS
+// Helper
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
     headers: CORS_HEADERS,
     body: JSON.stringify(bodyObj)
 });
-
-// --- Interfaces ---
 
 interface ResolvedUser {
     username: string;
@@ -43,45 +36,31 @@ interface ResolvedUser {
 
 // --- Helper Functions ---
 
-/**
- * Extracts the user identifier (email or sub) from the API Gateway path.
- */
 function getPathId(event: APIGatewayProxyEvent): string | null {
-    // 1. Prefer pathParameters.userId
     if (event.pathParameters?.userId) {
         return event.pathParameters.userId;
     }
-
-    // 2. Handle greedy proxy: /{proxy+}
     const proxy = event.pathParameters?.proxy || "";
     if (proxy) {
         const parts = proxy.split("/").filter(Boolean);
-        // expect ["users", "{id}"]
         if (parts.length >= 2 && parts[0].toLowerCase() === "users") {
             return parts[1];
         }
     }
-
     return null;
 }
 
-/**
- * Resolves a Cognito user's username and sub given an ID.
- */
 async function resolveCognitoUser(idOrSub: string): Promise<ResolvedUser | null> {
-    // If looks like email (often used as the Username), use directly.
     if (idOrSub.includes("@")) {
-        // We can't guarantee the sub without a lookup, so we set it to null initially.
         return { username: idOrSub, sub: null };
     }
 
-    // Otherwise treat as sub -> find Username via ListUsers
     const cmd = new ListUsersCommand({
         UserPoolId: process.env.USER_POOL_ID,
         Filter: `sub = "${idOrSub}"`,
         Limit: 1,
     });
-    const out: ListUsersCommandOutput = await cognito.send(cmd);
+    const out = await cognito.send(cmd);
     const user = out?.Users?.[0];
 
     if (!user) return null;
@@ -97,40 +76,37 @@ async function resolveCognitoUser(idOrSub: string): Promise<ResolvedUser | null>
     return { username, sub };
 }
 
-/**
- * Removes a user's sub from the AssociatedUsers list/set in all clinics they belong to.
- * Rewritten for AWS SDK v3.
- */
 async function removeUserFromClinics(userSub: string): Promise<void> {
-    const tableName = "DentiPal-Clinics"; // Or process.env.CLINICS_TABLE
-    let lastEvaluatedKey: Record<string, AttributeValue> | undefined;
-    const itemsToUpdate: Record<string, AttributeValue>[] = [];
+    const tableName = process.env.CLINICS_TABLE || "DentiPal-Clinics";
+    let lastEvaluatedKey: Record<string, any> | undefined;
+    const itemsToUpdate: Record<string, any>[] = [];
 
-    // 1. Scan to find clinics where user is associated
+    // 1. Scan to find clinics
     do {
         const scanInput: ScanCommandInput = {
             TableName: tableName,
-            // Filter for items that might contain the sub.
+            // Filter for items that might contain the sub (works for List or String Set)
             FilterExpression: "contains(AssociatedUsers, :sub) OR attribute_exists(AssociatedUsers)",
-            ExpressionAttributeValues: { ":sub": { S: userSub } },
+            ExpressionAttributeValues: { ":sub": userSub },
             ExclusiveStartKey: lastEvaluatedKey,
         };
 
         const command = new ScanCommand(scanInput);
-        const response = await dynamodb.send(command);
+        const response = await ddbDoc.send(command);
 
         if (response.Items) {
             for (const item of response.Items) {
-                // Double check logic in memory because 'contains' works on string sets and lists
                 const au = item.AssociatedUsers;
                 let contains = false;
 
-                if (au?.L) {
-                    // List of Attributes
-                    contains = au.L.some(attr => attr.S === userSub);
-                } else if (au?.SS) {
-                    // String Set
-                    contains = au.SS.includes(userSub);
+                // Check Array (List) or String Set
+                if (Array.isArray(au)) {
+                    contains = au.includes(userSub);
+                } else if (au instanceof Set) {
+                    contains = au.has(userSub);
+                } else if (typeof au === 'object' && au.values) { 
+                    // Sometimes Sets come as object wrappers depending on SDK version nuances
+                    // but ddbDoc usually handles native Set/Array
                 }
 
                 if (contains) {
@@ -143,37 +119,35 @@ async function removeUserFromClinics(userSub: string): Promise<void> {
 
     // 2. Update each clinic
     await Promise.all(itemsToUpdate.map(async (clinic) => {
-        const clinicId = clinic.clinicId?.S;
+        const clinicId = clinic.clinicId;
         if (!clinicId) return;
 
         const au = clinic.AssociatedUsers;
         try {
-            if (au?.L) {
-                // Case 1: List (L) - Filter and Set
-                // SDK v3 List is array of AttributeValue objects
-                const newList = au.L.filter((attr) => attr.S !== userSub);
-                
-                const updateInput: UpdateItemCommandInput = {
+            if (Array.isArray(au)) {
+                // List: Filter and Set
+                const newList = au.filter((val: string) => val !== userSub);
+                const updateInput: UpdateCommandInput = {
                     TableName: tableName,
-                    Key: { clinicId: { S: clinicId } },
+                    Key: { clinicId: clinicId },
                     UpdateExpression: "SET AssociatedUsers = :list",
                     ExpressionAttributeValues: {
-                        ":list": { L: newList }
+                        ":list": newList
                     }
                 };
-                await dynamodb.send(new UpdateItemCommand(updateInput));
+                await ddbDoc.send(new UpdateCommand(updateInput));
 
-            } else if (au?.SS) {
-                // Case 2: String Set (SS) - Use DELETE operator
-                const updateInput: UpdateItemCommandInput = {
+            } else {
+                // Set: DELETE operator
+                const updateInput: UpdateCommandInput = {
                     TableName: tableName,
-                    Key: { clinicId: { S: clinicId } },
+                    Key: { clinicId: clinicId },
                     UpdateExpression: "DELETE AssociatedUsers :toDel",
                     ExpressionAttributeValues: {
-                        ":toDel": { SS: [userSub] }
+                        ":toDel": new Set([userSub])
                     }
                 };
-                await dynamodb.send(new UpdateItemCommand(updateInput));
+                await ddbDoc.send(new UpdateCommand(updateInput));
             }
         } catch (e) {
             console.warn(`Failed to update clinic ${clinicId} on user removal:`, e);
@@ -183,28 +157,29 @@ async function removeUserFromClinics(userSub: string): Promise<void> {
 
 // --- Main Handler ---
 
-export const handler = async (event: APIGatewayProxyEvent, context: Context): Promise<APIGatewayProxyResult> => {
-    // --- CORS preflight ---
-    // Check standard REST method or HTTP API v2 method
-    const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
-        // 1. Authorization Check (Root Group)
-        // Using shared isRoot utility from ./utils
-        const rawGroups = event.requestContext?.authorizer?.claims?.['cognito:groups'];
-        const groups = typeof rawGroups === 'string' ? rawGroups.split(',') : [];
+        // 1. Authorization Check (Root Group via Access Token)
+        let userGroups: string[] = [];
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userGroups = userInfo.groups || [];
+        } catch (authError: any) {
+            return json(401, { error: authError.message || "Invalid access token" });
+        }
         
-        if (!isRoot(groups)) {
+        if (!userGroups.includes("Root")) {
              return json(403, {
                 error: "Forbidden",
-                statusCode: 403,
                 message: "Only Root users can delete users",
-                details: { requiredGroup: "Root" },
-                timestamp: new Date().toISOString()
+                details: { requiredGroup: "Root" }
             });
         }
 
@@ -212,10 +187,8 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
         if (!idOrSub) {
             return json(400, {
                 error: "Bad Request",
-                statusCode: 400,
                 message: "User identifier is required",
-                details: { pathFormat: "/users/{email-or-sub}" },
-                timestamp: new Date().toISOString()
+                details: { pathFormat: "/users/{email-or-sub}" }
             });
         }
 
@@ -226,14 +199,11 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
         if (isSubLookup && !resolved) {
             return json(404, {
                 error: "Not Found",
-                statusCode: 404,
                 message: "User not found in Cognito",
-                details: { searchedBy: "sub", providedId: idOrSub },
-                timestamp: new Date().toISOString()
+                details: { searchedBy: "sub", providedId: idOrSub }
             });
         }
         
-        // If they passed an email, resolved.sub will be null, but we still have the username.
         const username = resolved?.username || idOrSub;
 
         // 3. Optional: Verify User Existence
@@ -248,10 +218,8 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
             if (e?.name === "UserNotFoundException") {
                 return json(404, {
                     error: "Not Found",
-                    statusCode: 404,
                     message: "User does not exist in Cognito",
-                    details: { username: username },
-                    timestamp: new Date().toISOString()
+                    details: { username: username }
                 });
             }
             throw e;
@@ -265,10 +233,10 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
             })
         );
 
-        // 5. Cleanup DynamoDB Clinics (Requires Sub)
+        // 5. Cleanup DynamoDB Clinics
         let subToRemove: string | null = resolved?.sub || null;
         
-        // If we didn't find the sub (because the caller passed an email), we do a final lookup by email.
+        // Final lookup by email if sub was not found
         if (!subToRemove) {
             try {
                 const listByEmail = await cognito.send(
@@ -292,26 +260,22 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
             console.warn(`Could not determine 'sub' for user ${idOrSub}. DynamoDB cleanup skipped.`);
         }
 
-        // 6. Success Response
+        // 6. Success
         return json(200, {
             status: "success",
-            statusCode: 200,
             message: "User deleted successfully",
             data: {
                 deletedUsername: username,
                 disassociatedFromClinics: !!subToRemove
-            },
-            timestamp: new Date().toISOString()
+            }
         });
 
     } catch (error: any) {
         console.error("Error deleting user:", error);
         return json(500, {
             error: "Internal Server Error",
-            statusCode: 500,
             message: "Failed to delete user",
-            details: { reason: error?.message },
-            timestamp: new Date().toISOString()
+            details: { reason: error?.message }
         });
     }
 };

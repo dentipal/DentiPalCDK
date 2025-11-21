@@ -7,7 +7,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
-import { validateToken } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -159,9 +159,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Authentication
-        // validateToken is assumed to return the userSub (string) and throw on failure.
-        const userSub: string = await validateToken(event as any);
+        // 1. Authentication - Extract access token
+        let userSub: string;
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+        } catch (authError: any) {
+            return json(401, { error: authError.message || "Invalid access token" });
+        }
 
         // 2. Extract Clinic ID from Path
         const path = event.path || "";

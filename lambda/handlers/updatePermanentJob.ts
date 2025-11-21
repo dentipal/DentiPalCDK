@@ -8,8 +8,8 @@ import {
     GetItemCommandOutput
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming 'validateToken' is defined in './utils' and returns the userSub string.
-import { validateToken } from "./utils"; 
+// ✅ UPDATE: Changed import to use the new token utility
+import { extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -72,8 +72,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Validate the token and get the userSub (clinic owner)
-        const userSub: string = await validateToken(event as any); 
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
 
         // Extract jobId. Support both standard path param and proxy path parsing.
         let jobId: string | undefined = event.pathParameters?.jobId;
@@ -221,13 +223,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         });
 
-    } catch (error) {
+    } catch (error: any) {
         const err = error as Error;
         console.error("Error updating permanent job:", err.message, err.stack);
         
-        const isAuthError = err.message.includes("Unauthorized") || err.message.includes("token");
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
 
-        return json(isAuthError ? 401 : 500, {
+        return json(500, {
             error: err.message || "Failed to update permanent job due to an unexpected server error."
         });
     }

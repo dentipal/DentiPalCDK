@@ -1,197 +1,138 @@
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { 
-    DynamoDBClient, 
-    GetItemCommand, 
-    DeleteItemCommand,
-    AttributeValue 
-} from "@aws-sdk/client-dynamodb";
-import { Buffer } from 'buffer'; 
-
-// ✅ ADDED THIS LINE:
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 
-// --- Type Definitions ---
-
-// Interface for the claims expected in the decoded JWT payload
-interface Claims {
-    sub: string;
-    'cognito:groups'?: string[] | string;
-    'custom:user_type'?: string;
-    [key: string]: any; // Allow for other claims
-}
-
 // --- Initialization ---
+const REGION = process.env.REGION || "us-east-1";
+const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-ClinicProfiles";
 
-// Initialize Document Client using AWS SDK v3
-const dynamodb = new DynamoDBClient({ region: process.env.REGION });
-const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE;
+// Initialize Document Client
+const client = new DynamoDBClient({ region: REGION });
+const ddbDoc = DynamoDBDocumentClient.from(client);
 
-// Helper to build JSON responses with shared CORS
+// --- Helpers ---
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
     headers: CORS_HEADERS,
     body: JSON.stringify(bodyObj)
 });
 
-// Utility function to handle Base64 URL decoding
-function b64urlToUtf8(b64url: string): string {
-    // Support URL-safe base64: pad and replace characters
-    const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
-    const b64 = (b64url + pad).replace(/-/g, '+').replace(/_/g, '/');
-    return Buffer.from(b64, "base64").toString("utf8");
-}
+const normalizeGroup = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     console.info("🗑️ Starting deleteClinicAccountHandler");
 
-    // ✅ ADDED PREFLIGHT CHECK
-    if (event.httpMethod === "OPTIONS") {
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
+
+    // 1. Handle CORS Preflight
+    if (method === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
-        // Step 1: Decode JWT token manually
-        const authHeader = event.headers?.Authorization || event.headers?.authorization;
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
-            console.error("❌ Missing or invalid Authorization header");
-            return json(401, {
-                error: "Unauthorized",
-                statusCode: 401,
-                message: "Missing or invalid Authorization header",
-                details: { reason: "Bearer token required" },
-                timestamp: new Date().toISOString()
+        // 2. Authentication (Access Token)
+        let userSub: string;
+        let userGroups: string[] = [];
+        let userType: string = "";
+
+        try {
+            const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            const userInfo = extractUserFromBearerToken(authHeader);
+            userSub = userInfo.sub;
+            userGroups = userInfo.groups || [];
+            userType = userInfo.userType || "";
+        } catch (authError: any) {
+            console.error("Auth Error:", authError.message);
+            return json(401, { 
+                error: "Unauthorized", 
+                message: authError.message || "Invalid access token" 
             });
         }
 
-        const token = authHeader.split(" ")[1];
-        const tokenParts = token.split(".");
+        // 3. Authorization Check
+        // Normalize groups for case-insensitive comparison
+        const normalizedGroups = userGroups.map(normalizeGroup);
         
-        if (tokenParts.length !== 3) {
-             console.error("❌ Invalid JWT format");
-             return json(401, {
-                error: "Unauthorized",
-                statusCode: 401,
-                message: "Invalid token format",
-                details: { expected: "Valid JWT format" },
-                timestamp: new Date().toISOString()
-            });
-        }
+        // Must be 'clinic' type, in 'clinic' group, or 'root'
+        const isClinicUser = userType.toLowerCase() === "clinic" || normalizedGroups.some(g => g.includes("clinic"));
+        const isRootUser = normalizedGroups.includes("root");
 
-        const payload = tokenParts[1];
-        // Decode the payload using the utility function
-        const decodedClaims: Claims = JSON.parse(b64urlToUtf8(payload));
-
-        const userSub = decodedClaims.sub;
-        // Ensure groups is an array of lowercase strings
-        let groups: string[] = [];
-        const rawGroups = decodedClaims["cognito:groups"] || [];
-        if (Array.isArray(rawGroups)) {
-            groups = rawGroups.map((g: string) => g.toLowerCase());
-        } else if (typeof rawGroups === 'string') {
-            groups = rawGroups.split(',').map(g => g.trim().toLowerCase());
-        }
-
-        const userType = (decodedClaims["custom:user_type"] || "professional").toLowerCase();
-
-        console.info("📦 Decoded claims:", decodedClaims);
-
-        if (!userSub) {
-            return json(401, {
-                error: "Unauthorized",
-                statusCode: 401,
-                message: "User identification missing",
-                details: { reason: "No userSub in token" },
-                timestamp: new Date().toISOString()
-            });
-        }
-
-        // Authorization check: Must be a clinic user (either via userType or group) OR a root user.
-        const isClinicUser = userType === "clinic" || groups.includes("clinic");
-        const isRootUser = groups.includes("root");
-        
         if (!isClinicUser && !isRootUser) {
-            console.warn(`❌ User ${userSub} denied access. Type: ${userType}, Groups: ${groups.join(', ')}`);
+            console.warn(`❌ User ${userSub} denied access. Type: ${userType}, Groups: ${userGroups.join(', ')}`);
             return json(403, {
                 error: "Forbidden",
-                statusCode: 403,
                 message: "Access denied",
-                details: { requiredUserTypes: ["clinic", "root"] },
-                timestamp: new Date().toISOString()
+                details: { requiredUserTypes: ["clinic", "root"] }
             });
         }
 
-        // Step 2: Extract clinicId from URL path (assuming /path/to/clinicId)
-        const pathParts = event.path?.split("/") || [];
-        const clinicId = pathParts[pathParts.length - 1];
+        // 4. Extract clinicId
+        const pathParts = event.path?.split("/").filter(Boolean) || [];
+        // Robustly find the ID: usually the last segment or the one after 'clinic-profiles'
+        const clinicId = event.pathParameters?.clinicId || pathParts[pathParts.length - 1];
 
-        if (!clinicId || clinicId === 'clinic') { // Basic check for potentially incomplete path
+        if (!clinicId || clinicId === 'clinic' || clinicId === 'profile') {
             return json(400, {
                 error: "Bad Request",
-                statusCode: 400,
-                message: "Clinic ID is required",
-                details: { pathFormat: "/clinic-profiles/{clinicId}" },
-                timestamp: new Date().toISOString()
+                message: "Clinic ID is required in path",
+                details: { pathFormat: "/clinic-profiles/{clinicId}" }
             });
         }
 
         console.info("📌 Deleting clinicId:", clinicId, "| userSub:", userSub);
 
-        // Step 3: Check existence (Standard Client GetItemCommand)
-        const getParams = {
+        // 5. Check Existence
+        // Use GetCommand (Document Client) - no { S: ... } needed
+        const getCommand = new GetCommand({
             TableName: CLINIC_PROFILES_TABLE,
-            // FIX: Use explicit AttributeValue syntax { S: value }
             Key: { 
-                clinicId: { S: clinicId }, 
-                userSub: { S: userSub } 
-            },
-        };
+                clinicId: clinicId, 
+                userSub: userSub 
+            }
+        });
 
-        const existing = await dynamodb.send(new GetItemCommand(getParams));
+        const existing = await ddbDoc.send(getCommand);
 
         if (!existing.Item) {
             return json(404, {
                 error: "Not Found",
-                statusCode: 404,
                 message: "Clinic profile not found",
-                details: { clinicId: clinicId },
-                timestamp: new Date().toISOString()
+                details: { clinicId }
             });
         }
 
-        // Step 4: Delete profile (Standard Client DeleteItemCommand)
-        const deleteParams = {
+        // 6. Delete Profile
+        const deleteCommand = new DeleteCommand({
             TableName: CLINIC_PROFILES_TABLE,
-            // FIX: Use explicit AttributeValue syntax { S: value }
             Key: { 
-                clinicId: { S: clinicId }, 
-                userSub: { S: userSub } 
-            },
-        };
+                clinicId: clinicId, 
+                userSub: userSub 
+            }
+        });
 
-        await dynamodb.send(new DeleteItemCommand(deleteParams));
+        await ddbDoc.send(deleteCommand);
         console.info(`✅ Clinic account deleted for clinicId: ${clinicId}, userSub: ${userSub}`);
 
         return json(200, {
             status: "success",
-            statusCode: 200,
             message: "Clinic profile deleted successfully",
             data: {
-                clinicId: clinicId,
+                clinicId,
                 deletedAt: new Date().toISOString()
-            },
-            timestamp: new Date().toISOString()
+            }
         });
+
     } catch (error) {
         const err = error as Error;
         console.error("🔥 Error deleting clinic account:", err);
         return json(500, {
             error: "Internal Server Error",
-            statusCode: 500,
             message: "Failed to delete clinic profile",
-            details: { reason: err.message },
-            timestamp: new Date().toISOString()
+            details: { reason: err.message }
         });
     }
 };

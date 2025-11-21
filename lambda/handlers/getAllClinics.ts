@@ -6,14 +6,11 @@ import {
     ScanCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming the utility file exports the necessary functions and types
-import { validateToken, isRoot } from "./utils"; 
-
-// ✅ ADDED THIS LINE:
+import { extractUserFromBearerToken, isRoot } from "./utils"; 
 import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
-const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
+const dynamoClient = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
 
 // --- Type Definitions ---
 
@@ -46,8 +43,6 @@ interface DynamoDBClinicItem {
     [key: string]: AttributeValue | undefined;
 }
 
-
-
 /**
  * AWS Lambda handler to retrieve a list of clinics based on user permissions and filters.
  * @param event The API Gateway event object.
@@ -55,24 +50,25 @@ interface DynamoDBClinicItem {
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     // ✅ ADDED PREFLIGHT CHECK
-    // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
-    const method = event.httpMethod || (event.requestContext as any)?.http?.method;
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
     if (method === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
     try {
-        // 1. Validate token and retrieve user information
-        // validateToken is assumed to return the userSub (string) and throw on failure.
-        // Added 'await' and 'as any' cast to match patterns in other files
-        const userSub: string = await validateToken(event as any);
+        // --- ✅ STEP 1: Validate Access Token ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
         
-        // Get user groups from authorizer claims (assuming groups is a comma-separated string)
-        const groupsRaw = (event.requestContext.authorizer?.claims as any)?.['cognito:groups'];
-        const groups: string[] = (typeof groupsRaw === 'string' ? groupsRaw.split(',') : [])
-            .map(s => s.trim())
-            .filter(Boolean);
+        // This validates the token format, decodes it, and normalizes the claims
+        const userInfo = extractUserFromBearerToken(authHeader);
+        
+        const userSub = userInfo.sub;
+        const groups = userInfo.groups || [];
             
+        console.log(`Authenticated User: ${userSub}, Groups: ${JSON.stringify(groups)}`);
+
+        // --- End Auth Step ---
+
         const queryParams = event.queryStringParameters || {};
 
         const limit: number = queryParams.limit ? parseInt(queryParams.limit, 10) : 50;
@@ -140,12 +136,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!response.Items || response.Items.length === 0) {
             return {
                 statusCode: 200,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: CORS_HEADERS,
                 body: JSON.stringify({
                     status: "success",
-                    clinics: [],
-                    totalCount: 0,
-                    message: "No clinics found"
+                    statusCode: 200,
+                    message: "No clinics found",
+                    data: {
+                        clinics: [],
+                        totalCount: 0,
+                        filters: {
+                            state: state || null,
+                            city: city || null,
+                            name: name || null,
+                            limit
+                        }
+                    },
+                    timestamp: new Date().toISOString()
                 })
             };
         }
@@ -211,6 +217,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     } catch (error: any) {
         console.error("❌ Error retrieving clinics:", error);
+        
+        // Check if it's an auth error to return 401
+        if (error.message === "Authorization header missing" || error.message === "Invalid access token format") {
+             return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    statusCode: 401,
+                    message: error.message
+                })
+            };
+        }
+
         return {
             statusCode: 500,
             headers: CORS_HEADERS,

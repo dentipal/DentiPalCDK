@@ -3,6 +3,8 @@ import { DynamoDBDocumentClient, GetCommand, UpdateCommand, UpdateCommandInput }
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { CORS_HEADERS } from "./corsHeaders";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -86,17 +88,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Auth check: Get userSub from the authorizer
-        const userSub: string | undefined = event.requestContext.authorizer?.claims?.sub;
-        if (!userSub) {
-            return json(401, {
-                error: "Unauthorized",
-                statusCode: 401,
-                message: "Missing user identity",
-                details: { reason: "User authentication required" },
-                timestamp: new Date().toISOString()
-            });
-        }
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
 
         // Extract job ID from path parameters
         const jobId: string | undefined = event.pathParameters?.jobId;
@@ -338,13 +333,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             timestamp: new Date().toISOString()
         });
     }
-    catch (error) {
+    catch (error: any) {
         console.error('Error updating job posting:', error);
+        
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
+
         return json(500, {
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to update job",
-            details: { reason: (error as Error).message },
+            details: { reason: error.message },
             timestamp: new Date().toISOString()
         });
     }

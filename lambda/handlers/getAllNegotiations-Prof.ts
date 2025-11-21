@@ -9,18 +9,12 @@ import {
     ScanCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming the utility file exports the necessary functions and types
-import { validateToken } from "./utils";
-
-// ✅ ADDED THIS LINE:
+// ✅ UPDATE: Changed import to use the new token utility
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
-
-
-
-
 
 // ---------- Type Definitions ----------
 
@@ -251,7 +245,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     try {
         // Preflight
         if (event.httpMethod === "OPTIONS") {
-            // ✅ Uses imported headers
             return { statusCode: 200, headers: CORS_HEADERS, body: "" };
         }
 
@@ -263,12 +256,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobId = str(qs.jobId);
         const professionalUserSubParam = str(qs.professionalUserSub);
 
-        // Try to identify caller (professional) for default listing
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
         let professionalUserSub: string | null = null;
+        
+        // Extract user sub from token. We wrap in try/catch since this logic was partially 
+        // optional or used 'try identify caller' pattern in the original code.
+        // If strict auth is required, remove the catch block.
         try {
-            professionalUserSub = await validateToken(event);
+             const userInfo = extractUserFromBearerToken(authHeader);
+             professionalUserSub = userInfo.sub;
         } catch (_) {
-            professionalUserSub = null;
+             // Token might be missing or invalid. Logic below handles missing professionalUserSub.
+             professionalUserSub = null;
         }
 
         // ---- Mode A: by applicationId (single, latest) ----
@@ -277,14 +277,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (!raw) {
                 return {
                     statusCode: 404,
-                    headers: CORS_HEADERS, // ✅ Uses imported headers
+                    headers: CORS_HEADERS,
                     body: JSON.stringify({ error: "No negotiations found for this applicationId" }),
                 };
             }
             const item = await enrichWithClinicAndJob(raw);
             return {
                 statusCode: 200,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: CORS_HEADERS,
                 body: JSON.stringify({ item }),
             };
         }
@@ -295,7 +295,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (!raw) {
                 return {
                     statusCode: 404,
-                    headers: CORS_HEADERS, // ✅ Uses imported headers
+                    headers: CORS_HEADERS,
                     body: JSON.stringify({
                         error: "No negotiation found for the given jobId and professionalUserSub",
                     }),
@@ -304,17 +304,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const item = await enrichWithClinicAndJob(raw);
             return {
                 statusCode: 200,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: CORS_HEADERS,
                 body: JSON.stringify({ item }),
             };
         }
 
         // ---- Mode C: default list for authenticated professional ----
         if (!professionalUserSub) {
+            // If we reached here, we need an authenticated user to fetch their specific negotiations
             return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
-                body: JSON.stringify({ error: "Missing authenticated user" }),
+                statusCode: 401, // Changed from 400 to 401 for auth missing
+                headers: CORS_HEADERS,
+                body: JSON.stringify({ error: "Unauthorized: Missing or invalid access token" }),
             };
         }
 
@@ -330,7 +331,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 message: "Negotiations retrieved successfully",
                 negotiations,
@@ -340,9 +341,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
     } catch (error: any) {
         console.error("Error fetching negotiations:", error);
+        
+        // ✅ Check for Auth errors and return 401 (if they bubble up)
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Unauthorized",
+                    details: error.message
+                }),
+            };
+        }
+
         return {
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 error: "Failed to retrieve negotiations",
                 details: error.message,

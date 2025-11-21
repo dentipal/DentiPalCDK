@@ -6,7 +6,7 @@ import {
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -132,7 +132,8 @@ export const handler = async (
     }
 
     // Validate caller token (clinic/user)
-    await validateToken(event);
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    extractUserFromBearerToken(authHeader);
 
     // Extract userSub for proxy route
     const professionalUserSub = getUserSubFromEvent(event);

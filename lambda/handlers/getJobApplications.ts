@@ -7,7 +7,7 @@ import {
   QueryCommand,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 export const dynamodb = new DynamoDBClient({
   region: process.env.REGION,
@@ -83,7 +83,14 @@ export const handler = async (event: any) => {
       return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
 
-    const userSub = await validateToken(event);
+    let userSub: string;
+    try {
+      const authHeader = event.headers?.Authorization || event.headers?.authorization;
+      const userInfo = extractUserFromBearerToken(authHeader);
+      userSub = userInfo.sub;
+    } catch (authError: any) {
+      return { statusCode: 401, headers: CORS_HEADERS, body: JSON.stringify({ error: authError.message || "Invalid access token" }) };
+    }
     const queryParams = event.queryStringParameters || {};
 
     const status = queryParams.status;

@@ -8,7 +8,8 @@ import {
   APIGatewayProxyEvent,
   APIGatewayProxyResult
 } from "aws-lambda";
-import { validateToken } from "./utils";
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -30,51 +31,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 
 // --- Type Definitions ---
 
-interface CognitoClaims {
-  "cognito:groups"?: string | string[];
-  "cognito:Groups"?: string | string[];
-  [key: string]: any;
-}
-
 /* ------------------------------------------------------------------------- */
-/**
- * Robustly parses user groups from the Cognito Authorizer claims in the event.
- * Handles string, array, and JSON string representations.
- */
-function parseGroupsFromAuthorizer(event: APIGatewayProxyEvent): string[] {
-  // FIX: Cast requestContext to 'any' to avoid type errors if the definition is strict
-  const claims: CognitoClaims = (event.requestContext as any)?.authorizer?.claims || {};
-  let raw: string | string[] = claims["cognito:groups"] ?? claims["cognito:Groups"] ?? "";
-
-  if (Array.isArray(raw)) return raw;
-
-  if (typeof raw === "string") {
-    const val = raw.trim();
-    if (!val) return [];
-
-    // Attempt to parse as JSON array
-    if (val.startsWith("[") && val.endsWith("]")) {
-      try {
-        const arr = JSON.parse(val);
-        if (Array.isArray(arr)) {
-          // Filter out any non-string elements just in case
-          return arr.filter((item): item is string => typeof item === 'string');
-        }
-      } catch (e) {
-        // If JSON.parse fails, fall through to comma-separated logic
-        console.warn("Failed to parse groups as JSON array:", e);
-      }
-    }
-
-    // Fallback to comma-separated string logic
-    return val.split(",")
-      .map(s => s.trim())
-      .filter(Boolean);
-  }
-
-  return [];
-}
-
 /** Converts a group name to a normalized, lowercase, alphanumeric string. */
 const normalize = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, "");
 /* ------------------------------------------------------------------------- */
@@ -90,7 +47,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   }
 
   try {
-    // 1. Extract and Validate Path Parameters (clinicId and jobId)
+    // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    const userInfo = extractUserFromBearerToken(authHeader);
+    
+    const groups = userInfo.groups || [];
+    const normalizedGroups: string[] = groups.map(normalize);
+
+    const isAllowed: boolean = normalizedGroups.some(g => ALLOWED_GROUPS.has(g));
+
+    if (!isAllowed) {
+      return json(403, {
+        error: "Access denied: insufficient permissions to reject applications. Requires one of: root, clinicadmin, clinicmanager."
+      });
+    }
+
+    // 2. Extract and Validate Path Parameters (clinicId and jobId)
     // Support both direct path parameters and proxy path
     // /<clinicId>/reject/<jobId>
     let clinicId = event.pathParameters?.clinicId;
@@ -112,23 +84,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
-    // 2. Validate Token (Authentication)
-    // Assume validateToken throws an error on failure, which is caught below
-    await validateToken(event as any);
-
-    // 3. Group Authorization
-    const rawGroups: string[] = parseGroupsFromAuthorizer(event);
-    const normalizedGroups: string[] = rawGroups.map(normalize);
-
-    const isAllowed: boolean = normalizedGroups.some(g => ALLOWED_GROUPS.has(g));
-
-    if (!isAllowed) {
-      return json(403, {
-        error: "Access denied: insufficient permissions to reject applications. Requires one of: root, clinicadmin, clinicmanager."
-      });
-    }
-
-    // 4. Extract and Validate Body Parameter (professionalUserSub)
+    // 3. Extract and Validate Body Parameter (professionalUserSub)
     const body: { professionalUserSub?: string } = JSON.parse(event.body || "{}");
     const professionalUserSub: string | undefined = body.professionalUserSub;
 
@@ -138,7 +94,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
-    // 5. Update DynamoDB
+    // 4. Update DynamoDB
     const updateParams: UpdateItemCommandInput = {
       TableName: "DentiPal-JobApplications", // Assuming table name is constant, consider using process.env.JOB_APPLICATIONS_TABLE
       Key: {
@@ -156,7 +112,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     console.log(`Application for job ${jobId} by professional ${professionalUserSub} rejected successfully.`);
 
-    // 6. Success Response
+    // 5. Success Response
     return json(200, {
       message: `Job application for job ${jobId} by professional ${professionalUserSub} has been rejected successfully`
     });
@@ -164,7 +120,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   } catch (error: any) {
     console.error("❌ Error rejecting job application:", error);
 
-    // 7. Error Response
+    // ✅ Check for Auth errors and return 401
+    if (error.message === "Authorization header missing" || 
+        error.message?.startsWith("Invalid authorization header") ||
+        error.message === "Invalid access token format" ||
+        error.message === "Failed to decode access token" ||
+        error.message === "User sub not found in token claims") {
+        
+        return json(401, {
+            error: "Unauthorized",
+            details: error.message
+        });
+    }
+
+    // 6. Error Response
     return json(500, {
       error: "Failed to reject job application. Please try again.",
       details: error.message || "An unknown error occurred"

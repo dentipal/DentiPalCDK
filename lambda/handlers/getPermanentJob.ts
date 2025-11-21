@@ -9,7 +9,7 @@ import {
   GetItemCommandInput,
 } from "@aws-sdk/client-dynamodb";
 
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -34,7 +34,10 @@ export const handler = async (
   }
 
   try {
-    const userSub = await validateToken(event);
+    // Extract Bearer token from Authorization header
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    const userInfo = extractUserFromBearerToken(authHeader);
+    const userSub = userInfo.sub;
 
     const pathParts = event.pathParameters?.proxy?.split("/");
     const jobId = pathParts?.[2];

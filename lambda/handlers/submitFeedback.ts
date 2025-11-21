@@ -4,11 +4,10 @@ import * as crypto from "crypto";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers and utils
 import { CORS_HEADERS } from "./corsHeaders";
-import { validateToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 
 // --- Type Definitions ---
 
-/** Interface for the result of a token validation (full claims object) */
 interface ValidateTokenResult {
   sub?: string;
   email?: string;
@@ -75,25 +74,23 @@ function escapeHtmlMultiline(str: string = ""): string {
   return escapeHtml(str).replace(/\n/g, "<br/>");
 }
 
-/** Robustly extract full claims (validateToken, API Gateway authorizer, or decode Bearer payload) */
 async function extractClaims(event: APIGatewayProxyEvent): Promise<Claims | undefined> {
-  // 1. Try validateToken (Async)
   try {
-    // validateToken typically returns a string (sub) in this project's utils.
-    // If it matches, we create a basic Claims object.
-    const sub = await validateToken(event);
-    if (sub) {
-        // If we have a sub, we can try to enrich it with authorizer claims if available
-        // otherwise just return the sub
-        const claims: Claims = { sub };
-        // Merge with authorizer claims if present to get email/address
-        const authz = event?.requestContext?.authorizer;
-        const existingClaims = (authz?.jwt?.claims || authz?.claims) as Claims;
-        return { ...existingClaims, ...claims };
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    if (authHeader) {
+        // If token is valid, this returns decoded claims
+        const userInfo = extractUserFromBearerToken(authHeader);
+        if (userInfo && userInfo.sub) {
+            // Convert UserInfo to Claims shape if necessary, essentially just merging
+            // We can try to merge with authorizer claims if present to get email/address
+            const authz = event?.requestContext?.authorizer;
+            const existingClaims = (authz?.jwt?.claims || authz?.claims) as Claims;
+            return { ...existingClaims, sub: userInfo.sub, email: userInfo.email, "cognito:groups": userInfo.groups };
+        }
     }
   } catch { 
-    // validateToken throws if invalid/missing, but feedback can be anonymous.
-    // We proceed to check other sources.
+    // Token might be missing or invalid, but feedback can be anonymous.
+    // We proceed to check other sources (authorizer context).
   }
 
   // 2. Check Request Context (Authorizer)
@@ -101,21 +98,6 @@ async function extractClaims(event: APIGatewayProxyEvent): Promise<Claims | unde
   if (authz?.jwt?.claims) return authz.jwt.claims as Claims;  // HTTP API v2
   if (authz?.claims) return authz.claims as Claims;      // REST API v1 (Cognito authorizer)
 
-  // 3. Manual Decode (Fallback)
-  const hdr = event?.headers?.authorization || event?.headers?.Authorization;
-  if (hdr && /^Bearer\s+/.test(hdr)) {
-    try {
-      const token = hdr.split(/\s+/)[1];
-      // Decode base64url payload
-      const payload = token.split(".")[1];
-      if (payload) {
-        // Ensure padding is correct for base64url to base64 conversion for Buffer
-        const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-        const json = JSON.parse(Buffer.from(base64, "base64").toString("utf8"));
-        return json as Claims;
-      }
-    } catch { /* optional */ }
-  }
   return undefined;
 }
 

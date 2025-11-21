@@ -1,19 +1,29 @@
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import {
-    DynamoDBClient,
-    PutItemCommand,
-    GetItemCommand,
-    AttributeValue,
-    GetItemCommandOutput
-} from "@aws-sdk/client-dynamodb";
 import { v4 as uuidv4 } from "uuid";
-import { validateToken } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils"; 
 import { VALID_ROLE_VALUES } from "./professionalRoles";
-
-// ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
 
-// --- Type Definitions ---
+// --- 1. Configuration ---
+const REGION = process.env.REGION || "us-east-1";
+const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
+const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-ClinicProfiles";
+const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
+
+// Initialize V3 Client and Document Client (Abstracts Marshalling)
+const client = new DynamoDBClient({ region: REGION });
+const ddbDoc = DynamoDBDocumentClient.from(client);
+
+// --- 2. Helpers ---
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(bodyObj)
+});
+
+// --- 3. Type Definitions ---
 
 // 1. Base Job Interface (Common Fields)
 interface BaseJobData {
@@ -83,11 +93,7 @@ interface ClinicProfileDetails {
     primaryPracticeArea: string;
 }
 
-// --- Initialization ---
-
-const dynamodb = new DynamoDBClient({ region: process.env.REGION });
-
-// --- Validation Functions ---
+// --- 4. Validation Functions ---
 
 const validateTemporaryJob = (jobData: TemporaryJobData): string | null => {
     if (!jobData.date || !jobData.hours || !jobData.hourly_rate) {
@@ -149,54 +155,42 @@ const validatePermanentJob = (jobData: PermanentJobData): string | null => {
     return null;
 };
 
-// --- Lambda Handler ---
+// --- 5. Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    // ✅ ADDED PREFLIGHT CHECK
-    if (event.httpMethod === "OPTIONS") {
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
+
+    // 1. Handle CORS Preflight
+    if (method === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
     }
 
     try {
-        // 1. Authorization and Parsing
-        const userSub: string = await validateToken(event); 
+        // 2. Authentication (Access Token)
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
+        const userSub = userInfo.sub;
+        
+        // 3. Parse Body
         const jobData: JobData = JSON.parse(event.body || '{}');
 
-        // 2. Validate common required fields
+        // 4. Validate common required fields
         if (!jobData.job_type || !jobData.professional_role || !jobData.shift_speciality || !jobData.clinicId) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({
-                    error: "Required fields: clinicId, job_type, professional_role, shift_speciality"
-                })
-            };
+            return json(400, { error: "Required fields: clinicId, job_type, professional_role, shift_speciality" });
         }
 
         // Validate job type
         const validJobTypes = ['temporary', 'multi_day_consulting', 'permanent'];
         if (!validJobTypes.includes(jobData.job_type)) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({
-                    error: `Invalid job_type. Valid options: ${validJobTypes.join(', ')}`
-                })
-            };
+            return json(400, { error: `Invalid job_type. Valid options: ${validJobTypes.join(', ')}` });
         }
 
         // Validate professional role
         if (!VALID_ROLE_VALUES.includes(jobData.professional_role)) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({
-                    error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES.join(', ')}`
-                })
-            };
+            return json(400, { error: `Invalid professional_role. Valid options: ${VALID_ROLE_VALUES.join(', ')}` });
         }
 
-        // 3. Job type specific validation
+        // 5. Job type specific validation
         let validationError: string | null = null;
         switch (jobData.job_type) {
             case 'temporary':
@@ -211,113 +205,93 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (validationError) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({ error: validationError })
-            };
+            return json(400, { error: validationError });
         }
 
         const jobId = uuidv4();
         const timestamp = new Date().toISOString();
 
-        // 4. Fetch clinic address details from CLINICS_TABLE
-        const clinicCommand = new GetItemCommand({
-            TableName: process.env.CLINICS_TABLE,
-            Key: {
-                clinicId: { S: jobData.clinicId }
-            }
-        });
+        // 6. Fetch clinic address details
+        const clinicRes = await ddbDoc.send(new GetCommand({
+            TableName: CLINICS_TABLE,
+            Key: { clinicId: jobData.clinicId }
+        }));
 
-        const clinicResponse: GetItemCommandOutput = await dynamodb.send(clinicCommand);
-        if (!clinicResponse.Item) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({ error: `Clinic not found with ID: ${jobData.clinicId}` })
-            };
+        const cItem = clinicRes.Item;
+        if (!cItem) {
+            return json(400, { error: `Clinic not found with ID: ${jobData.clinicId}` });
         }
 
-        const cItem = clinicResponse.Item;
-
-        // Ensure all required address fields exist before accessing .S
-        if (!cItem.addressLine1?.S || !cItem.city?.S || !cItem.state?.S || !cItem.pincode?.S) {
+        // Ensure all required address fields exist
+        if (!cItem.addressLine1 || !cItem.city || !cItem.state || !cItem.pincode) {
              console.error("[DB_ERROR] Clinic item is missing required address fields.", cItem);
-             return {
-                statusCode: 500,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({ error: "Clinic data is incomplete in the database." })
-            };
+             return json(500, { error: "Clinic data is incomplete in the database." });
         }
 
         const clinicAddress: ClinicAddress = {
-            addressLine1: cItem.addressLine1.S,
-            addressLine2: cItem.addressLine2?.S ?? "", // Use nullish coalescing to ensure string
-            addressLine3: cItem.addressLine3?.S ?? "", // Use nullish coalescing to ensure string
-            fullAddress: `${cItem.addressLine1.S} ${cItem.addressLine2?.S || ''} ${cItem.addressLine3?.S || ''}`.trim(),
-            city: cItem.city.S,
-            state: cItem.state.S,
-            pincode: cItem.pincode.S
+            addressLine1: cItem.addressLine1,
+            addressLine2: cItem.addressLine2 ?? "", 
+            addressLine3: cItem.addressLine3 ?? "", 
+            fullAddress: `${cItem.addressLine1} ${cItem.addressLine2 || ''} ${cItem.addressLine3 || ''}`.trim(),
+            city: cItem.city,
+            state: cItem.state,
+            pincode: cItem.pincode
         };
 
-        // 5. Fetch profile details from the CLINIC_PROFILES_TABLE
-        const profileCommand = new GetItemCommand({
-            TableName: process.env.CLINIC_PROFILES_TABLE,
+        // 7. Fetch profile details
+        // Note: We use composite key clinicId + userSub (owner's sub) to find the profile
+        const profileRes = await ddbDoc.send(new GetCommand({
+            TableName: CLINIC_PROFILES_TABLE,
             Key: {
-                clinicId: { S: jobData.clinicId },
-                userSub: { S: userSub }
+                clinicId: jobData.clinicId,
+                userSub: userSub 
             }
-        });
+        }));
 
-        const profileResponse: GetItemCommandOutput = await dynamodb.send(profileCommand);
-        if (!profileResponse.Item) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Added CORS
-                body: JSON.stringify({ error: "Profile not found for this clinic user. Please complete your clinic profile first." })
-            };
+        const clinicProfile = profileRes.Item;
+        if (!clinicProfile) {
+            return json(400, { error: "Profile not found for this clinic user. Please complete your clinic profile first." });
         }
 
-        const clinicProfile = profileResponse.Item;
         const profileDetails: ClinicProfileDetails = {
-            bookingOutPeriod: clinicProfile.booking_out_period?.S || "immediate",
-            clinicSoftware: clinicProfile.clinic_software?.S || "Unknown",
-            freeParkingAvailable: clinicProfile.free_parking_available?.BOOL || false,
-            parkingType: clinicProfile.parking_type?.S || "N/A",
-            practiceType: clinicProfile.practice_type?.S || "General",
-            primaryPracticeArea: clinicProfile.primary_practice_area?.S || "General Dentistry"
+            bookingOutPeriod: clinicProfile.booking_out_period || "immediate",
+            clinicSoftware: clinicProfile.clinic_software || "Unknown",
+            freeParkingAvailable: clinicProfile.free_parking_available ?? false,
+            parkingType: clinicProfile.parking_type || "N/A",
+            practiceType: clinicProfile.practice_type || "General",
+            primaryPracticeArea: clinicProfile.primary_practice_area || "General Dentistry"
         };
 
-        // 6. Build base DynamoDB item using standard Record<string, AttributeValue>
-        const item: Record<string, AttributeValue> = {
-            clinicUserSub: { S: userSub },
-            jobId: { S: jobId },
-            clinicId: { S: jobData.clinicId },
-            job_type: { S: jobData.job_type },
-            professional_role: { S: jobData.professional_role },
-            shift_speciality: { S: jobData.shift_speciality },
-            assisted_hygiene: { BOOL: jobData.assisted_hygiene ?? false },
-            status: { S: jobData.status || 'active' },
-            createdAt: { S: timestamp },
-            updatedAt: { S: timestamp },
-            // Address details - explicitly safe because we initialized them above
-            addressLine1: { S: clinicAddress.addressLine1 },
-            addressLine2: { S: clinicAddress.addressLine2 },
-            addressLine3: { S: clinicAddress.addressLine3 },
-            fullAddress: { S: clinicAddress.fullAddress },
-            city: { S: clinicAddress.city },
-            state: { S: clinicAddress.state },
-            pincode: { S: clinicAddress.pincode },
+        // 8. Build DynamoDB item (using plain Objects, DocumentClient handles marshalling)
+        const item: Record<string, any> = {
+            clinicUserSub: userSub,
+            jobId: jobId,
+            clinicId: jobData.clinicId,
+            job_type: jobData.job_type,
+            professional_role: jobData.professional_role,
+            shift_speciality: jobData.shift_speciality,
+            assisted_hygiene: jobData.assisted_hygiene ?? false,
+            status: jobData.status || 'active',
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            // Address details
+            addressLine1: clinicAddress.addressLine1,
+            addressLine2: clinicAddress.addressLine2,
+            addressLine3: clinicAddress.addressLine3,
+            fullAddress: clinicAddress.fullAddress,
+            city: clinicAddress.city,
+            state: clinicAddress.state,
+            pincode: clinicAddress.pincode,
             // Profile details
-            bookingOutPeriod: { S: profileDetails.bookingOutPeriod },
-            clinicSoftware: { S: profileDetails.clinicSoftware },
-            freeParkingAvailable: { BOOL: profileDetails.freeParkingAvailable },
-            parkingType: { S: profileDetails.parkingType },
-            practiceType: { S: profileDetails.practiceType },
-            primaryPracticeArea: { S: profileDetails.primaryPracticeArea }
+            bookingOutPeriod: profileDetails.bookingOutPeriod,
+            clinicSoftware: profileDetails.clinicSoftware,
+            freeParkingAvailable: profileDetails.freeParkingAvailable,
+            parkingType: profileDetails.parkingType,
+            practiceType: profileDetails.practiceType,
+            primaryPracticeArea: profileDetails.primaryPracticeArea
         };
 
-        // 7. Add job type specific fields and build response data
+        // 9. Add job type specific fields
         let responseData: Record<string, any> = {
             message: "Job posting created successfully",
             jobId,
@@ -328,16 +302,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         switch (jobData.job_type) {
             case 'temporary':
                 const tempJob = jobData as TemporaryJobData;
-                item.date = { S: tempJob.date };
-                item.hours = { N: tempJob.hours.toString() };
-                item.meal_break = { BOOL: tempJob.meal_break ?? false };
-                item.hourly_rate = { N: tempJob.hourly_rate.toString() };
-                if (tempJob.start_time) item.start_time = { S: tempJob.start_time };
-                if (tempJob.end_time) item.end_time = { S: tempJob.end_time };
-                if (tempJob.job_title) item.job_title = { S: tempJob.job_title };
-                if (tempJob.job_description) item.job_description = { S: tempJob.job_description };
+                item.date = tempJob.date;
+                item.hours = tempJob.hours;
+                item.meal_break = tempJob.meal_break ?? false;
+                item.hourly_rate = tempJob.hourly_rate;
+                if (tempJob.start_time) item.start_time = tempJob.start_time;
+                if (tempJob.end_time) item.end_time = tempJob.end_time;
+                if (tempJob.job_title) item.job_title = tempJob.job_title;
+                if (tempJob.job_description) item.job_description = tempJob.job_description;
                 if (tempJob.requirements && tempJob.requirements.length > 0) {
-                    item.requirements = { SS: tempJob.requirements };
+                    item.requirements = new Set(tempJob.requirements); // DocumentClient prefers Sets for SS
                 }
                 responseData = {
                     ...responseData,
@@ -349,18 +323,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
             case 'multi_day_consulting':
                 const consultingJob = jobData as MultiDayConsultingJobData;
-                item.dates = { SS: consultingJob.dates };
-                item.hours_per_day = { N: consultingJob.hours_per_day.toString() };
-                item.total_days = { N: consultingJob.total_days.toString() };
-                item.meal_break = { BOOL: consultingJob.meal_break ?? false };
-                item.hourly_rate = { N: consultingJob.hourly_rate.toString() };
-                if (consultingJob.start_time) item.start_time = { S: consultingJob.start_time };
-                if (consultingJob.end_time) item.end_time = { S: consultingJob.end_time };
-                if (consultingJob.project_duration) item.project_duration = { S: consultingJob.project_duration };
-                if (consultingJob.job_title) item.job_title = { S: consultingJob.job_title };
-                if (consultingJob.job_description) item.job_description = { S: consultingJob.job_description };
+                item.dates = new Set(consultingJob.dates);
+                item.hours_per_day = consultingJob.hours_per_day;
+                item.total_days = consultingJob.total_days;
+                item.meal_break = consultingJob.meal_break ?? false;
+                item.hourly_rate = consultingJob.hourly_rate;
+                if (consultingJob.start_time) item.start_time = consultingJob.start_time;
+                if (consultingJob.end_time) item.end_time = consultingJob.end_time;
+                if (consultingJob.project_duration) item.project_duration = consultingJob.project_duration;
+                if (consultingJob.job_title) item.job_title = consultingJob.job_title;
+                if (consultingJob.job_description) item.job_description = consultingJob.job_description;
                 if (consultingJob.requirements && consultingJob.requirements.length > 0) {
-                    item.requirements = { SS: consultingJob.requirements };
+                    item.requirements = new Set(consultingJob.requirements);
                 }
                 responseData = {
                     ...responseData,
@@ -372,23 +346,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
             case 'permanent':
                 const permanentJob = jobData as PermanentJobData;
-                if (permanentJob.job_title) item.job_title = { S: permanentJob.job_title };
-                if (permanentJob.job_description) item.job_description = { S: permanentJob.job_description };
-                item.employment_type = { S: permanentJob.employment_type };
-                item.salary_min = { N: permanentJob.salary_min.toString() };
-                item.salary_max = { N: permanentJob.salary_max.toString() };
-                item.benefits = { SS: permanentJob.benefits }; 
+                if (permanentJob.job_title) item.job_title = permanentJob.job_title;
+                if (permanentJob.job_description) item.job_description = permanentJob.job_description;
+                item.employment_type = permanentJob.employment_type;
+                item.salary_min = permanentJob.salary_min;
+                item.salary_max = permanentJob.salary_max;
+                item.benefits = new Set(permanentJob.benefits);
                 if (permanentJob.vacation_days !== undefined) {
-                    item.vacation_days = { N: permanentJob.vacation_days.toString() };
+                    item.vacation_days = permanentJob.vacation_days;
                 }
                 if (permanentJob.work_schedule) {
-                    item.work_schedule = { S: permanentJob.work_schedule };
+                    item.work_schedule = permanentJob.work_schedule;
                 }
                 if (permanentJob.start_date) {
-                    item.start_date = { S: permanentJob.start_date };
+                    item.start_date = permanentJob.start_date;
                 }
                 if (permanentJob.requirements && permanentJob.requirements.length > 0) {
-                    item.requirements = { SS: permanentJob.requirements };
+                    item.requirements = new Set(permanentJob.requirements);
                 }
                 responseData = {
                     ...responseData,
@@ -399,26 +373,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 break;
         }
 
-        // 8. Save the job posting in DynamoDB
-        await dynamodb.send(new PutItemCommand({
-            TableName: process.env.JOB_POSTINGS_TABLE,
+        // 10. Save the job posting
+        await ddbDoc.send(new PutCommand({
+            TableName: JOB_POSTINGS_TABLE,
             Item: item
         }));
 
-        // 9. Final response
-        return {
-            statusCode: 201,
-            body: JSON.stringify(responseData),
-            headers: CORS_HEADERS // ✅ Updated to use CORS_HEADERS
-        };
+        return json(201, responseData);
 
     } catch (error) {
         const err = error as Error;
         console.error("Error creating job posting:", err);
-        return {
-            statusCode: 500,
-            body: JSON.stringify({ error: err.message || "An unexpected error occurred" }),
-            headers: CORS_HEADERS // ✅ Updated to use CORS_HEADERS
-        };
+        return json(500, { error: err.message || "An unexpected error occurred" });
     }
 };

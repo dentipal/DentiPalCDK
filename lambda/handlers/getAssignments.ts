@@ -5,8 +5,8 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// Assuming the utility file exports the necessary functions and types
-import { isRoot } from "./utils"; 
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { isRoot, extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -60,25 +60,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // 1. Extract User/Auth Info
-        // Assumes Cognito Authorizer is used and populates claims
-        const claims = (event.requestContext.authorizer as any)?.claims;
-        const userSub: string = claims?.sub;
-        const groupsRaw = claims?.['cognito:groups'];
+        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+        const userInfo = extractUserFromBearerToken(authHeader);
         
-        const groups: string[] = (typeof groupsRaw === 'string' ? groupsRaw.split(',') : [])
-            .map((s: string) => s.trim())
-            .filter(Boolean);
-
-        if (!userSub) {
-            return json(401, {
-                error: "Unauthorized",
-                statusCode: 401,
-                message: "User authentication required",
-                details: { issue: "Missing 'sub' claim in JWT token" },
-                timestamp: new Date().toISOString()
-            });
-        }
+        const userSub = userInfo.sub;
+        const groups = userInfo.groups || [];
 
         // 2. Determine Target UserSub
         // Root users can query for another user's assignments via the request body.
@@ -121,6 +108,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     catch (error: any) {
         // 6. Error Response
         console.error("Error retrieving assignments:", error);
+        
+        // ✅ Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
+        }
+
         return json(500, {
             error: "Internal Server Error",
             statusCode: 500,
