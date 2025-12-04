@@ -62,7 +62,8 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 });
 
 const normalizeGroup = (g: string) => g.toLowerCase().replace(/[^a-z0-9]/g, "");
-const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
+const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]); // Normalized for comparison
+const ALLOWED_GROUPS_DISPLAY = ["Root", "ClinicAdmin", "ClinicManager"]; // For error messages
 
 /**
  * Reads one clinic profile row by composite key (clinicId + userSub).
@@ -146,7 +147,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 2. Group Authorization (Root, ClinicAdmin, ClinicManager only)
         const normalized = userGroups.map(normalizeGroup);
+        console.log(`[AUTH DEBUG] User ${userSub}`);
+        console.log(`[AUTH DEBUG] Raw groups:`, userGroups);
+        console.log(`[AUTH DEBUG] Normalized groups:`, normalized);
+        console.log(`[AUTH DEBUG] Allowed groups:`, Array.from(ALLOWED_GROUPS));
+        
         const isAllowed = normalized.some(g => ALLOWED_GROUPS.has(g));
+        console.log(`[AUTH DEBUG] Is allowed:`, isAllowed);
         
         if (!isAllowed) {
             console.warn(`[AUTH] User ${userSub} denied. Groups: [${userGroups.join(', ')}]`);
@@ -154,7 +161,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Forbidden",
                 message: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs",
                 details: { 
-                    requiredGroups: Array.from(ALLOWED_GROUPS), 
+                    requiredGroups: ALLOWED_GROUPS_DISPLAY, // User-friendly display names
                     userGroups 
                 }
             });
