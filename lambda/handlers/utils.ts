@@ -183,21 +183,20 @@ export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo
     }
 
     const groupsClaim = claims['cognito:groups'];
-    let groups: string[] = [];
-    
+    let groups: string[];
     if (typeof groupsClaim === 'string') {
-        // Handle comma-separated string
         groups = groupsClaim.split(',').map((g: string) => g.trim()).filter((g: string) => g.length > 0);
     } else if (Array.isArray(groupsClaim)) {
-        // Already an array
         groups = groupsClaim;
+    } else {
+        groups = [];
     }
-
+    console.log('extractUserInfoFromClaims:', { sub: claims.sub, groupsClaim, groups });
     return {
         sub: claims.sub,
         userType: claims['custom:user_type'] || 'professional',
         email: claims.email,
-        groups: groups,
+        groups,
     };
 };
 
