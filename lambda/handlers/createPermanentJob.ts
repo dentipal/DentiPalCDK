@@ -95,37 +95,48 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // --- 1. Authentication & Group Check (Matches JS Logic) ---
+        // --- 1. Authentication & Group Check ---
         
-        // A. Get User Sub
+        // Extract user info and groups from Bearer token
         let userSub: string = "";
+        let userGroups: string[] = [];
+        
         try {
-            // Try your util first
             const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            console.log("Auth Header:", { authHeader, hasAuth: !!authHeader });
+            
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
-        } catch (e) {
-            // Fallback: Try to get sub from authorizer like the JS code does
-            const claims = (event.requestContext as any)?.authorizer?.claims;
-            if (claims && claims.sub) {
-                userSub = claims.sub;
-            } else {
-                throw new Error("Invalid access token");
-            }
+            userGroups = userInfo.groups || [];
+            
+            console.log("Token Extraction Success:", { userSub, userGroups, userInfo });
+        } catch (authError: any) {
+            console.error("Token Extraction Failed:", authError.message);
+            return {
+                statusCode: 401,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({ error: "Unauthorized", message: authError.message || "Invalid access token" })
+            };
         }
 
-        // B. Get Groups (Using the specific parser from JS code)
-        const rawGroups = parseGroupsFromAuthorizer(event);
-        
-        // C. Check Permissions
-        const normalized = rawGroups.map(normalizeGroup);
+        // Check Permissions
+        const normalized = userGroups.map(normalizeGroup);
         const isAllowed = normalized.some(g => ALLOWED_GROUPS.has(g));
 
         if (!isAllowed) {
             return {
                 statusCode: 403,
                 headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs" })
+                body: JSON.stringify({ 
+                    error: "Forbidden", 
+                    statusCode: 403,
+                    message: "Access denied",
+                    details: {
+                        requiredGroups: ["Root", "ClinicAdmin", "ClinicManager"],
+                        userGroups: userGroups
+                    },
+                    timestamp: new Date().toISOString()
+                })
             };
         }
 
