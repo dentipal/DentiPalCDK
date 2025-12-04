@@ -164,7 +164,10 @@ export const extractAndDecodeAccessToken = (authHeader: string | undefined): Rec
         const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
         const pad = base64.length % 4 === 0 ? '' : '='.repeat(4 - (base64.length % 4));
         const decoded = Buffer.from(base64 + pad, 'base64').toString('utf-8');
-        return JSON.parse(decoded);
+        const claims = JSON.parse(decoded);
+        console.log('extractAndDecodeAccessToken - Decoded Claims:', JSON.stringify(claims, null, 2));
+        console.log('extractAndDecodeAccessToken - cognito:groups value:', claims['cognito:groups']);
+        return claims;
     } catch (error) {
         throw new Error("Failed to decode access token");
     }
@@ -182,16 +185,27 @@ export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo
         throw new Error("User sub not found in token claims");
     }
 
+    console.log('extractUserInfoFromClaims - Full claims object:', JSON.stringify(claims, null, 2));
+    
     const groupsClaim = claims['cognito:groups'];
+    console.log('extractUserInfoFromClaims - groupsClaim raw value:', groupsClaim);
+    console.log('extractUserInfoFromClaims - groupsClaim type:', typeof groupsClaim);
+    console.log('extractUserInfoFromClaims - groupsClaim is array:', Array.isArray(groupsClaim));
+    
     let groups: string[];
     if (typeof groupsClaim === 'string') {
+        console.log('extractUserInfoFromClaims - Processing string groups:', groupsClaim);
         groups = groupsClaim.split(',').map((g: string) => g.trim()).filter((g: string) => g.length > 0);
     } else if (Array.isArray(groupsClaim)) {
+        console.log('extractUserInfoFromClaims - Processing array groups:', groupsClaim);
         groups = groupsClaim;
     } else {
+        console.log('extractUserInfoFromClaims - No groups found, defaulting to empty array');
         groups = [];
     }
-    console.log('extractUserInfoFromClaims:', { sub: claims.sub, groupsClaim, groups });
+    
+    console.log('extractUserInfoFromClaims - Final groups array:', groups);
+    
     return {
         sub: claims.sub,
         userType: claims['custom:user_type'] || 'professional',
