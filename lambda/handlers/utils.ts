@@ -142,22 +142,35 @@ export const verifyToken = async (event: APIGatewayProxyEvent): Promise<UserInfo
  * @throws Error if header is missing, invalid format, or token cannot be decoded
  */
 export const extractAndDecodeAccessToken = (authHeader: string | undefined): Record<string, any> => {
+    console.log('>>> extractAndDecodeAccessToken - ENTRY');
+    console.log('>>> authHeader present:', !!authHeader);
+    console.log('>>> authHeader type:', typeof authHeader);
+    
     if (!authHeader) {
+        console.log('>>> extractAndDecodeAccessToken - ERROR: Authorization header missing');
         throw new Error("Authorization header missing");
     }
 
     const parts = authHeader.split(" ");
+    console.log('>>> authHeader parts length:', parts.length);
+    console.log('>>> authHeader first part:', parts[0]);
+    
     if (parts.length !== 2 || parts[0].toLowerCase() !== "bearer") {
+        console.log('>>> extractAndDecodeAccessToken - ERROR: Invalid header format');
         throw new Error("Invalid authorization header format. Expected 'Bearer <token>'");
     }
 
     const token = parts[1];
     const tokenParts = token.split(".");
+    console.log('>>> token parts length:', tokenParts.length);
+    
     if (tokenParts.length !== 3) {
+        console.log('>>> extractAndDecodeAccessToken - ERROR: Invalid token format');
         throw new Error("Invalid access token format");
     }
 
     try {
+        console.log('>>> Attempting to decode token payload...');
         // Decode the payload (second part of JWT)
         const payload = tokenParts[1];
         // Robust Base64URL decode that works across Node versions
@@ -165,10 +178,19 @@ export const extractAndDecodeAccessToken = (authHeader: string | undefined): Rec
         const pad = base64.length % 4 === 0 ? '' : '='.repeat(4 - (base64.length % 4));
         const decoded = Buffer.from(base64 + pad, 'base64').toString('utf-8');
         const claims = JSON.parse(decoded);
-        console.log('extractAndDecodeAccessToken - Decoded Claims:', JSON.stringify(claims, null, 2));
-        console.log('extractAndDecodeAccessToken - cognito:groups value:', claims['cognito:groups']);
+        
+        console.log('>>> extractAndDecodeAccessToken - SUCCESS ✓');
+        console.log('>>> Decoded Claims:', JSON.stringify(claims, null, 2));
+        console.log('>>> cognito:groups value:', claims['cognito:groups']);
+        console.log('>>> cognito:groups type:', typeof claims['cognito:groups']);
+        console.log('>>> cognito:groups isArray:', Array.isArray(claims['cognito:groups']));
+        console.log('>>> sub value:', claims.sub);
+        console.log('>>> extractAndDecodeAccessToken - EXIT');
+        
         return claims;
     } catch (error) {
+        console.log('>>> extractAndDecodeAccessToken - ERROR: Failed to decode ✗');
+        console.error('>>> Decode error:', error);
         throw new Error("Failed to decode access token");
     }
 };
@@ -181,37 +203,48 @@ export const extractAndDecodeAccessToken = (authHeader: string | undefined): Rec
  * @throws Error if sub is missing
  */
 export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo => {
+    console.log('>>> extractUserInfoFromClaims - ENTRY');
+    
     if (!claims.sub) {
+        console.log('>>> extractUserInfoFromClaims - ERROR: No sub found');
         throw new Error("User sub not found in token claims");
     }
+    console.log('>>> extractUserInfoFromClaims - sub found:', claims.sub);
 
-    console.log('extractUserInfoFromClaims - Full claims object:', JSON.stringify(claims, null, 2));
+    console.log('>>> extractUserInfoFromClaims - Full claims object:', JSON.stringify(claims, null, 2));
     
     const groupsClaim = claims['cognito:groups'];
-    console.log('extractUserInfoFromClaims - groupsClaim raw value:', groupsClaim);
-    console.log('extractUserInfoFromClaims - groupsClaim type:', typeof groupsClaim);
-    console.log('extractUserInfoFromClaims - groupsClaim is array:', Array.isArray(groupsClaim));
+    console.log('>>> extractUserInfoFromClaims - groupsClaim raw value:', groupsClaim);
+    console.log('>>> extractUserInfoFromClaims - groupsClaim type:', typeof groupsClaim);
+    console.log('>>> extractUserInfoFromClaims - groupsClaim is array:', Array.isArray(groupsClaim));
     
     let groups: string[];
     if (typeof groupsClaim === 'string') {
-        console.log('extractUserInfoFromClaims - Processing string groups:', groupsClaim);
+        console.log('>>> extractUserInfoFromClaims - Processing STRING groups:', groupsClaim);
         groups = groupsClaim.split(',').map((g: string) => g.trim()).filter((g: string) => g.length > 0);
+        console.log('>>> extractUserInfoFromClaims - After string split:', groups);
     } else if (Array.isArray(groupsClaim)) {
-        console.log('extractUserInfoFromClaims - Processing array groups:', groupsClaim);
+        console.log('>>> extractUserInfoFromClaims - Processing ARRAY groups:', groupsClaim);
         groups = groupsClaim;
     } else {
-        console.log('extractUserInfoFromClaims - No groups found, defaulting to empty array');
+        console.log('>>> extractUserInfoFromClaims - No groups found, defaulting to empty array');
         groups = [];
     }
     
-    console.log('extractUserInfoFromClaims - Final groups array:', groups);
+    console.log('>>> extractUserInfoFromClaims - Final groups array:', JSON.stringify(groups));
+    console.log('>>> extractUserInfoFromClaims - Final groups count:', groups.length);
     
-    return {
+    const userInfo: UserInfo = {
         sub: claims.sub,
         userType: claims['custom:user_type'] || 'professional',
         email: claims.email,
         groups,
     };
+    
+    console.log('>>> extractUserInfoFromClaims - Returning UserInfo:', JSON.stringify(userInfo, null, 2));
+    console.log('>>> extractUserInfoFromClaims - EXIT');
+    
+    return userInfo;
 };
 
 /**
@@ -221,6 +254,22 @@ export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo
  * @throws Error with descriptive message if extraction/decoding fails
  */
 export const extractUserFromBearerToken = (authHeader: string | undefined): UserInfo => {
-    const claims = extractAndDecodeAccessToken(authHeader);
-    return extractUserInfoFromClaims(claims);
+    console.log('>>> extractUserFromBearerToken - ENTRY');
+    console.log('>>> authHeader provided:', !!authHeader);
+    
+    try {
+        const claims = extractAndDecodeAccessToken(authHeader);
+        console.log('>>> extractUserFromBearerToken - Claims decoded successfully');
+        
+        const userInfo = extractUserInfoFromClaims(claims);
+        console.log('>>> extractUserFromBearerToken - UserInfo extracted successfully');
+        console.log('>>> extractUserFromBearerToken - EXIT with sub:', userInfo.sub, 'groups:', userInfo.groups);
+        
+        return userInfo;
+    } catch (error: any) {
+        console.log('>>> extractUserFromBearerToken - ERROR ✗');
+        console.error('>>> Error:', error.message);
+        console.error('>>> Stack:', error.stack);
+        throw error;
+    }
 };
