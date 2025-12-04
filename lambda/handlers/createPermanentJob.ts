@@ -187,7 +187,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Forbidden",
                 message: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs",
                 details: { 
-                    requiredGroups: ALLOWED_GROUPS_DISPLAY, // User-friendly display names
+                    requiredGroups: ALLOWED_GROUPS_DISPLAY,  
                     userGroups 
                 }
             });
