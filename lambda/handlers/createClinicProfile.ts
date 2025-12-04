@@ -70,7 +70,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(401, { error: authError.message || "Invalid access token" });
         }
 
-        const profileData: ClinicProfileData = JSON.parse(event.body || '{}');
+        // Parse request body - handle null or empty body
+        let profileData: ClinicProfileData;
+        try {
+            const bodyStr = event.body || event.isBase64Encoded ? (event.body ? Buffer.from(event.body, 'base64').toString('utf-8') : '{}') : event.body || '{}';
+            profileData = JSON.parse(bodyStr);
+        } catch (parseError: any) {
+            console.error("Error parsing request body:", parseError.message);
+            return json(400, { error: "Invalid JSON in request body" });
+        }
 
         // Required fields check
         if (

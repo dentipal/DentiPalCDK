@@ -7,6 +7,7 @@ import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as apigwv2 from '@aws-cdk/aws-apigatewayv2-alpha';
 import * as apigwv2integrations from '@aws-cdk/aws-apigatewayv2-integrations-alpha';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as path from 'path';
 
 export class DentiPalCDKStack extends cdk.Stack {
@@ -16,7 +17,7 @@ export class DentiPalCDKStack extends cdk.Stack {
     // ========================================================================
     // 1. Cognito User Pool
     // ========================================================================
-    const userPool = new cognito.UserPool(this, 'ClinicUserPool', {
+    const userPool = new cognito.UserPool(this, 'ClinicUserPoolV5', {
       selfSignUpEnabled: true,
       autoVerify: { email: true },
       standardAttributes: {
@@ -37,7 +38,7 @@ export class DentiPalCDKStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY, // Change to RETAIN for prod
     });
 
-    const client = userPool.addClient('ClinicAppClient', {
+    const client = userPool.addClient('ClinicAppClientV5', {
       authFlows: { userPassword: true, userSrp: true },
       preventUserExistenceErrors: true,
     });
@@ -56,16 +57,17 @@ export class DentiPalCDKStack extends cdk.Stack {
     ];
 
     // Note: The CfnUserPoolGroup names were simplified for the loop to avoid special chars
+    // Cognito group names cannot contain spaces - use underscores or camelCase
     const cognitoGroups = [
         'Root',
         'ClinicAdmin',
         'ClinicManager',
         'ClinicViewer',
         'AssociateDentist',
-        'Dental Assistant',
+        'DentalAssistant',
         'DualRoleFrontDA',
-        'Dental Hygienist',
-        'Front Desk',
+        'DentalHygienist',
+        'FrontDesk',
         'Dentist',
     ];
 
@@ -85,7 +87,7 @@ export class DentiPalCDKStack extends cdk.Stack {
     
     // 1. DentiPal-Clinic-Profiles
     const clinicProfilesTable = new dynamodb.Table(this, 'ClinicProfilesTable', {
-        tableName: 'DentiPal-Clinic-Profiles',
+        tableName: 'DentiPal-V5-Clinic-Profiles',
         partitionKey: { name: 'clinicId', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -99,7 +101,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 2. DentiPal-ClinicFavorites
       const clinicFavoritesTable = new dynamodb.Table(this, 'ClinicFavoritesTable', {
-        tableName: 'DentiPal-ClinicFavorites',
+        tableName: 'DentiPal-V5-ClinicFavorites',
         partitionKey: { name: 'clinicUserSub', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'professionalUserSub', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -108,7 +110,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 3. DentiPal-Clinics
       const clinicsTable = new dynamodb.Table(this, 'ClinicsTable', {
-        tableName: 'DentiPal-Clinics',
+        tableName: 'DentiPal-V5-Clinics',
         partitionKey: { name: 'clinicId', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -121,7 +123,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 4. DentiPal-Connections (Used by WebSocket Handler)
       const connectionsTable = new dynamodb.Table(this, 'ConnectionsTable', {
-        tableName: 'DentiPal-Connections',
+        tableName: 'DentiPal-V5-Connections',
         partitionKey: { name: 'userKey', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -143,7 +145,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 5. DentiPal-Conversations (Used by WebSocket Handler)
       const conversationsTable = new dynamodb.Table(this, 'ConversationsTable', {
-        tableName: 'DentiPal-Conversations',
+        tableName: 'DentiPal-V5-Conversations',
         partitionKey: { name: 'conversationId', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -163,7 +165,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 6. DentiPal-Feedback
       const feedbackTable = new dynamodb.Table(this, 'FeedbackTable', {
-        tableName: 'DentiPal-Feedback',
+        tableName: 'DentiPal-V5-Feedback',
         partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -172,7 +174,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 7. DentiPal-JobApplications (Used in REST)
       const jobApplicationsTable = new dynamodb.Table(this, 'JobApplicationsTable', {
-        tableName: 'DentiPal-JobApplications',
+        tableName: 'DentiPal-V5-JobApplications',
         partitionKey: { name: 'jobId', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'professionalUserSub', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -209,7 +211,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 8. DentiPal-JobInvitations
       const jobInvitationsTable = new dynamodb.Table(this, 'JobInvitationsTable', {
-        tableName: 'DentiPal-JobInvitations',
+        tableName: 'DentiPal-V5-JobInvitations',
         partitionKey: { name: 'jobId', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'professionalUserSub', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -228,7 +230,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 9. DentiPal-JobNegotiations
       const jobNegotiationsTable = new dynamodb.Table(this, 'JobNegotiationsTable', {
-        tableName: 'DentiPal-JobNegotiations',
+        tableName: 'DentiPal-V5-JobNegotiations',
         partitionKey: { name: 'applicationId', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'negotiationId', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -255,7 +257,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 10. DentiPal-JobPostings
       const jobPostingsTable = new dynamodb.Table(this, 'JobPostingsTable', {
-        tableName: 'DentiPal-JobPostings',
+        tableName: 'DentiPal-V5-JobPostings',
         partitionKey: { name: 'clinicUserSub', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'jobId', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -287,7 +289,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 11. DentiPal-Messages (Used by WebSocket Handler)
       const messagesTable = new dynamodb.Table(this, 'MessagesTable', {
-        tableName: 'DentiPal-Messages',
+        tableName: 'DentiPal-V5-Messages',
         partitionKey: { name: 'conversationId', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'messageId', type: dynamodb.AttributeType.STRING }, // Corrected to messageId per your handler code
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -302,7 +304,7 @@ export class DentiPalCDKStack extends cdk.Stack {
       
       // 12. DentiPal-Notifications
       const notificationsTable = new dynamodb.Table(this, 'NotificationsTable', {
-        tableName: 'DentiPal-Notifications',
+        tableName: 'DentiPal-V5-Notifications',
         partitionKey: { name: 'recipientUserSub', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'notificationId', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -311,7 +313,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 13. DentiPal-OTPVerification
       const otpVerificationTable = new dynamodb.Table(this, 'OTPVerificationTable', {
-        tableName: 'DentiPal-OTPVerification',
+        tableName: 'DentiPal-V5-OTPVerification',
         partitionKey: { name: 'email', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -319,7 +321,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 14. DentiPal-ProfessionalProfiles
       const professionalProfilesTable = new dynamodb.Table(this, 'ProfessionalProfilesTable', {
-        tableName: 'DentiPal-ProfessionalProfiles',
+        tableName: 'DentiPal-V5-ProfessionalProfiles',
         partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -327,7 +329,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 15. DentiPal-Referrals
       const referralsTable = new dynamodb.Table(this, 'ReferralsTable', {
-        tableName: 'DentiPal-Referrals',
+        tableName: 'DentiPal-V5-Referrals',
         partitionKey: { name: 'referralId', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -346,7 +348,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 16. DentiPal-UserAddresses
       const userAddressesTable = new dynamodb.Table(this, 'UserAddressesTable', {
-        tableName: 'DentiPal-UserAddresses',
+        tableName: 'DentiPal-V5-UserAddresses',
         partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -354,7 +356,7 @@ export class DentiPalCDKStack extends cdk.Stack {
   
       // 17. DentiPal-UserClinicAssignments
       const userClinicAssignmentsTable = new dynamodb.Table(this, 'UserClinicAssignmentsTable', {
-        tableName: 'DentiPal-UserClinicAssignments',
+        tableName: 'DentiPal-V5-UserClinicAssignments',
         partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
         sortKey: { name: 'clinicId', type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -370,6 +372,49 @@ export class DentiPalCDKStack extends cdk.Stack {
       otpVerificationTable, professionalProfilesTable, referralsTable, userAddressesTable,
       userClinicAssignmentsTable
     ];
+
+    // ========================================================================
+    // S3 Buckets for file storage (profile images, certificates, video resumes)
+    // ========================================================================
+    // Buckets are created without explicit physical names so CDK will generate
+    // unique names. Use RemovalPolicy.RETAIN to avoid accidental data loss.
+    const profileImagesBucket = new s3.Bucket(this, 'ProfileImagesBucket', {
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
+
+    const certificatesBucket = new s3.Bucket(this, 'CertificatesBucket', {
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
+
+    const videoResumesBucket = new s3.Bucket(this, 'VideoResumesBucket', {
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
+
+    // Additional buckets requested: professional resumes and driving licenses,
+    // and a dedicated bucket for professional licenses (mapped to CERTIFICATES_BUCKET)
+    const professionalResumesBucket = new s3.Bucket(this, 'ProfessionalResumesBucket', {
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
+
+    const drivingLicensesBucket = new s3.Bucket(this, 'DrivingLicensesBucket', {
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
+
+    const professionalLicensesBucket = new s3.Bucket(this, 'ProfessionalLicensesBucket', {
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
 
     // Tables used specifically by the WebSocket handler
     const chatTables = [
@@ -387,16 +432,7 @@ export class DentiPalCDKStack extends cdk.Stack {
       functionName: 'DentiPal-Backend-Monolith',
       runtime: lambda.Runtime.NODEJS_18_X,
       handler: 'dist/index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda'), {
-        bundling: {
-          command: [
-            'bash', '-c',
-            'npm install && npm run build && cp -r dist/* /asset-output/ && cp -r node_modules /asset-output/'
-          ],
-          image: lambda.Runtime.NODEJS_18_X.bundlingImage,
-          user: 'root',
-        },
-      }),
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
       environment: {
         REGION: this.region,
         CLIENT_ID: client.userPoolClientId,
@@ -429,10 +465,20 @@ export class DentiPalCDKStack extends cdk.Stack {
         // Stats/Alias mappings for code compatibility
         CLINIC_JOBS_POSTED_TABLE: jobPostingsTable.tableName, 
         CLINICS_JOBS_COMPLETED_TABLE: jobApplicationsTable.tableName, 
+        // S3 bucket names for file storage
+        PROFILE_IMAGES_BUCKET: profileImagesBucket.bucketName,
+        CERTIFICATES_BUCKET: professionalLicensesBucket.bucketName, // keep existing "certificate" mapping
+        VIDEO_RESUMES_BUCKET: videoResumesBucket.bucketName,
+        PROFESSIONAL_RESUMES_BUCKET: professionalResumesBucket.bucketName,
+        DRIVING_LICENSES_BUCKET: drivingLicensesBucket.bucketName,
+        PROFESSIONAL_LICENSES_BUCKET: professionalLicensesBucket.bucketName,
       },
       timeout: cdk.Duration.seconds(60),
       memorySize: 256,
     });
+
+    // Grant the Lambda access to the S3 buckets and expose bucket names as env vars
+    // (env vars need to be added to the function at creation; we update below)
 
     // ========================================================================
     // 4. REST IAM Role Permissions
@@ -450,6 +496,8 @@ export class DentiPalCDKStack extends cdk.Stack {
         'cognito-idp:ConfirmSignUp',
         'cognito-idp:AdminAddUserToGroup',
         'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminCreateUser',
+        'cognito-idp:AdminSetUserPassword',
         'cognito-idp:AdminUpdateUserAttributes',
         'cognito-idp:AdminDeleteUser',
         'cognito-idp:DeleteUser',
@@ -478,6 +526,14 @@ export class DentiPalCDKStack extends cdk.Stack {
       resources: ['*'],
     }));
 
+    // Grant Lambda read/write access to the file storage buckets
+    profileImagesBucket.grantReadWrite(lambdaFunction);
+    certificatesBucket.grantReadWrite(lambdaFunction);
+    videoResumesBucket.grantReadWrite(lambdaFunction);
+    professionalResumesBucket.grantReadWrite(lambdaFunction);
+    drivingLicensesBucket.grantReadWrite(lambdaFunction);
+    professionalLicensesBucket.grantReadWrite(lambdaFunction);
+
     // ========================================================================
     // 5. REST API Gateway
     // ========================================================================
@@ -497,12 +553,8 @@ export class DentiPalCDKStack extends cdk.Stack {
       binaryMediaTypes: ['multipart/form-data'],
     });
 
-    // Note: Authorizer is defined but not attached to the proxy, 
+    // Note: Authorizer removed from standalone creation
     // as per your original design relying on Lambda logic.
-    new apigateway.CognitoUserPoolsAuthorizer(this, 'CognitoAuthorizer', {
-      cognitoUserPools: [userPool],
-      resultsCacheTtl: cdk.Duration.seconds(0),
-    });
 
     // --- Monolith Proxy Resource ---
     // Catch-all route to route everything to the Lambda
@@ -522,17 +574,7 @@ export class DentiPalCDKStack extends cdk.Stack {
         functionName: 'DentiPal-Chat-WebSocket',
         runtime: lambda.Runtime.NODEJS_18_X,
         handler: 'dist/websocketHandler.handler', // Assumes bundling puts it in 'dist'
-        code: lambda.Code.fromAsset(path.join(__dirname, '../lambda'), {
-            bundling: {
-                command: [
-                  'bash', '-c',
-                  // Assuming the bundling script also handles websocketHandler.ts
-                  'npm install && npm run build && cp -r dist/* /asset-output/ && cp -r node_modules /asset-output/'
-                ],
-                image: lambda.Runtime.NODEJS_18_X.bundlingImage,
-                user: 'root',
-            },
-        }),
+        code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
         environment: {
             REGION: this.region,
             USER_POOL_ID: userPool.userPoolId,
@@ -601,5 +643,12 @@ export class DentiPalCDKStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ClientId', { value: client.userPoolClientId });
     new cdk.CfnOutput(this, 'RestApiEndpoint', { value: api.url });
     new cdk.CfnOutput(this, 'WebSocketEndpoint', { value: webSocketApi.apiEndpoint });
+
+    // S3 bucket outputs
+    new cdk.CfnOutput(this, 'ProfileImagesBucketName', { value: profileImagesBucket.bucketName });
+    new cdk.CfnOutput(this, 'ProfessionalResumesBucketName', { value: professionalResumesBucket.bucketName });
+    new cdk.CfnOutput(this, 'VideoResumesBucketName', { value: videoResumesBucket.bucketName });
+    new cdk.CfnOutput(this, 'DrivingLicensesBucketName', { value: drivingLicensesBucket.bucketName });
+    new cdk.CfnOutput(this, 'ProfessionalLicensesBucketName', { value: professionalLicensesBucket.bucketName });
   }
 }

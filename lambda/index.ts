@@ -147,6 +147,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         // Assignment management routes
         "POST:/assignments": createAssignmentHandler,
         "GET:/assignments": getAssignmentsHandler,
+        "GET:/assignments/{userSub}": getAssignmentsHandler,
         "PUT:/assignments": updateAssignmentHandler,
         "DELETE:/assignments": deleteAssignmentHandler,
 

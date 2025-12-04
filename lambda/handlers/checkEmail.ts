@@ -1,5 +1,5 @@
 // Imports
-import { CognitoIdentityServiceProvider } from 'aws-sdk';
+import { CognitoIdentityProvider } from '@aws-sdk/client-cognito-identity-provider';
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 
 // ✅ ADDED THIS LINE:
@@ -8,8 +8,8 @@ import { CORS_HEADERS } from "./corsHeaders";
 // --- Initialization ---
 
 // Note: AWS.config.update() isn't strictly necessary here as the region is passed
-// directly to the CognitoIdentityServiceProvider constructor.
-const cognito = new CognitoIdentityServiceProvider({ region: process.env.REGION });
+// directly to the CognitoIdentityProvider constructor.
+const cognito = new CognitoIdentityProvider({ region: process.env.REGION });
 
 
 // --- Utility Functions ---
@@ -208,11 +208,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const resp = await cognito.adminListGroupsForUser({
           UserPoolId: process.env.USER_POOL_ID,
           Username: email // Use the email from the body as the username
-        }).promise();
-        groupNames = (resp.Groups || []).map(g => g.GroupName as string);
+        });
+        groupNames = (resp.Groups || []).map((g: any) => g.GroupName as string);
         console.log("[cognito] adminListGroupsForUser groups:", groupNames);
       } catch (e) {
-        const error = e as AWS.AWSError;
+        const error = e as any;
         console.warn("[cognito] adminListGroupsForUser failed (non-fatal):", error.code || error.name, error.message);
       }
     } else {
@@ -247,7 +247,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     };
 
   } catch (err) {
-    const error = err as AWS.AWSError;
+    const error = err as any;
     console.error("=== /auth/check-email ERROR ===");
     console.error("name:", error?.name);
     console.error("code:", error?.code);

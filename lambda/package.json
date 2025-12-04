@@ -6,8 +6,12 @@
     "watch": "tsc -w"
   },
   "dependencies": {
-    "@aws-sdk/client-cognito-identity-provider": "^3.645.0",
-    "@aws-sdk/client-dynamodb": "^3.933.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.940.0",
+    "@aws-sdk/client-dynamodb": "^3.940.0",
+    "@aws-sdk/client-ses": "^3.940.0",
+    "@aws-sdk/client-sns": "^3.940.0",
+    "@aws-sdk/lib-dynamodb": "^3.645.0",
+    "aws-sdk": "^2.1692.0",
     "uuid": "^9.0.1"
   },
   "devDependencies": {

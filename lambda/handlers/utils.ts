@@ -160,8 +160,10 @@ export const extractAndDecodeAccessToken = (authHeader: string | undefined): Rec
     try {
         // Decode the payload (second part of JWT)
         const payload = tokenParts[1];
-        // Base64 URL decode
-        const decoded = Buffer.from(payload, "base64url").toString("utf-8");
+        // Robust Base64URL decode that works across Node versions
+        const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = base64.length % 4 === 0 ? '' : '='.repeat(4 - (base64.length % 4));
+        const decoded = Buffer.from(base64 + pad, 'base64').toString('utf-8');
         return JSON.parse(decoded);
     } catch (error) {
         throw new Error("Failed to decode access token");
