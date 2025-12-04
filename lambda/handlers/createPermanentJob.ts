@@ -52,8 +52,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     body: JSON.stringify(bodyObj)
 });
 
-const normalizeGroup = (g: string) => g.toLowerCase().replace(/[^a-z0-9]/g, ""); 
-const ALLOWED_GROUPS = new Set(["Root", "ClinicAdmin", "ClinicManager"]);
+const normalizeGroup = (g: string) => g.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 /**
  * Reads one clinic profile row by composite key (clinicId + userSub).
@@ -125,9 +124,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // ---- Group Authorization ----
-        // This explicitly handles the "Root" case regardless of capitalization
+        // Check if user belongs to any allowed group (case-insensitive)
+        const ALLOWED_GROUPS_NORMALIZED = new Set(["root", "clinicadmin", "clinicmanager"]);
         const normalized = userGroups.map(normalizeGroup);
-        const isAllowedGlobally = normalized.some(g => ALLOWED_GROUPS.has(g));
+        const isAllowedGlobally = normalized.some(g => ALLOWED_GROUPS_NORMALIZED.has(g));
         
         // 2. Parse Body
         const jobData: PermanentJobData = JSON.parse(event.body || '{}');
