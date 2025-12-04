@@ -62,7 +62,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 });
 
 const normalizeGroup = (g: string) => g.toLowerCase().replace(/[^a-z0-9]/g, "");
-const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]); // Normalized for comparison
+const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]); // ✅ FIXED: Normalized for comparison
 const ALLOWED_GROUPS_DISPLAY = ["Root", "ClinicAdmin", "ClinicManager"]; // For error messages
 
 /**
@@ -120,6 +120,13 @@ const validatePermanentJob = (jobData: JobData): string | null => {
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    console.log('🚀🚀🚀 HANDLER STARTED - createPermanentJob.ts 🚀🚀🚀');
+    console.log('Function Name:', process.env.AWS_LAMBDA_FUNCTION_NAME);
+    console.log('Function Version:', process.env.AWS_LAMBDA_FUNCTION_VERSION);
+    console.log('Request ID:', event.requestContext?.requestId);
+    console.log('HTTP Method:', event.httpMethod);
+    console.log('Path:', event.path);
+    
     // --- CORS preflight ---
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
@@ -129,31 +136,50 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     try {
         // 1. Authentication (Access Token)
+        console.log('=== AUTHENTICATION START ===');
+        console.log('Event headers:', JSON.stringify(event.headers, null, 2));
+        
         let userSub: string;
         let userGroups: string[] = [];
         
         try {
             const authHeader = event.headers?.Authorization || event.headers?.authorization;
+            console.log('Authorization header present:', !!authHeader);
+            console.log('Authorization header length:', authHeader?.length);
+            
             const userInfo = extractUserFromBearerToken(authHeader);
+            console.log('extractUserFromBearerToken returned:', JSON.stringify(userInfo, null, 2));
+            
             userSub = userInfo.sub;
             userGroups = userInfo.groups || [];
+            console.log('Extracted userSub:', userSub);
+            console.log('Extracted userGroups:', JSON.stringify(userGroups));
         } catch (authError: any) {
             console.error("Auth Error:", authError.message);
+            console.error("Auth Error Stack:", authError.stack);
             return json(401, { 
                 error: "Unauthorized",
                 message: authError.message || "Invalid access token" 
             });
         }
+        console.log('=== AUTHENTICATION END ===');
 
         // 2. Group Authorization (Root, ClinicAdmin, ClinicManager only)
+        console.log('=== AUTHORIZATION START ===');
         const normalized = userGroups.map(normalizeGroup);
         console.log(`[AUTH DEBUG] User ${userSub}`);
-        console.log(`[AUTH DEBUG] Raw groups:`, userGroups);
-        console.log(`[AUTH DEBUG] Normalized groups:`, normalized);
-        console.log(`[AUTH DEBUG] Allowed groups:`, Array.from(ALLOWED_GROUPS));
+        console.log(`[AUTH DEBUG] Raw groups:`, JSON.stringify(userGroups));
+        console.log(`[AUTH DEBUG] Normalized groups:`, JSON.stringify(normalized));
+        console.log(`[AUTH DEBUG] Allowed groups:`, JSON.stringify(Array.from(ALLOWED_GROUPS)));
         
         const isAllowed = normalized.some(g => ALLOWED_GROUPS.has(g));
         console.log(`[AUTH DEBUG] Is allowed:`, isAllowed);
+        
+        // Check each group individually
+        normalized.forEach(g => {
+            console.log(`[AUTH DEBUG] Checking group "${g}":`, ALLOWED_GROUPS.has(g));
+        });
+        console.log('=== AUTHORIZATION END ===');
         
         if (!isAllowed) {
             console.warn(`[AUTH] User ${userSub} denied. Groups: [${userGroups.join(', ')}]`);
