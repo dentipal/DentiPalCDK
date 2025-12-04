@@ -11,6 +11,8 @@ import type {
 } from "aws-lambda";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
+// ✅ UPDATE: Added extractUserFromBearerToken
+import { extractUserFromBearerToken } from "./utils";
 
 const s3Client = new S3Client({ region: process.env.REGION });
 
@@ -21,35 +23,22 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   body: JSON.stringify(bodyObj),
 });
 
-interface AuthorizerClaims {
-  sub?: string;
-  ["custom:user_type"]?: string;
-}
-
-interface RequestContextWithAuth {
-  authorizer?: {
-    claims?: AuthorizerClaims;
-  };
-}
-
 export const handler = async (
-  event: APIGatewayProxyEvent & { requestContext: RequestContextWithAuth }
+  event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
   let objectKeyToUse: string | undefined;
 
   try {
-    const userSub = event.requestContext.authorizer?.claims?.sub;
-    const userType =
-      event.requestContext.authorizer?.claims?.["custom:user_type"];
-
-    if (!userSub) {
-      return json(401, { error: "Unauthorized" });
-    }
-
     // CORS Preflight
     if (event.httpMethod === "OPTIONS") {
       return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
+
+    // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    const userInfo = extractUserFromBearerToken(authHeader);
+    const userSub = userInfo.sub;
+    const userType = userInfo.userType;
 
     if (event.httpMethod !== "GET") {
       return json(405, { error: "Method not allowed" });
@@ -176,8 +165,21 @@ export const handler = async (
         }`,
       });
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error getting file URL:", error);
+
+    // ✅ Check for Auth errors and return 401
+    if (error.message === "Authorization header missing" || 
+        error.message?.startsWith("Invalid authorization header") ||
+        error.message === "Invalid access token format" ||
+        error.message === "Failed to decode access token" ||
+        error.message === "User sub not found in token claims") {
+      
+      return json(401, {
+        error: "Unauthorized",
+        details: error.message
+      });
+    }
 
     return json(500, { error: "Internal server error" });
   }

@@ -1224,10 +1224,10 @@ export class DentiPalCDKStack extends cdk.Stack {
     // 6. WebSocket API & Handler (New Chat Module)
     // ========================================================================
 
-    const webSocketChatHandler = new lambda.Function(this, 'WebSocketChatHandler', {
-        functionName: 'DentiPal-Chat-WebSocket',
-        runtime: lambda.Runtime.NODEJS_18_X,
-        handler: 'dist/websocketHandler.handler', // Assumes bundling puts it in 'dist'
+    const webSocketChatHandler = new lambda.Function(this, 'WebSocketChatHandler', {
+        functionName: 'DentiPal-Chat-WebSocket',
+        runtime: lambda.Runtime.NODEJS_18_X,
+        handler: 'dist/handlers/websocketHandler.handler',
         code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
         environment: {
             REGION: this.region,

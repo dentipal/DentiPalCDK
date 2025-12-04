@@ -1,6 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context, Handler } from 'aws-lambda';
 
-// --- HANDLER IMPORTS ---
 import { handler as createUserHandler } from "./handlers/createUser";
 import { handler as getUserHandler } from "./handlers/getUser";
 import { handler as updateUserHandler } from "./handlers/updateUser";

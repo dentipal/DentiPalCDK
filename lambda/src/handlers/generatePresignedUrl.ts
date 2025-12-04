@@ -210,7 +210,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 });
 
 // Type aliases for defined file types
-type FileType = "profile-image" | "certificate" | "video-resume";
+type FileType = "profile-image" | "certificate" | "video-resume" | "professional-resume" | "driving-license" | "professional-license";
 
 // Define Request Body interface
 interface RequestBody {
@@ -300,7 +300,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Validation ---
 
         // 1. Validate fileType
-        const types: FileType[] = ["profile-image", "certificate", "video-resume"];
+        const types: FileType[] = ["profile-image", "certificate", "video-resume", "professional-resume", "driving-license", "professional-license"];
         if (!types.includes(fileType)) {
             return json(400, { error: "Invalid file type" });
         }
@@ -309,7 +309,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const maxSizes: Record<FileType, number> = {
             "profile-image": 5 * 1024 * 1024,   // 5MB
             certificate: 10 * 1024 * 1024,      // 10MB
-            "video-resume": 100 * 1024 * 1024   // 100MB
+            "video-resume": 100 * 1024 * 1024,  // 100MB
+            "professional-resume": 10 * 1024 * 1024,  // 10MB
+            "driving-license": 10 * 1024 * 1024,      // 10MB
+            "professional-license": 10 * 1024 * 1024  // 10MB
         };
 
         if (fileSize && fileSize > maxSizes[fileType]) {
@@ -330,7 +333,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 "video/mov",
                 "video/quicktime",
                 "application/octet-stream"
-            ]
+            ],
+            "professional-resume": ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+            "driving-license": ["application/pdf", "image/jpeg", "image/png"],
+            "professional-license": ["application/pdf", "image/jpeg", "image/png"]
         };
 
         if (!allowedContentTypes[fileType].includes(contentType)) {
@@ -343,7 +349,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const buckets: Record<FileType, string | undefined> = {
             "profile-image": process.env.PROFILE_IMAGES_BUCKET,
             certificate: process.env.CERTIFICATES_BUCKET,
-            "video-resume": process.env.VIDEO_RESUMES_BUCKET
+            "video-resume": process.env.VIDEO_RESUMES_BUCKET,
+            "professional-resume": process.env.PROFESSIONAL_RESUMES_BUCKET,
+            "driving-license": process.env.DRIVING_LICENSES_BUCKET,
+            "professional-license": process.env.PROFESSIONAL_LICENSES_BUCKET
         };
         const bucketName = buckets[fileType];
 
