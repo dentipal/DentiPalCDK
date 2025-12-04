@@ -19,7 +19,7 @@ const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
 // Allowed groups
-const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
+const ALLOWED_GROUPS = new Set(["Root", "ClinicAdmin", "ClinicManager"]);
 
 // Helper
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({

@@ -22,7 +22,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 const norm = (s: string | undefined): string =>
   String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
-const CLINIC_GROUPS_NORM = new Set(["root", "clinicadmin", "clinicmanager", "clinicviewer"]);
+const CLINIC_GROUPS_NORM = new Set(["Root", "ClinicAdmin", "ClinicManager", "ClinicViewer"]);
 
 function isClinicRole(groups: string[] | undefined): boolean {
   const normalized = (groups || []).map(norm);

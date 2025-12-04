@@ -59,14 +59,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         // Must be 'clinic' type, in 'clinic' group, or 'root'
         const isClinicUser = userType.toLowerCase() === "clinic" || normalizedGroups.some(g => g.includes("clinic"));
-        const isRootUser = normalizedGroups.includes("root");
+        const isRootUser = normalizedGroups.includes("Root");
 
         if (!isClinicUser && !isRootUser) {
             console.warn(`❌ User ${userSub} denied access. Type: ${userType}, Groups: ${userGroups.join(', ')}`);
             return json(403, {
                 error: "Forbidden",
                 message: "Access denied",
-                details: { requiredUserTypes: ["clinic", "root"] }
+                details: { requiredUserTypes: ["ClinicAdmin", "Root"] }
             });
         }
 

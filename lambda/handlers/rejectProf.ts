@@ -20,7 +20,7 @@ const REGION: string = process.env.REGION!;
 const clientConfig: DynamoDBClientConfig = { region: REGION };
 const dynamodb = new DynamoDBClient(clientConfig);
 
-const ALLOWED_GROUPS = new Set<string>(["root", "clinicadmin", "clinicmanager"]);
+const ALLOWED_GROUPS = new Set<string>(["Root", "ClinicAdmin", "ClinicManager"]);
 
 // Helper to build JSON responses with shared CORS
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({

@@ -483,7 +483,7 @@ function parseGroupsFromAuthorizer(event: APIGatewayProxyEvent): string[] {
 }
 
 const normalizeGroup = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, "");
-const ALLOWED_GROUPS: Set<string> = new Set(["root", "clinicadmin", "clinicmanager"]);
+const ALLOWED_GROUPS: Set<string> = new Set(["Root", "ClinicAdmin", "ClinicManager"]);
 
 // --- Validation Helpers ---
 

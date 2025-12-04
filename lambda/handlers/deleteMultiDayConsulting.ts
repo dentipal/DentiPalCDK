@@ -21,7 +21,7 @@ const ddbDoc = DynamoDBDocumentClient.from(client);
 const MULTI_DAY_JOB_TYPE = "multi_day_consulting";
 
 // Allowed groups for deletion
-const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
+const ALLOWED_GROUPS = new Set(["Root", "ClinicAdmin", "ClinicManager"]);
 
 // --- Helpers ---
 

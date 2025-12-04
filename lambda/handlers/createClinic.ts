@@ -71,7 +71,7 @@ function parseGroupsFromAuthorizer(event: APIGatewayProxyEvent): string[] {
  */
 const normalize = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, ""); 
 
-const ALLOWED_CREATORS: Set<string> = new Set(["root", "clinicadmin"]);
+const ALLOWED_CREATORS: Set<string> = new Set(["Root", "ClinicAdmin"]);
 
 /**
  * Checks if the user's groups permit the creation of a clinic.
