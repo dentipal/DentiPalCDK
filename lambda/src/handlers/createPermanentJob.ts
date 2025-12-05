@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
-import { extractUserFromBearerToken, hasClinicAccess, isRoot, UserInfo } from "./utils"; 
+import { extractUserFromBearerToken, hasClinicAccess, isRoot } from "./utils"; 
 import { VALID_ROLE_VALUES } from "./professionalRoles"; 
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -16,19 +16,35 @@ const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostin
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
-// --- Type Definitions (Simplified for Permanent Job) ---
+// --- Type Definitions ---
 
-interface PermanentJobData {
+interface JobData {
     clinicIds: string[];
+    job_type: "temporary" | "multi_day_consulting" | "permanent";
     professional_role: string;
     shift_speciality: string;
+    
+    // Optional common fields
     job_title?: string;
     job_description?: string;
     requirements?: string[];
-    employment_type: "full_time" | "part_time";
-    salary_min: number;
-    salary_max: number;
-    benefits: string[];
+    
+    // Temporary job fields
+    date?: string;
+    hours?: number;
+    hourly_rate?: number;
+    
+    // Multi-day consulting fields
+    dates?: string[];
+    total_days?: number;
+    hours_per_day?: number;
+    project_duration?: string;
+    
+    // Permanent job fields
+    employment_type?: "full_time" | "part_time";
+    salary_min?: number;
+    salary_max?: number;
+    benefits?: string[];
     vacation_days?: number;
     work_schedule?: string;
     start_date?: string;
@@ -71,15 +87,88 @@ async function getClinicProfileByUser(clinicId: string, userSub: string): Promis
     }
 }
 
-// --- Validation Functions (Permanent Only) ---
+// --- Validation Functions ---
 
-const validatePermanentJob = (jobData: PermanentJobData): string | null => {
-    // ... validation logic (omitted for brevity, assume correct) ...
+const validateTemporaryJob = (jobData: JobData): string | null => {
+    if (!jobData.date || !jobData.hours || !jobData.hourly_rate) {
+        return "Temporary job requires: date, hours, hourly_rate";
+    }
+    const jobDate = new Date(jobData.date);
+    if (isNaN(jobDate.getTime())) {
+        return "Invalid date format. Use ISO date string.";
+    }
+    // ✅ FIX: Check date is in the future
+    if (jobDate <= new Date()) {
+        return "Job date must be in the future";
+    }
+    if (jobData.hours < 1 || jobData.hours > 12) {
+        return "Hours must be between 1 and 12";
+    }
+    if (jobData.hourly_rate < 10 || jobData.hourly_rate > 200) {
+        return "Hourly rate must be between $10 and $200";
+    }
+    return null;
+};
+
+const validateMultiDayConsulting = (jobData: JobData): string | null => {
+    // ✅ FIX: Added validation for multi-day consulting
+    if (!jobData.dates || !Array.isArray(jobData.dates) || jobData.dates.length === 0) {
+        return "Multi-day consulting requires: dates (array)";
+    }
+    if (jobData.dates.length > 30) {
+        return "Cannot schedule more than 30 days";
+    }
+    // Validate all dates are in the future
+    const now = new Date();
+    for (const dateStr of jobData.dates) {
+        const date = new Date(dateStr);
+        if (isNaN(date.getTime())) {
+            return `Invalid date format: ${dateStr}`;
+        }
+        if (date <= now) {
+            return `All dates must be in the future. Invalid: ${dateStr}`;
+        }
+    }
+    if (jobData.hours_per_day && (jobData.hours_per_day < 1 || jobData.hours_per_day > 12)) {
+        return "Hours per day must be between 1 and 12";
+    }
+    if (jobData.hourly_rate && (jobData.hourly_rate < 10 || jobData.hourly_rate > 300)) {
+        return "Hourly rate must be between $10 and $300";
+    }
+    return null;
+};
+
+const validatePermanentJob = (jobData: JobData): string | null => {
+    // ✅ FIX: Check if fields exist AND are valid types
+    if (!jobData.employment_type) {
+        return "Permanent job requires: employment_type";
+    }
+    if (typeof jobData.salary_min !== 'number' || typeof jobData.salary_max !== 'number') {
+        return "Permanent job requires: salary_min and salary_max (numbers)";
+    }
+    if (!Array.isArray(jobData.benefits)) {
+        return "Benefits must be an array";
+    }
     
-    // Add salary range validation log
+    // ✅ FIX: Add salary range validation
     if (jobData.salary_min < 20000 || jobData.salary_min > 500000) {
-        console.log(`Validation Failed: Minimum salary ${jobData.salary_min} out of range.`);
         return "Minimum salary must be between $20,000 and $500,000";
+    }
+    if (jobData.salary_max < 20000 || jobData.salary_max > 500000) {
+        return "Maximum salary must be between $20,000 and $500,000";
+    }
+    if (jobData.salary_max <= jobData.salary_min) {
+        return "Maximum salary must be greater than minimum salary";
+    }
+    
+    const validEmploymentTypes: string[] = ["full_time", "part_time"];
+    if (!validEmploymentTypes.includes(jobData.employment_type)) {
+        return `Invalid employment_type. Valid options: ${validEmploymentTypes.join(", ")}`;
+    }
+    
+    // ✅ FIX: Validate vacation days if provided
+    if (jobData.vacation_days !== undefined && (jobData.vacation_days < 0 || jobData.vacation_days > 50)) {
+        return "Vacation days must be between 0 and 50";
     }
     
     return null;
@@ -88,11 +177,9 @@ const validatePermanentJob = (jobData: PermanentJobData): string | null => {
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    console.log('🚀 HANDLER STARTED - createPermanentJob.ts (Dedicated)');
+    console.log('🚀 HANDLER STARTED - createPermanentJob.ts');
     console.log('HTTP Method:', event.httpMethod);
     console.log('Path:', event.path);
-    console.log('📋 ALL HEADERS:', JSON.stringify(event.headers, null, 2));
-    console.log('🔐 Authorization Header Value:', event.headers?.Authorization || event.headers?.authorization || 'MISSING');
     
     // --- CORS preflight ---
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
@@ -100,156 +187,327 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (method === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }
-    
-    if (method !== "POST") {
-        return json(405, { error: "Method Not Allowed", message: "Only POST requests are allowed on this endpoint." });
-    }
-
-    let userSub: string;
-    let userGroups: string[] = [];
-    let jobData: PermanentJobData;
 
     try {
-        console.log('=== STEP 1: AUTHENTICATION ===');
+        // 1. Authentication (Access Token)
+        console.log('=== AUTHENTICATION START ===');
+        
+        let userSub: string;
+        let userGroups: string[] = [];
+        
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
-        console.log('🔐 Auth Header from headers:', authHeader ? 'YES - ' + authHeader.substring(0, 50) + '...' : 'NO');
-        console.log('📦 Full event.requestContext:', JSON.stringify((event.requestContext as any), null, 2));
+        console.log('Authorization header present:', !!authHeader);
         
-        if (!authHeader) {
-            console.error('❌ NO AUTHORIZATION HEADER FOUND');
-            console.log('Available headers keys:', Object.keys(event.headers || {}));
-            throw new Error("Authorization header missing");
-        }
-        
-        // Assume utils.ts logs details here
-        const userInfo: UserInfo = extractUserFromBearerToken(authHeader);
+        const userInfo = extractUserFromBearerToken(authHeader);
+        console.log('extractUserFromBearerToken success');
         
         userSub = userInfo.sub;
         userGroups = userInfo.groups || [];
-        console.log('✅ User authenticated. Sub:', userSub, 'Groups:', userGroups);
+        console.log('Extracted userSub:', userSub);
+        console.log('Extracted userGroups:', JSON.stringify(userGroups));
         
-        console.log('=== STEP 2: AUTHORIZATION ===');
-        const normalized = userGroups.map(normalizeGroup);
-        const isAllowed = normalized.some(g => ALLOWED_GROUPS.has(g));
-        console.log(`User groups normalized: ${normalized.join(', ')}. Is allowed: ${isAllowed}`);
+        console.log('=== AUTHENTICATION END ===');
 
+        // 2. Group Authorization (Root, ClinicAdmin, ClinicManager only)
+        console.log('=== AUTHORIZATION START ===');
+        const normalized = userGroups.map(normalizeGroup);
+        console.log(`User ${userSub} - Normalized groups:`, JSON.stringify(normalized));
+        
+        const isAllowed = normalized.some(g => ALLOWED_GROUPS.has(g));
+        console.log(`Is allowed:`, isAllowed);
+        console.log('=== AUTHORIZATION END ===');
+        
         if (!isAllowed) {
-            console.warn(`403 Forbidden: User ${userSub} denied. Groups: [${userGroups.join(', ')}]`);
+            console.warn(`User ${userSub} denied. Groups: [${userGroups.join(', ')}]`);
             return json(403, {
                 error: "Forbidden",
-                message: "Access denied: only Root, ClinicAdmin, or ClinicManager can create permanent jobs",
-                details: { requiredGroups: ALLOWED_GROUPS_DISPLAY, userGroups }
+                message: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs",
+                details: { 
+                    requiredGroups: ALLOWED_GROUPS_DISPLAY,  
+                    userGroups 
+                }
             });
         }
 
         // 3. Parse Body
-        jobData = JSON.parse(event.body || '{}');
-        console.log(`Request Body parsed. Clinics to process: ${jobData.clinicIds.length}`);
+        const jobData: JobData = JSON.parse(event.body || '{}');
 
-        // 4. Validation
-        console.log('=== STEP 3: VALIDATION ===');
-        const validationError = validatePermanentJob(jobData);
+        // 4. Validate Common Required Fields
+        if (
+            !jobData.job_type ||
+            !jobData.professional_role ||
+            !jobData.shift_speciality ||
+            !jobData.clinicIds ||
+            !Array.isArray(jobData.clinicIds) ||
+            jobData.clinicIds.length === 0
+        ) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Missing required fields",
+                details: {
+                    requiredFields: ["job_type", "professional_role", "shift_speciality", "clinicIds (array)"]
+                }
+            });
+        }
+
+        // 5. Validate Job Type
+        const validJobTypes: string[] = ["temporary", "multi_day_consulting", "permanent"];
+        if (!validJobTypes.includes(jobData.job_type)) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid job type",
+                details: { 
+                    validJobTypes, 
+                    providedJobType: jobData.job_type 
+                }
+            });
+        }
+
+        // 6. Validate Professional Role
+        if (!VALID_ROLE_VALUES.includes(jobData.professional_role)) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid professional role",
+                details: { 
+                    validRoles: VALID_ROLE_VALUES, 
+                    providedRole: jobData.professional_role 
+                }
+            });
+        }
+
+        // 7. Job Type Specific Validation
+        let validationError: string | null = null;
+        switch (jobData.job_type) {
+            case "temporary":
+                validationError = validateTemporaryJob(jobData);
+                break;
+            case "multi_day_consulting":
+                // ✅ FIX: Added validation for multi-day consulting
+                validationError = validateMultiDayConsulting(jobData);
+                break;
+            case "permanent":
+                validationError = validatePermanentJob(jobData);
+                break;
+        }
 
         if (validationError) {
-            console.error(`400 Bad Request: Validation failed: ${validationError}`);
             return json(400, {
                 error: "Bad Request",
                 message: "Validation failed",
                 details: { validationError }
             });
         }
-        console.log('Input validation successful.');
-        
-        // 5. Verify Clinic Access
-        console.log('=== STEP 4: CLINIC ACCESS CHECK ===');
+
+        // ✅ FIX: Verify user has access to all clinics BEFORE creating jobs
+        console.log('=== CLINIC ACCESS VERIFICATION START ===');
         const isRootUser = isRoot(userGroups);
         
         if (!isRootUser) {
+            // Non-root users must have access to each clinic
             for (const clinicId of jobData.clinicIds) {
                 const hasAccess = await hasClinicAccess(userSub, clinicId);
-                console.log(`Checking access for Clinic ${clinicId}: ${hasAccess}`);
                 if (!hasAccess) {
-                    console.warn(`403 Forbidden: Access denied to clinic ${clinicId}`);
+                    console.warn(`User ${userSub} denied access to clinic ${clinicId}`);
                     return json(403, {
                         error: "Forbidden",
-                        message: `Access denied to clinic ${clinicId}. You can only create jobs for clinics you manage.`,
-                        details: { deniedClinicId: clinicId }
+                        message: `Access denied to clinic ${clinicId}`,
+                        details: { 
+                            reason: "You can only create jobs for clinics you manage",
+                            deniedClinicId: clinicId
+                        }
                     });
                 }
             }
         }
-        console.log('Clinic access verified for all requested clinics.');
+        console.log('=== CLINIC ACCESS VERIFICATION END ===');
 
         const timestamp = new Date().toISOString();
         const jobIds: string[] = [];
         const createdJobs: any[] = [];
         const failedClinics: { clinicId: string, error: string }[] = [];
 
-        // 6. Process Each Clinic 
-        console.log(`=== STEP 5: CREATING ${jobData.clinicIds.length} JOBS ===`);
+        // 8. Process Each Clinic with better error handling
         const postJobsPromises = jobData.clinicIds.map(async (clinicId) => {
             try {
                 const jobId = uuidv4();
-                console.log(`[Clinic ${clinicId}] Starting job creation with ID: ${jobId}`);
 
-                const clinicResponse = await ddbDoc.send(new GetCommand({ TableName: CLINICS_TABLE, Key: { clinicId: clinicId } }));
+                // Fetch clinic (address + owner)
+                const clinicResponse = await ddbDoc.send(new GetCommand({
+                    TableName: CLINICS_TABLE,
+                    Key: { clinicId: clinicId }
+                }));
+
                 const clinic = clinicResponse.Item;
-                if (!clinic) throw new Error(`Clinic not found in DB`);
-                console.log(`[Clinic ${clinicId}] Clinic details fetched.`);
-                
-                // Fetch profile logic
-                // ...
-                console.log(`[Clinic ${clinicId}] Profile data aggregated.`);
+                if (!clinic) {
+                    throw new Error(`Clinic not found: ${clinicId}`);
+                }
 
-                // Build item logic
-                const item: Record<string, any> = {
-                    // ... item creation ...
-                    jobId: jobId,
-                    job_type: "permanent", 
-                    clinicId: clinicId,
-                    clinicUserSub: userSub,
-                    // ... other fields
+                // Extract clinic address details
+                const addressLine1 = clinic.addressLine1 || "";
+                const addressLine2 = clinic.addressLine2 || "";
+                const city = clinic.city || "";
+                const state = clinic.state || "";
+                const pincode = clinic.pincode || "";
+                const fullAddress = `${addressLine1} ${addressLine2}`.replace(/\s+/g, " ").trim();
+                const clinicOwnerSub = clinic.createdBy;
+
+                // Fetch clinic profile: try current user first, then owner; otherwise defaults
+                let profileItem = await getClinicProfileByUser(clinicId, userSub);
+                if (!profileItem && clinicOwnerSub && clinicOwnerSub !== userSub) {
+                    profileItem = await getClinicProfileByUser(clinicId, clinicOwnerSub);
+                }
+
+                const p = profileItem || {};
+                const profileData: ProfileData = {
+                    bookingOutPeriod: p.bookingOutPeriod || p.booking_out_period || "immediate",
+                    clinicSoftware: p.softwareUsed || p.software_used || "Unknown",
+                    freeParkingAvailable: p.free_parking_available ?? false,
+                    parkingType: p.parking_type || "N/A",
+                    practiceType: p.practiceType || p.practice_type || "General",
+                    primaryPracticeArea: p.primaryPracticeArea || p.primary_practice_area || "General Dentistry"
                 };
 
-                await ddbDoc.send(new PutCommand({ TableName: JOB_POSTINGS_TABLE, Item: item }));
+                // Build job posting item
+                const item: Record<string, any> = {
+                    clinicId: clinicId,
+                    clinicUserSub: userSub,
+                    jobId: jobId,
+                    job_type: jobData.job_type,
+                    professional_role: jobData.professional_role,
+                    shift_speciality: jobData.shift_speciality,
+                    status: "active",
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                    
+                    // Address fields
+                    addressLine1: addressLine1,
+                    addressLine2: addressLine2,
+                    fullAddress: fullAddress,
+                    city: city,
+                    state: state,
+                    pincode: pincode,
+                    
+                    // Profile fields
+                    bookingOutPeriod: profileData.bookingOutPeriod,
+                    clinicSoftware: profileData.clinicSoftware,
+                    freeParkingAvailable: profileData.freeParkingAvailable,
+                    parkingType: profileData.parkingType,
+                    practiceType: profileData.practiceType,
+                    primaryPracticeArea: profileData.primaryPracticeArea
+                };
+
+                // Optional common fields
+                if (jobData.job_title) item.job_title = jobData.job_title;
+                if (jobData.job_description) item.job_description = jobData.job_description;
+                if (jobData.requirements && jobData.requirements.length > 0) {
+                    item.requirements = new Set(jobData.requirements);
+                }
+
+                // Job type specific fields
+                if (jobData.job_type === "temporary") {
+                    if (jobData.date) item.date = jobData.date;
+                    if (jobData.hours) item.hours = jobData.hours;
+                    if (jobData.hourly_rate) item.hourly_rate = jobData.hourly_rate;
+                }
+
+                if (jobData.job_type === "multi_day_consulting") {
+                    if (jobData.dates && jobData.dates.length > 0) {
+                        item.dates = new Set(jobData.dates);
+                        item.total_days = jobData.dates.length;
+                    }
+                    if (jobData.hours_per_day) item.hours_per_day = jobData.hours_per_day;
+                    if (jobData.hourly_rate) item.hourly_rate = jobData.hourly_rate;
+                    if (jobData.project_duration) item.project_duration = jobData.project_duration;
+                }
+
+                if (jobData.job_type === "permanent") {
+                    if (jobData.employment_type) item.employment_type = jobData.employment_type;
+                    if (jobData.salary_min) item.salary_min = jobData.salary_min;
+                    if (jobData.salary_max) item.salary_max = jobData.salary_max;
+                    if (jobData.benefits && jobData.benefits.length > 0) {
+                        item.benefits = new Set(jobData.benefits);
+                    }
+                    if (jobData.vacation_days !== undefined) item.vacation_days = jobData.vacation_days;
+                    if (jobData.work_schedule) item.work_schedule = jobData.work_schedule;
+                    if (jobData.start_date) item.start_date = jobData.start_date;
+                }
+
+                // Insert the job into DynamoDB
+                await ddbDoc.send(new PutCommand({
+                    TableName: JOB_POSTINGS_TABLE,
+                    Item: item
+                }));
 
                 jobIds.push(jobId);
                 createdJobs.push({ clinicId, jobId });
-                console.log(`[Clinic ${clinicId}] Job successfully written to DynamoDB.`);
                 
             } catch (error: any) {
-                console.error(`[Clinic ${clinicId}] Failed to create job:`, error.message);
-                failedClinics.push({ clinicId, error: error.message || 'Unknown error' });
+                console.error(`Failed to create job for clinic ${clinicId}:`, error);
+                failedClinics.push({ 
+                    clinicId, 
+                    error: error.message || 'Unknown error' 
+                });
             }
         });
 
         await Promise.all(postJobsPromises);
-        console.log('=== STEP 6: RESPONSE GENERATION ===');
-        
-        // ... Response Handling logic ...
-        
+
+        // ✅ FIX: Better response with partial success handling
         if (jobIds.length === 0) {
-            console.error('500 Error: No jobs created.');
-            // Return 500
+            return json(500, {
+                error: "Internal Server Error",
+                message: "Failed to create any job postings",
+                details: {
+                    failedClinics,
+                    totalRequested: jobData.clinicIds.length
+                }
+            });
         }
 
-        const statusCode = jobIds.length === jobData.clinicIds.length ? 201 : 207;
-        console.log(`Handler finished. Status: ${statusCode}. Successes: ${jobIds.length}, Failures: ${failedClinics.length}`);
-        
-        return json(statusCode, { /* ... response data ... */ });
+        // 9. Response
+        const response: any = {
+            status: "success",
+            message: `Job posting created for ${jobIds.length} clinic(s)`,
+            data: {
+                jobIds,
+                createdJobs,
+                jobType: jobData.job_type,
+                professionalRole: jobData.professional_role,
+                successCount: jobIds.length,
+                totalRequested: jobData.clinicIds.length
+            },
+            timestamp: timestamp
+        };
+
+        // Include failed clinics if any
+        if (failedClinics.length > 0) {
+            response.status = "partial_success";
+            response.message = `Job posting created for ${jobIds.length} of ${jobData.clinicIds.length} clinic(s)`;
+            response.data.failedClinics = failedClinics;
+            response.data.failedCount = failedClinics.length;
+        }
+
+        return json(jobIds.length === jobData.clinicIds.length ? 201 : 207, response);
 
     } catch (error: any) {
-        console.error("Critical Unhandled Error:", error);
+        console.error("Error creating job posting:", error);
         
-        if (error.message?.includes("Authorization header") || error.message?.includes("token")) {
-            console.log('Returning 401 Unauthorized.');
-            return json(401, { error: "Unauthorized", details: error.message });
+        // ✅ FIX: Check for Auth errors and return 401
+        if (error.message === "Authorization header missing" || 
+            error.message?.startsWith("Invalid authorization header") ||
+            error.message === "Invalid access token format" ||
+            error.message === "Failed to decode access token" ||
+            error.message === "User sub not found in token claims") {
+            
+            return json(401, {
+                error: "Unauthorized",
+                details: error.message
+            });
         }
         
-        console.log('Returning 500 Internal Server Error.');
         return json(500, {
             error: "Internal Server Error",
-            message: "Failed to process job posting request",
+            message: "Failed to create job posting",
             details: { reason: error.message }
         });
     }
