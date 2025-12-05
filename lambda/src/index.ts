@@ -418,9 +418,13 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
     // --- STEP 4: Execute Handler ---
     try {
         console.log(`✅ SUCCESS: Routing to handler for ${httpMethod}:${matchedResource}`);
+        console.log(`🎯 Handler type: ${routeHandler.name || 'anonymous'}`);
+        console.log(`🎯 Calling handler with event path: ${event.path}`);
         // Call the handler. Since RouteHandler is 'any', this bypasses strict TS checks.
         // We pass 'context' as well, which is standard for Lambda handlers.
-        return await routeHandler(event, context);
+        const result = await routeHandler(event, context);
+        console.log(`✅ Handler completed successfully. Status: ${result.statusCode}`);
+        return result;
     }
     catch (error: any) {
         console.error(`❌ ERROR processing ${httpMethod} ${matchedResource}:`, error);
