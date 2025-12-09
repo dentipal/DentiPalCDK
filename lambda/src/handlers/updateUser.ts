@@ -216,7 +216,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const groups = userInfo.groups || [];
         
         // 2. Check if user is Root or ClinicAdmin
-        const isRootUser: boolean = groups.includes("Root");
+        const isRootUser: boolean = groups.includes("root");
         const isClinicAdmin: boolean = groups.includes("ClinicAdmin");
         
         if (!isRootUser && !isClinicAdmin) {
@@ -224,7 +224,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Only Root or ClinicAdmin can update users",
-                details: { requiredGroups: ["Root", "ClinicAdmin"] },
+                details: { requiredGroups: ["root", "clinicadmin"] },
                 timestamp: new Date().toISOString()
             });
         }

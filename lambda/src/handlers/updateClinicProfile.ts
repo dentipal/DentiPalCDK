@@ -96,7 +96,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Step 3: Verify user is clinic or Root
         const isClinicUser = userType.toLowerCase() === "clinic" || groups.includes("clinic");
-        const isRootUser = groups.includes("Root");
+        const isRootUser = groups.includes("root");
 
         if (!isClinicUser && !isRootUser) {
             console.warn("🚫 Unauthorized userType for profile update:", userType);

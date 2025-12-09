@@ -107,7 +107,7 @@ interface ProfileData {
 
 // --- 4. Main Handler ---
 
-const ALLOWED_GROUPS: Set<string> = new Set(["Root", "ClinicAdmin", "ClinicManager"]);
+const ALLOWED_GROUPS: Set<string> = new Set(["root", "clinicadmin", "clinicmanager"]);
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";

@@ -3,6 +3,8 @@ import {
     PutItemCommand,
     PutItemCommandInput,
     AttributeValue,
+    ScanCommand,
+    ScanCommandInput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; // Assuming extractUserFromBearerToken is in utils.ts
@@ -101,11 +103,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             item.addressLine3 = { S: addressData.addressLine3 };
         }
 
-        // Step 4: Write to DynamoDB (Conditional check to prevent overwrite)
+        // Step 4: Check if the given pincode (zip/postal code) already exists in the table.
+        // If it exists, return a 409 with a clear message as requested.
+        const tableName = process.env.USER_ADDRESSES_TABLE as string;
+        const scanInput: ScanCommandInput = {
+            TableName: tableName,
+            FilterExpression: "pincode = :pincode",
+            ExpressionAttributeValues: {
+                ":pincode": { S: addressData.pincode }
+            },
+            Limit: 1
+        };
+
+        try {
+            const scanRes = await dynamodb.send(new ScanCommand(scanInput));
+            if ((scanRes.Count || 0) > 0) {
+                // Found at least one address with same postal code
+                return {
+                    statusCode: 409,
+                    headers: CORS_HEADERS,
+                    body: JSON.stringify({ error: `Postal code ${addressData.pincode} already exists in the addresses table` })
+                };
+            }
+        } catch (scanErr) {
+            console.warn("Failed to scan for existing pincodes:", scanErr);
+            // continue to attempt the put; we don't want to block writes on scan failures
+        }
+
+        // Step 5: Write to DynamoDB (no overwrite of the same userSub)
         const putItemInput: PutItemCommandInput = {
-            TableName: process.env.USER_ADDRESSES_TABLE,
+            TableName: tableName,
             Item: item,
-            // Condition to ensure this userSub does not already exist
             ConditionExpression: "attribute_not_exists(userSub)",
         };
 

@@ -109,7 +109,7 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
             const groups: string[] = userInfo.groups || [];
             console.log("Caller groups:", groups);
 
-            const ALLOWED: Set<string> = new Set(["Root", "ClinicAdmin", "ClinicManager"]);
+            const ALLOWED: Set<string> = new Set(["root", "clinicadmin", "clinicmanager"]);
             const isAllowed: boolean = groups.some((g) => ALLOWED.has(g));
 
             if (!isAllowed) {

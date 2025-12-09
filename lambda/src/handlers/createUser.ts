@@ -77,7 +77,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
         
         // strict check for Root group
-        if (!userGroups.includes("Root")) {
+        if (!userGroups.includes("root")) {
             console.warn("Unauthorized user tried to add new user. Groups:", userGroups);
             return json(403, {
                 error: "Forbidden",

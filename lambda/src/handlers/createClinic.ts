@@ -7,8 +7,8 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 
-// Assuming utils.ts contains definitions for extractUserFromBearerToken and buildAddress
-import { extractUserFromBearerToken, buildAddress } from "./utils";
+// Assuming utils.ts contains definitions for extractUserFromBearerToken, verifyToken and buildAddress
+import { extractUserFromBearerToken, buildAddress, verifyToken } from "./utils";
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS } from "./corsHeaders";
@@ -71,7 +71,7 @@ function parseGroupsFromAuthorizer(event: APIGatewayProxyEvent): string[] {
  */
 const normalize = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, ""); 
 
-const ALLOWED_CREATORS: Set<string> = new Set(["Root", "ClinicAdmin"]);
+const ALLOWED_CREATORS: Set<string> = new Set(["root", "clinicadmin"]);
 
 /**
  * Checks if the user's groups permit the creation of a clinic.
@@ -95,21 +95,47 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // Step 1: Authentication and Authorization - Extract access token
-        let userSub: string;
-        let groups: string[];
+        // Step 1: Authentication and Authorization - Extract access token + merge with authorizer
+        let userSub: string | undefined;
+        let groups: string[] = [];
+
+        const authHeader = event.headers?.Authorization || event.headers?.authorization;
+
+        // Try extracting groups from the bearer token (robust decoder)
         try {
-            const authHeader = event.headers?.Authorization || event.headers?.authorization;
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
-            groups = userInfo.groups || [];
-        } catch (authError: any) {
+            if (Array.isArray(userInfo.groups) && userInfo.groups.length) {
+                groups = groups.concat(userInfo.groups);
+            }
+            console.log('[auth] token-derived userSub:', userSub, 'groups:', JSON.stringify(userInfo.groups));
+        } catch (tokenErr: any) {
+            console.log('[auth] token decode failed:', tokenErr?.message || tokenErr);
+        }
+
+        // Also try to read groups from the API Gateway authorizer (if present)
+        try {
+            const authInfo = await verifyToken(event);
+            if (authInfo) {
+                userSub = userSub || authInfo.sub;
+                if (Array.isArray(authInfo.groups) && authInfo.groups.length) {
+                    groups = groups.concat(authInfo.groups);
+                }
+                console.log('[auth] authorizer-derived userSub:', authInfo.sub, 'groups:', JSON.stringify(authInfo.groups));
+            }
+        } catch (authErr: any) {
+            console.log('[auth] verifyToken error:', authErr?.message || authErr);
+        }
+
+        // Normalize and dedupe groups
+        groups = Array.from(new Set(groups.map(g => (g || '').toString())));
+        console.log("[auth] final userSub:", userSub, "final groups:", groups);
+
+        if (!userSub) {
             return {
                 statusCode: 401,
                 headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    error: authError.message || "Invalid access token"
-                })
+                body: JSON.stringify({ error: 'User not authenticated' })
             };
         }
 
@@ -121,6 +147,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     error: "Forbidden",
                     message: "Only Root or Clinic Admin users can create clinics",
                     statusCode: 403,
+                    groups: groups,
                     timestamp: new Date().toISOString(),
                 }),
             };
@@ -137,7 +164,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 body: JSON.stringify({
                     error: "Bad Request",
                     message: "Missing required fields",
-                    requiredFields: ["name", "addressLine1", "city", "state", "pincode"],
+                    requiredFields: ["name","addressLine1","city", "state", "pincode"],
                     statusCode: 400,
                     timestamp: new Date().toISOString(),
                 }),

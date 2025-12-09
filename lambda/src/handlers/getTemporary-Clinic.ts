@@ -87,7 +87,7 @@ export const handler = async (
           .map((g: string) => g.trim()) // FIXED ERROR HERE
           .filter(Boolean);
 
-    const isRoot = groups.includes("Root");
+    const isRoot = groups.includes("root");
 
     if (!isRoot) {
       const authProfileCommand = new GetItemCommand({

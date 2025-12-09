@@ -179,7 +179,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Step 3: Verify user is authorized (Role Check)
-        const isRootUser: boolean = groups.includes("Root");
+        const isRootUser: boolean = groups.includes("root");
         const isClinicUser: boolean = userType.toLowerCase() === "clinic" || groups.includes("clinic");
 
         if (!isRootUser && (!isClinicUser || userSub !== clinicIdFromPath)) {

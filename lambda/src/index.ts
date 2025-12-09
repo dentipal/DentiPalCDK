@@ -103,10 +103,24 @@ import { handler as confirmPasswordHandler } from "./handlers/confirmPassword";
 import { handler as sendReferralInviteHandler } from "./handlers/sendReferralInvite";
 
 import { handler as generatePresignedUrlHandler } from "./handlers/generatePresignedUrl";
-import { handler as getFileUrlHandler } from "./handlers/getFileUrl";
+import {
+    handler as getFileUrlHandler,
+    getProfileImage,
+    getProfessionalResume,
+    getProfessionalLicense,
+    getDrivingLicense,
+    getVideoResume,
+} from "./handlers/getFileUrl";
 import { handler as deleteFileHandler } from "./handlers/deleteFile";
 // Ensure this file is saved in lambda/handlers/updateFile.ts
-import { handler as updateFileHandler } from "./handlers/updateFile";
+import {
+    handler as updateFileHandler,
+    updateProfileImage,
+    updateProfessionalResume,
+    updateProfessionalLicense,
+    updateDrivingLicense,
+    updateVideoResume,
+} from "./handlers/updateFile";
 
 import { handler as publicProfessionalsHandler } from "./handlers/publicProfessionals";
 import { handler as publicClinicsHandler } from "./handlers/findJobs";
@@ -259,13 +273,20 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
 
         // File management routes
         "POST:/files/presigned-urls": generatePresignedUrlHandler,
-        "GET:/files/profile-images": getFileUrlHandler,
-        "GET:/files/certificates": getFileUrlHandler,
-        "GET:/files/video-resumes": getFileUrlHandler,
-        "PUT:/files/profile-images": updateFileHandler,
-        "PUT /files/profile-image": updateFileHandler,
-        "PUT:/files/certificates": updateFileHandler,
-        "PUT:/files/video-resumes": updateFileHandler,
+        // Dedicated endpoints per file type
+        "GET:/files/profile-images": getProfileImage,
+        "GET:/files/professional-resumes": getProfessionalResume,
+        "GET:/files/professional-licenses": getProfessionalLicense,
+        "GET:/files/driving-licenses": getDrivingLicense,
+        "GET:/files/video-resumes": getVideoResume,
+        // Backwards-compatible legacy route
+        // "GET:/files/certificates": getFileUrlHandler,
+        // "PUT:/files/profile-images": updateProfileImage,
+        "PUT:/files/profile-image": updateProfileImage,
+        "PUT:/files/professional-resumes": updateProfessionalResume,
+        "PUT:/files/professional-licenses": updateProfessionalLicense,
+        "PUT:/files/driving-licenses": updateDrivingLicense,
+        "PUT:/files/video-resumes": updateVideoResume,
         "DELETE:/files/profile-images": deleteFileHandler,
         "DELETE:/files/certificates": deleteFileHandler,
         "DELETE:/files/video-resumes": deleteFileHandler,

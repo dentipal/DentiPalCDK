@@ -175,7 +175,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(401, { error: authError.message || "Invalid access token" });
         }
         
-        if (!userGroups.includes("Root")) {
+        if (!userGroups.includes("root")) {
              return json(403, {
                 error: "Forbidden",
                 message: "Only Root users can delete users",

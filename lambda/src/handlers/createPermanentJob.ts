@@ -69,7 +69,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 
 const normalizeGroup = (g: string) => g.toLowerCase().replace(/[^a-z0-9]/g, "");
 const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
-const ALLOWED_GROUPS_DISPLAY = ["Root", "ClinicAdmin", "ClinicManager"];
+const ALLOWED_GROUPS_DISPLAY = ["root", "clinicadmin", "clinicmanager"];
 
 /**
  * Reads one clinic profile row by composite key (clinicId + userSub).

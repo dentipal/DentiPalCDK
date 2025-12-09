@@ -44,7 +44,7 @@ const getMethod = (e: APIGatewayProxyEvent): string =>
 const normalize = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 /** Set of normalized group names allowed to perform updates */
-const ALLOWED_UPDATERS: ReadonlySet<string> = new Set(["Root", "ClinicAdmin"]);
+const ALLOWED_UPDATERS: ReadonlySet<string> = new Set(["root", "clinicadmin"]);
 
 /** ----------------------------------------------------------------------- */
 
@@ -65,7 +65,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 3. Group Authorization Check (Root, ClinicAdmin)
         const normalized: string[] = groups.map(normalize);
-        const isRootGroup: boolean = normalized.includes("Root");
+        const isRootGroup: boolean = normalized.includes("root");
         
         const isAllowedGroup: boolean = normalized.some(g => ALLOWED_UPDATERS.has(g));
         
@@ -74,7 +74,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Access denied to update clinics",
-                details: { requiredGroups: ["Root", "ClinicAdmin"] },
+                details: { requiredGroups: ["root", "clinicadmin"] },
                 timestamp: new Date().toISOString()
             });
         }
