@@ -91,7 +91,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const applicationsCommand = new QueryCommand({
             TableName: JOB_APPLICATIONS_TABLE,
             // Assuming 'JobIndex' GSI exists where PK=jobId
-            IndexName: 'JobIndex',
+            // IndexName: 'JobIndex',
             KeyConditionExpression: "jobId = :jobId",
             FilterExpression: "applicationStatus IN (:pending, :accepted, :negotiating)",
             ExpressionAttributeValues: {
@@ -102,7 +102,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             },
         });
 
-        const appResponse = await ddbDoc.send(applicationsCommand);
+        let appResponse;
+        try {
+            appResponse = await ddbDoc.send(applicationsCommand);
+        } catch (error) {
+            const err = error as any; // Explicitly cast 'error' to 'any'
+            if (err instanceof Error) { // Narrowing 'err' to Error type
+                if (err.name === "ValidationException" && err.message.includes("specified index")) {
+                    console.error("The specified index 'JobIndex' does not exist on the table.");
+                    return json(500, {
+                        error: "Internal Server Error",
+                        message: "The table does not have the specified index: JobIndex",
+                        details: { reason: err.message }
+                    });
+                }
+            }
+            throw err; // Re-throw other errors
+        }
+
         const activeApplications = appResponse.Items || [];
 
         // 6. Update Active Applications

@@ -71,14 +71,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Parse request body - handle null or empty body
-        let profileData: ClinicProfileData;
-        try {
-            const bodyStr = event.body || event.isBase64Encoded ? (event.body ? Buffer.from(event.body, 'base64').toString('utf-8') : '{}') : event.body || '{}';
-            profileData = JSON.parse(bodyStr);
-        } catch (parseError: any) {
-            console.error("Error parsing request body:", parseError.message);
-            return json(400, { error: "Invalid JSON in request body" });
-        }
+       let profileData: ClinicProfileData;
+
+try {
+    // Ensure the body is always treated as a string
+    const bodyStr = event.isBase64Encoded
+        ? Buffer.from(event.body || '', 'base64').toString('utf-8') // Fallback to '' if event.body is null
+        : event.body || '{}';
+    profileData = JSON.parse(bodyStr);
+} catch (parseError) {
+    const error = parseError as Error; // Explicitly cast parseError to Error
+    console.error("Error parsing request body:", error.message);
+    return json(400, { error: "Invalid JSON in request body" });
+}
+
 
         // Required fields check
         if (

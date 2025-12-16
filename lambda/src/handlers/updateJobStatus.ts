@@ -7,9 +7,7 @@ import {
     UpdateItemCommandInput
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-// ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils"; 
-// Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
@@ -28,40 +26,33 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 
 type JobStatus = 'open' | 'scheduled' | 'action_needed' | 'completed';
 
-/** Map defining valid state transitions */
 const VALID_STATUS_TRANSITIONS: Record<JobStatus, JobStatus[]> = {
     'open': ['scheduled', 'action_needed', 'completed'],
-    'scheduled': ['action_needed', 'completed', 'open'], // Can reopen if needed
-    'action_needed': ['scheduled', 'completed', 'open'], // Can resolve negotiation
-    'completed': ['open'] // Can reopen if necessary
+    'scheduled': ['action_needed', 'completed', 'open'], 
+    'action_needed': ['scheduled', 'completed', 'open'], 
+    'completed': ['open'] 
 };
 
 const VALID_STATUSES: JobStatus[] = Object.keys(VALID_STATUS_TRANSITIONS) as JobStatus[];
 
-/** Interface for the data expected in the request body to change status. */
 interface UpdateStatusBody {
     status: JobStatus;
     notes?: string;
-    acceptedProfessionalUserSub?: string; // Required for 'scheduled'
-    scheduledDate?: string; // Required for 'scheduled'
-    completionNotes?: string; // Used for 'completed'
+    acceptedProfessionalUserSub?: string; 
+    scheduledDate?: string; 
+    completionNotes?: string; 
 }
 
-/** Interface for the DynamoDB Job Item structure (partial view used in this handler). */
 interface JobItem {
     clinicUserSub?: { S: string };
     jobId?: { S: string };
     status?: { S: string };
-    statusHistory?: { L: AttributeValue[] }; // DynamoDB List type for history
+    statusHistory?: { L: AttributeValue[] }; 
     [key: string]: AttributeValue | undefined;
 }
 
 // --- 3. Handler Function ---
 
-/**
- * Updates the status of a specific job posting, verifies ownership, and enforces 
- * valid state transitions.
- */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     // --- CORS preflight ---
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
@@ -71,20 +62,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
+        // --- STEP 1: AUTHENTICATION & INPUT PARSING ---
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
         const userInfo = extractUserFromBearerToken(authHeader);
         const userSub = userInfo.sub;
         
-        const jobId: string | undefined = event.pathParameters?.jobId;
+        let jobId: string | undefined = event.pathParameters?.jobId;
+
+        // Fallback: Parse from 'proxy' path if direct param is missing
+        if (!jobId && event.pathParameters?.proxy) {
+            const cleanPath = event.pathParameters.proxy.replace(/^\/+|\/+$/g, ''); 
+            const pathParts = cleanPath.split('/');
+            const jobsIndex = pathParts.indexOf("jobs");
+            
+            if (jobsIndex !== -1 && pathParts.length > jobsIndex + 1) {
+                 jobId = pathParts[jobsIndex + 1];
+            } else {
+                 if (pathParts.length >= 2 && pathParts[pathParts.length - 1] === 'status') {
+                     jobId = pathParts[pathParts.length - 2];
+                 } else {
+                     jobId = pathParts[pathParts.length - 1];
+                 }
+            }
+        }
         
+        console.log("DEBUG: Extracted Job ID:", jobId);
+
         if (!event.body) {
              return json(400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Request body is required",
-                details: { body: "empty" },
-                timestamp: new Date().toISOString()
             });
         }
 
@@ -95,8 +103,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Job ID is required",
-                details: { location: "path parameters" },
-                timestamp: new Date().toISOString()
             });
         }
         
@@ -105,27 +111,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Status is required",
-                details: { requiredField: "status" },
-                timestamp: new Date().toISOString()
             });
         }
 
-        // Validate that the new status is a recognized value
         if (!(VALID_STATUSES as string[]).includes(statusData.status)) {
             return json(400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Invalid status",
                 details: { validStatuses: VALID_STATUSES, providedStatus: statusData.status },
-                timestamp: new Date().toISOString()
             });
         }
 
-        // --- Step 1: Get current job to verify ownership and current status ---
+        // --- Step 2: Get current job ---
         const getParams = {
             TableName: JOB_POSTINGS_TABLE,
             Key: {
-                // PK and SK used here imply a composite key on (clinicUserSub, jobId)
                 clinicUserSub: { S: userSub },
                 jobId: { S: jobId }
             }
@@ -139,50 +140,57 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Not Found",
                 statusCode: 404,
                 message: "Job not found",
-                details: { jobId, reason: "Job does not exist or you don't have permission to update it" },
-                timestamp: new Date().toISOString()
             });
         }
         
-        // Ensure job is properly structured before continuing
         if (!currentJobItem.clinicUserSub?.S || currentJobItem.clinicUserSub.S !== userSub) {
              return json(403, {
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Access denied",
-                details: { reason: "Ownership mismatch" },
-                timestamp: new Date().toISOString()
             });
         }
 
-        const currentStatus: JobStatus = (currentJobItem.status?.S || 'open') as JobStatus;
+        // ✅ FIX STARTS HERE: Normalize "active" to "open"
+        let rawStatus = currentJobItem.status?.S || 'open';
+        
+        // If the DB says "active", we treat it as "open" so transitions work
+        if (rawStatus === 'active') {
+            rawStatus = 'open';
+        }
+
+        const currentStatus: JobStatus = rawStatus as JobStatus;
         const newStatus: JobStatus = statusData.status;
 
-        // --- Step 2: Validate status transition ---
-        const validTransitions: JobStatus[] = VALID_STATUS_TRANSITIONS[currentStatus];
-        if (!validTransitions || !validTransitions.includes(newStatus)) {
-            return json(400, {
-                error: "Bad Request",
-                statusCode: 400,
-                message: "Invalid status transition",
-                details: {
-                    currentStatus,
-                    requestedStatus: newStatus,
-                    validNextStates: validTransitions
-                },
-                timestamp: new Date().toISOString()
-            });
+        // --- Step 3: Validate status transition ---
+        
+        // ✅ FIX: Allow self-transition (e.g. updating notes without changing status)
+        if (currentStatus !== newStatus) {
+            const validTransitions: JobStatus[] = VALID_STATUS_TRANSITIONS[currentStatus];
+            
+            // If validTransitions is undefined (shouldn't happen now due to fix) or doesn't include new status
+            if (!validTransitions || !validTransitions.includes(newStatus)) {
+                return json(400, {
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Invalid status transition",
+                    details: {
+                        currentStatus, // This will now show "open" even if DB had "active"
+                        requestedStatus: newStatus,
+                        validNextStates: validTransitions
+                    },
+                });
+            }
         }
 
-        // --- Step 3: Validate required fields for specific statuses ---
+        // --- Step 4: Validate required fields ---
         if (newStatus === 'scheduled') {
             if (!statusData.acceptedProfessionalUserSub) {
                 return json(400, {
                     error: "Bad Request",
                     statusCode: 400,
                     message: "Missing required field for scheduled status",
-                    details: { requiredField: "acceptedProfessionalUserSub", forStatus: "scheduled" },
-                    timestamp: new Date().toISOString()
+                    details: { requiredField: "acceptedProfessionalUserSub" },
                 });
             }
             if (!statusData.scheduledDate) {
@@ -190,13 +198,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     error: "Bad Request",
                     statusCode: 400,
                     message: "Missing required field for scheduled status",
-                    details: { requiredField: "scheduledDate", forStatus: "scheduled" },
-                    timestamp: new Date().toISOString()
+                    details: { requiredField: "scheduledDate" },
                 });
             }
         }
         
-        // --- Step 4: Build update expression and attributes ---
+        // --- Step 5: Build update expression ---
         const timestamp: string = new Date().toISOString();
         let updateExpression: string = 'SET #status = :status, #updatedAt = :updatedAt';
         
@@ -209,7 +216,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             ':updatedAt': { S: timestamp }
         };
 
-        // Add optional fields based on status
         if (statusData.notes) {
             updateExpression += ', #notes = :notes';
             expressionAttributeNames['#notes'] = 'statusNotes';
@@ -226,7 +232,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             expressionAttributeValues[':scheduledDate'] = { S: statusData.scheduledDate };
         }
         
-        // Add completion fields if applicable
         if (newStatus === 'completed') {
             updateExpression += ', #completedAt = :completedAt';
             expressionAttributeNames['#completedAt'] = 'completedAt';
@@ -239,12 +244,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
         
-        // --- Step 5: Update status history ---
-        // Retrieve the current history list (L type) or initialize it
+        // --- Step 6: Update status history ---
         const statusHistory: AttributeValue[] = currentJobItem.statusHistory?.L || [];
         
         const newHistoryEntry: AttributeValue = {
-            M: { // DynamoDB Map type
+            M: { 
                 fromStatus: { S: currentStatus },
                 toStatus: { S: newStatus },
                 changedAt: { S: timestamp },
@@ -257,9 +261,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         updateExpression += ', #statusHistory = :statusHistory';
         expressionAttributeNames['#statusHistory'] = 'statusHistory';
-        expressionAttributeValues[':statusHistory'] = { L: statusHistory }; // Set the full updated List
+        expressionAttributeValues[':statusHistory'] = { L: statusHistory };
 
-        // --- Step 6: Execute Update ---
+        // --- Step 7: Execute Update ---
         const updateParams: UpdateItemCommandInput = {
             TableName: JOB_POSTINGS_TABLE,
             Key: {
@@ -274,7 +278,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         await dynamodb.send(new UpdateItemCommand(updateParams));
 
-        // --- Step 7: Return Success ---
         return json(200, {
             status: "success",
             statusCode: 200,
@@ -286,18 +289,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 updatedAt: timestamp,
                 acceptedProfessional: statusData.acceptedProfessionalUserSub || null,
                 scheduledDate: statusData.scheduledDate || null
-            },
-            timestamp: new Date().toISOString()
+            }
         });
 
     } catch (error: any) {
         console.error("Error updating job status:", error.message, error.stack);
         
-        // ✅ Check for Auth errors and return 401
         if (error.message === "Authorization header missing" || 
             error.message?.startsWith("Invalid authorization header") ||
-            error.message === "Invalid access token format" ||
-            error.message === "Failed to decode access token") {
+            error.message === "Invalid access token format") {
             
             return json(401, {
                 error: "Unauthorized",
@@ -309,8 +309,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to update job status",
-            details: { reason: error.message },
-            timestamp: new Date().toISOString()
+            details: { reason: error.message }
         });
     }
 };

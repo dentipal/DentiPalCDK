@@ -103,6 +103,8 @@ import { handler as confirmPasswordHandler } from "./handlers/confirmPassword";
 import { handler as sendReferralInviteHandler } from "./handlers/sendReferralInvite";
 
 import { handler as generatePresignedUrlHandler } from "./handlers/generatePresignedUrl";
+
+import { handler as getActionNeededHandler } from "./handlers/getActionNeeded"; 
 import {
     handler as getFileUrlHandler,
     getProfileImage,
@@ -124,6 +126,7 @@ import {
 
 import { handler as publicProfessionalsHandler } from "./handlers/publicProfessionals";
 import { handler as publicClinicsHandler } from "./handlers/findJobs";
+import { handler as getProfessionalFilteredJobsHandler } from "./handlers/getProfessionalFilteredJobs";
 
 // --- TYPE DEFINITIONS ---
 
@@ -215,6 +218,15 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/jobs/consulting": getAllMultiDayConsultingHandler,
         "PUT:/jobs/consulting/{jobId}": updateMultiDayConsultingHandler,
         "DELETE:/jobs/consulting/{jobId}": deleteMultiDayConsultingHandler,
+
+
+        // Action needed/pending applications
+        "GET:/action-needed": getActionNeededHandler,
+        "GET:/clinics/{clinicId}/action-needed": getActionNeededHandler,
+
+        // Professional job filtering by role
+        "GET:/professionals/filtered-jobs": getProfessionalFilteredJobsHandler,
+
 
         "POST:/jobs/permanent": createPermanentJobHandler,
         "GET:/jobs/permanent/{jobId}": getPermanentJobHandler,

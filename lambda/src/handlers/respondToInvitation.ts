@@ -1,60 +1,55 @@
 // Imports from AWS SDK
 import {
-    DynamoDBClient,
-    QueryCommand,
-    PutItemCommand,
-    UpdateItemCommand,
-    DynamoDBClientConfig,
-    AttributeValue, // Type for DynamoDB attribute values
+  DynamoDBClient,
+  QueryCommand,
+  PutItemCommand,
+  UpdateItemCommand,
+  DynamoDBClientConfig,
+  AttributeValue,
 } from "@aws-sdk/client-dynamodb";
+
 // Imports for AWS Lambda types
 import {
-    APIGatewayProxyEventV2,
-    APIGatewayProxyResultV2,
+  APIGatewayProxyEventV2,
+  APIGatewayProxyResultV2,
 } from "aws-lambda";
+
 // External utilities
-import { extractUserFromBearerToken } from "./utils"; 
-import { v4 as uuidv4 } from "uuid"; // Assuming uuid package is installed
+import { extractUserFromBearerToken } from "./utils";
+import { v4 as uuidv4 } from "uuid";
 
 // --- Type Definitions ---
-
-/** Defines the expected structure of the request body for responding to an invitation. */
 interface InvitationResponseData {
-    response: "accepted" | "declined" | "negotiating";
-    message?: string;
-    // Negotiation fields
-    proposedHourlyRate?: number;
-    proposedSalaryMin?: number;
-    proposedSalaryMax?: number;
-    availabilityNotes?: string;
-    counterProposalMessage?: string;
+  response: "accepted" | "declined" | "negotiating";
+  message?: string;
+  proposedHourlyRate?: number;
+  proposedSalaryMin?: number;
+  proposedSalaryMax?: number;
+  availabilityNotes?: string;
+  counterProposalMessage?: string;
 }
 
-/** Defines the structure of a single DynamoDB item (Invitation). */
 interface InvitationItem {
-    invitationId?: AttributeValue;
-    professionalUserSub?: AttributeValue;
-    jobId?: AttributeValue;
-    clinicUserSub?: AttributeValue;
-    clinicId?: AttributeValue;
-    invitationStatus?: AttributeValue;
-    [key: string]: AttributeValue | undefined;
+  invitationId?: AttributeValue;
+  professionalUserSub?: AttributeValue;
+  jobId?: AttributeValue;
+  clinicUserSub?: AttributeValue;
+  clinicId?: AttributeValue;
+  invitationStatus?: AttributeValue;
+  [key: string]: AttributeValue | undefined;
 }
 
-/** Defines the structure of a single DynamoDB item (Job). */
 interface JobItem {
-    job_type?: AttributeValue;
-    status?: AttributeValue;
-    [key: string]: AttributeValue | undefined;
+  job_type?: AttributeValue;
+  status?: AttributeValue;
+  clinicId?: AttributeValue;
+  jobId?: AttributeValue;
+  [key: string]: AttributeValue | undefined;
 }
 
-/** Standard response format for API Gateway V2 Lambda integration */
 type HandlerResponse = APIGatewayProxyResultV2;
 
-
 // --- Constants and Initialization ---
-
-// Use non-null assertion (!) as we expect these environment variables to be set.
 const REGION: string = process.env.REGION!;
 const JOB_INVITATIONS_TABLE: string = process.env.JOB_INVITATIONS_TABLE!;
 const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!;
@@ -65,342 +60,439 @@ const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
 
 import { CORS_HEADERS } from "./corsHeaders";
 
-const VALID_RESPONSES: ReadonlyArray<InvitationResponseData['response']> = ["accepted", "declined", "negotiating"];
+const VALID_RESPONSES: ReadonlyArray<InvitationResponseData['response']> = [
+  "accepted",
+  "declined",
+  "negotiating"
+];
 
 // --- Main Handler Function ---
-export const handler = async (event: APIGatewayProxyEventV2): Promise<HandlerResponse> => {
+export const handler = async (
+  event: APIGatewayProxyEventV2
+): Promise<HandlerResponse> => {
+  
+  // LOG: Entry
+  console.log("--- HANDLER STARTED ---");
+
+  // Calculate method and path BEFORE logging to avoid "undefined undefined"
+  const method = (event.requestContext as any).http?.method || (event as any).httpMethod || "POST";
+  const rawPath = event.rawPath || (event as any).path || "";
+
+  console.log("Event Method/Path:", method, rawPath);
+
+  // Handle CORS preflight
+  if (method === "OPTIONS") {
+    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+  }
+
+  try {
+    // --- STEP 1: AUTHENTICATION ---
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    const userInfo = extractUserFromBearerToken(authHeader);
+    const userSub = userInfo.sub;
     
-    // Handle CORS preflight
-    if (event.requestContext.http.method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    console.log("1. Authenticated User:", userSub);
+
+    // 2. Extract invitationId from path
+    const match = rawPath.match(/\/invitations\/([^/]+)\/response/);
+    const invitationId: string | undefined = match?.[1];
+    
+    console.log("2. Extracted Invitation ID:", invitationId);
+
+    if (!invitationId) {
+      console.warn("Error: Missing invitationId in path");
+      return {
+        statusCode: 400,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({ error: "invitationId is required in path" }),
+      };
     }
 
-    try {
-        // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
-        const authHeader = event.headers?.Authorization || event.headers?.authorization;
-        const userInfo = extractUserFromBearerToken(authHeader);
-        const userSub = userInfo.sub;
-        
-        console.log("Authenticated userSub from token:", userSub);
+    // 3. Parse and Validate Request Body
+    const responseData: InvitationResponseData = JSON.parse(event.body || "{}");
+    
+    console.log("3. Request Body Parsed:", JSON.stringify(responseData, null, 2));
 
-        // 2. Extract invitationId from path
-        const path: string = event.rawPath || ""; // Use rawPath for V2
-        // Regex to match: /invitations/<invitationId>/response
-        const match = path.match(/\/invitations\/([^/]+)\/response/);
-        const invitationId: string | undefined = match?.[1];
+    if (!responseData.response || !VALID_RESPONSES.includes(responseData.response)) {
+      return {
+        statusCode: 400,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          error: `Invalid or missing 'response' field. Valid options: ${VALID_RESPONSES.join(", ")}`
+        }),
+      };
+    }
 
-        if (!invitationId) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "invitationId is required in path" }),
-            };
-        }
+    // 4. Fetch Invitation
+    console.log("4. Fetching Invitation from DynamoDB...");
+    const invitationQuery = await dynamodb.send(
+      new QueryCommand({
+        TableName: JOB_INVITATIONS_TABLE,
+        IndexName: "invitationId-index",
+        KeyConditionExpression: "invitationId = :invId",
+        ExpressionAttributeValues: {
+          ":invId": { S: invitationId },
+        },
+      })
+    );
 
-        // 3. Parse and Validate Request Body
-        const responseData: InvitationResponseData = JSON.parse(event.body || "{}");
+    const invitation: InvitationItem | undefined = invitationQuery.Items?.[0];
 
-        if (!responseData.response || !VALID_RESPONSES.includes(responseData.response)) {
-            return {
-                statusCode: 400,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: `Invalid or missing 'response' field. Valid options: ${VALID_RESPONSES.join(", ")}` }),
-            };
-        }
+    if (invitation) {
+      console.log("   Invitation Found:", JSON.stringify(invitation, null, 2));
+    } else {
+      console.warn("   Invitation NOT FOUND for ID:", invitationId);
+    }
 
-        // 4. Fetch Invitation
-        const invitationQuery = await dynamodb.send(
-            new QueryCommand({
-                TableName: JOB_INVITATIONS_TABLE,
-                IndexName: "invitationId-index",
-                KeyConditionExpression: "invitationId = :invId",
-                ExpressionAttributeValues: {
-                    ":invId": { S: invitationId },
-                },
-            })
-        );
+    if (!invitation) {
+      return {
+        statusCode: 404,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({ error: "Invitation not found" }),
+      };
+    }
 
-        const invitation: InvitationItem | undefined = invitationQuery.Items?.[0];
+    const professionalUserSub: string | undefined = invitation.professionalUserSub?.S;
+    const jobId: string | undefined = invitation.jobId?.S;
+    const clinicUserSub: string | undefined = invitation.clinicUserSub?.S;
+    const clinicId: string | undefined = invitation.clinicId?.S;
 
-        if (!invitation) {
-            return {
-                statusCode: 404,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Invitation not found" }),
-            };
-        }
+    // 5. Authorization & State Check
+    if (professionalUserSub !== userSub) {
+      console.warn(`Auth Error: Token User (${userSub}) !== Invitation User (${professionalUserSub})`);
+      return {
+        statusCode: 403,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({ error: "You can only respond to your own invitations" }),
+      };
+    }
 
-        const professionalUserSub: string | undefined = invitation.professionalUserSub?.S;
-        const jobId: string | undefined = invitation.jobId?.S;
-        const clinicUserSub: string | undefined = invitation.clinicUserSub?.S;
-        const clinicId: string | undefined = invitation.clinicId?.S;
+    if (!jobId || !clinicUserSub || !clinicId) {
+      console.error("Data Integrity Error: Missing FKs in invitation item");
+      return {
+        statusCode: 500,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          error: "Invalid invitation data - missing jobId, clinicUserSub, or clinicId"
+        }),
+      };
+    }
 
-        // 5. Authorization & State Check
-        if (professionalUserSub !== userSub) {
-            return {
-                statusCode: 403,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "You can only respond to your own invitations" }),
-            };
-        }
+    const currentStatus = invitation.invitationStatus?.S;
+    console.log("   Current Invitation Status:", currentStatus);
+    
+    if (currentStatus === "accepted" || currentStatus === "declined") {
+      return {
+        statusCode: 409,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({ error: `Invitation has already been ${currentStatus}` }),
+      };
+    }
 
-        if (!jobId || !clinicUserSub || !clinicId) {
-            return {
-                statusCode: 500,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Invalid invitation data - missing jobId, clinicUserSub, or clinicId" }),
-            };
-        }
-        
-        const currentStatus = invitation.invitationStatus?.S;
-        if (currentStatus === "accepted" || currentStatus === "declined") {
-            return {
-                statusCode: 409,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: `Invitation has already been ${currentStatus}` }),
-            };
-        }
+    // 6. Fetch Job Details
+    console.log(`5. Fetching Job Details for JobID: ${jobId}`);
+    
+    // ✅ CRITICAL FIX: Updated IndexName to match your CDK Stack ('jobId-index-1')
+    const jobQuery = await dynamodb.send(
+      new QueryCommand({
+        TableName: JOB_POSTINGS_TABLE,
+        IndexName: "jobId-index-1", // <--- UPDATED THIS LINE
+        KeyConditionExpression: "jobId = :jobId",
+        ExpressionAttributeValues: {
+          ":jobId": { S: jobId },
+        },
+      })
+    );
 
-        // 6. Fetch Job Details
-        const jobQuery = await dynamodb.send(
-            new QueryCommand({
-                TableName: JOB_POSTINGS_TABLE,
-                IndexName: "jobId-index", // Ensure this GSI name is correct
-                KeyConditionExpression: "jobId = :jobId",
-                ExpressionAttributeValues: {
-                    ":jobId": { S: jobId },
-                },
-            })
-        );
+    const job: JobItem | undefined = jobQuery.Items?.[0];
+    
+    if(job) {
+        console.log("   Job Found:", JSON.stringify(job, null, 2));
+    } else {
+        console.warn("   Job NOT FOUND");
+    }
 
-        const job: JobItem | undefined = jobQuery.Items?.[0];
+    if (!job) {
+      return {
+        statusCode: 404,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({ error: "Job not found" }),
+      };
+    }
 
-        if (!job) {
-            return {
-                statusCode: 404,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({ error: "Job not found" }),
-            };
-        }
+    // --- 7. Process Response and Conditional Logic ---
+    const timestamp: string = new Date().toISOString();
+    let applicationId: string | null = null;
+    const jobType: string | undefined = job.job_type?.S;
 
-        // --- 7. Process Response and Conditional Logic ---
-        const timestamp: string = new Date().toISOString();
-        let applicationId: string | null = null;
-        const jobType: string | undefined = job.job_type?.S;
-        
-        if (responseData.response === "accepted") {
-            // A. Accepted Logic: Create Application and update job/invitation status
-            applicationId = uuidv4();
-            
-            // Create Application Item
-            await dynamodb.send(
-                new PutItemCommand({
-                    TableName: JOB_APPLICATIONS_TABLE,
-                    Item: {
-                        applicationId: { S: applicationId },
-                        jobId: { S: jobId },
-                        professionalUserSub: { S: userSub },
-                        clinicUserSub: { S: clinicUserSub },
-                        clinicId: { S: clinicId },
-                        applicationStatus: { S: "accepted" },
-                        appliedAt: { S: timestamp },
-                        updatedAt: { S: timestamp },
-                        applicationMessage: { S: responseData.message || "Application submitted via invitation" },
-                        fromInvitation: { BOOL: true },
-                        invitationResponseDate: { S: timestamp },
-                    },
-                })
-            );
+    console.log(`6. Processing Logic Branch: ${responseData.response}`);
 
-            // Update Job Posting status (assuming 'scheduled' is the goal for an accepted job)
-            if (job.status?.S === "open") {
-                await dynamodb.send(
-                    new UpdateItemCommand({
-                        TableName: JOB_POSTINGS_TABLE, // Update the job posting item
-                        Key: {
-                            jobId: { S: jobId },
-                            // Assuming the GSI result has the original PK/SK for the Job
-                            clinicId: { S: clinicId }, 
-                        },
-                        UpdateExpression:
-                            "SET #status = :status, #acceptedProfessional = :professional, #updatedAt = :updatedAt",
-                        ExpressionAttributeNames: {
-                            "#status": "status",
-                            "#acceptedProfessional": "acceptedProfessionalUserSub",
-                            "#updatedAt": "updatedAt",
-                        },
-                        ExpressionAttributeValues: {
-                            ":status": { S: "scheduled" },
-                            ":professional": { S: userSub },
-                            ":updatedAt": { S: timestamp },
-                        },
-                    })
-                );
-            }
-        } 
-        
-        else if (responseData.response === "negotiating") {
-            // B. Negotiating Logic: Validate proposal, create Application, create Negotiation
-            
-            // --- Negotiation Validation ---
-            if (jobType === "permanent") {
-                if (responseData.proposedSalaryMin == null || responseData.proposedSalaryMax == null) {
-                    return {
-                        statusCode: 400,
-                        headers: CORS_HEADERS,
-                        body: JSON.stringify({ error: "proposedSalaryMin and proposedSalaryMax are required for permanent job negotiations" }),
-                    };
-                }
-                if (Number(responseData.proposedSalaryMax) < Number(responseData.proposedSalaryMin)) {
-                    return {
-                        statusCode: 400,
-                        headers: CORS_HEADERS,
-                        body: JSON.stringify({ error: "proposedSalaryMax must be greater than proposedSalaryMin" }),
-                    };
-                }
-            } else { // Hourly/Temp
-                if (responseData.proposedHourlyRate == null) {
-                    return {
-                        statusCode: 400,
-                        headers: CORS_HEADERS,
-                        body: JSON.stringify({ error: "proposedHourlyRate is required for hourly job negotiations" }),
-                    };
-                }
-            }
-            // --- End Validation ---
-            
-            applicationId = uuidv4();
+    if (responseData.response === "accepted") {
+      // A. Accepted Logic
+      applicationId = uuidv4();
 
-            // 1. Create Application Item (Status: negotiating)
-            const applicationItem: any = { // Using `any` for dynamic properties
-                applicationId: { S: applicationId },
-                jobId: { S: jobId },
-                professionalUserSub: { S: userSub },
-                clinicUserSub: { S: clinicUserSub },
-                clinicId: { S: clinicId },
-                applicationStatus: { S: "negotiating" },
-                appliedAt: { S: timestamp },
-                updatedAt: { S: timestamp },
-                applicationMessage: { S: responseData.message || "Application submitted with counter-proposal" },
-                fromInvitation: { BOOL: true },
-                invitationResponseDate: { S: timestamp },
-            };
+      console.log(`   Action: Creating Application (Accepted). ID: ${applicationId}`);
 
-            if (responseData.availabilityNotes) {
-                applicationItem.availabilityNotes = { S: responseData.availabilityNotes };
-            }
+      // Create Application Item
+      await dynamodb.send(
+        new PutItemCommand({
+          TableName: JOB_APPLICATIONS_TABLE,
+          Item: {
+            applicationId: { S: applicationId },
+            jobId: { S: jobId },
+            professionalUserSub: { S: userSub },
+            clinicUserSub: { S: clinicUserSub },
+            clinicId: { S: clinicId },
+            applicationStatus: { S: "accepted" },
+            appliedAt: { S: timestamp },
+            updatedAt: { S: timestamp },
+            applicationMessage: {
+              S: responseData.message || "Application submitted via invitation"
+            },
+            fromInvitation: { BOOL: true },
+            invitationResponseDate: { S: timestamp },
+          },
+        })
+      );
+      console.log("   -> Application Created.");
 
-            await dynamodb.send(new PutItemCommand({
-                TableName: JOB_APPLICATIONS_TABLE,
-                Item: applicationItem,
-            }));
+      // Check Job Status for Update
+      const jobStatus = job.status?.S;
+      console.log(`   Job Status Check: Current status is '${jobStatus}'`);
 
-            // 2. Create Negotiation Item
-            const negotiationId = uuidv4();
-            
-            const negotiationItem: any = { // Using `any` for dynamic properties
-                applicationId: { S: applicationId },
-                negotiationId: { S: negotiationId },
-                jobId: { S: jobId },
-                fromType: { S: "professional" },
-                fromUserSub: { S: userSub },
-                toUserSub: { S: clinicUserSub },
-                clinicId: { S: clinicId },
-                negotiationStatus: { S: "pending" },
-                createdAt: { S: timestamp },
-                updatedAt: { S: timestamp },
-                message: { S: responseData.counterProposalMessage || "Counter-proposal submitted" },
-            };
+      if (jobStatus === "open" || jobStatus === "active") {
+        try {
+          const jobClinicId = job.clinicId?.S || clinicId;
+          const jobJobId = job.jobId?.S || jobId;
 
-            if (jobType === "permanent") {
-                negotiationItem.proposedSalaryMin = { N: String(responseData.proposedSalaryMin) };
-                negotiationItem.proposedSalaryMax = { N: String(responseData.proposedSalaryMax) };
-            } else {
-                negotiationItem.proposedHourlyRate = { N: String(responseData.proposedHourlyRate) };
-            }
+          console.log("   Action: Updating Job Status to 'scheduled'");
+          console.log("   -> Using Keys for Update:", { clinicId: jobClinicId, jobId: jobJobId });
 
-            await dynamodb.send(new PutItemCommand({
-                TableName: JOB_NEGOTIATIONS_TABLE,
-                Item: negotiationItem,
-            }));
-        } 
-        
-        // C. Declined Logic: No new records needed, only update invitation status.
-
-        // 8. Update Invitation Status (Final Step for all responses)
-        await dynamodb.send(
+          await dynamodb.send(
             new UpdateItemCommand({
-                TableName: JOB_INVITATIONS_TABLE,
-                Key: {
-                    jobId: { S: jobId },
-                    professionalUserSub: { S: professionalUserSub },
-                },
-                UpdateExpression:
-                    "SET #status = :status, #respondedAt = :respondedAt, #responseMessage = :message, #updatedAt = :updatedAt",
-                ExpressionAttributeNames: {
-                    "#status": "invitationStatus",
-                    "#respondedAt": "respondedAt",
-                    "#responseMessage": "responseMessage",
-                    "#updatedAt": "updatedAt",
-                },
-                ExpressionAttributeValues: {
-                    ":status": { S: responseData.response },
-                    ":respondedAt": { S: timestamp },
-                    ":message": { S: responseData.message || "" },
-                    ":updatedAt": { S: timestamp },
-                },
+              TableName: JOB_POSTINGS_TABLE,
+              Key: {
+                clinicId: { S: jobClinicId },
+                jobId: { S: jobJobId },
+              },
+              UpdateExpression:
+                "SET #status = :status, #acceptedProfessional = :professional, #updatedAt = :updatedAt",
+              ExpressionAttributeNames: {
+                "#status": "status",
+                "#acceptedProfessional": "acceptedProfessionalUserSub",
+                "#updatedAt": "updatedAt",
+              },
+              ExpressionAttributeValues: {
+                ":status": { S: "scheduled" },
+                ":professional": { S: userSub },
+                ":updatedAt": { S: timestamp },
+              },
             })
-        );
-
-        // 9. Success Response
-        return {
-            statusCode: 200,
+          );
+          console.log("   -> Job Updated Successfully.");
+        } catch (updateError: any) {
+          console.error("   -> FAILED to update job posting status:", updateError);
+        }
+      }
+    } else if (responseData.response === "negotiating") {
+      // B. Negotiating Logic
+      console.log("   Action: Starting Negotiation Validation...");
+      
+      if (jobType === "permanent") {
+        if (
+          responseData.proposedSalaryMin == null ||
+          responseData.proposedSalaryMax == null
+        ) {
+          return {
+            statusCode: 400,
             headers: CORS_HEADERS,
             body: JSON.stringify({
-                message: `Invitation ${responseData.response} successfully`,
-                invitationId,
-                jobId,
-                response: responseData.response,
-                applicationId,
-                respondedAt: timestamp,
-                jobType: jobType,
-                nextSteps:
-                    responseData.response === "accepted"
-                        ? "Job has been scheduled. Wait for clinic confirmation."
-                        : responseData.response === "negotiating"
-                        ? "Negotiation started. Clinic will review your proposal."
-                        : "Invitation declined. Thank you for your response.",
+              error: "proposedSalaryMin and proposedSalaryMax are required for permanent job negotiations"
             }),
-        };
-    } catch (error: any) {
-        console.error("Error responding to invitation:", error);
-        
-        // ✅ Check for Auth errors and return 401
-        if (error.message === "Authorization header missing" || 
-            error.message?.startsWith("Invalid authorization header") ||
-            error.message === "Invalid access token format" ||
-            error.message === "Failed to decode access token" ||
-            error.message === "User sub not found in token claims") {
-            
-            return {
-                statusCode: 401,
-                headers: CORS_HEADERS,
-                body: JSON.stringify({
-                    error: "Unauthorized",
-                    details: error.message
-                })
-            };
+          };
         }
-        
-        // Safely access the message property of the error object
-        const errorMessage: string = (error as Error).message || "An unknown error occurred";
-        
-        return {
-            statusCode: 500,
+        if (
+          Number(responseData.proposedSalaryMax) <
+          Number(responseData.proposedSalaryMin)
+        ) {
+          return {
+            statusCode: 400,
             headers: CORS_HEADERS,
-            body: JSON.stringify({ error: errorMessage }),
-        };
-    }
-};
+            body: JSON.stringify({
+              error: "proposedSalaryMax must be greater than proposedSalaryMin"
+            }),
+          };
+        }
+      } else {
+        if (responseData.proposedHourlyRate == null) {
+          return {
+            statusCode: 400,
+            headers: CORS_HEADERS,
+            body: JSON.stringify({
+              error: "proposedHourlyRate is required for hourly job negotiations"
+            }),
+          };
+        }
+      }
 
-// Exports are handled by the `export const handler` statement
+      applicationId = uuidv4();
+      
+      // Create Application Item
+      const applicationItem: any = {
+        applicationId: { S: applicationId },
+        jobId: { S: jobId },
+        professionalUserSub: { S: userSub },
+        clinicUserSub: { S: clinicUserSub },
+        clinicId: { S: clinicId },
+        applicationStatus: { S: "negotiating" },
+        appliedAt: { S: timestamp },
+        updatedAt: { S: timestamp },
+        applicationMessage: {
+          S: responseData.message || "Application submitted with counter-proposal"
+        },
+        fromInvitation: { BOOL: true },
+        invitationResponseDate: { S: timestamp },
+      };
+
+      if (responseData.availabilityNotes) {
+        applicationItem.availabilityNotes = { S: responseData.availabilityNotes };
+      }
+
+      await dynamodb.send(
+        new PutItemCommand({
+          TableName: JOB_APPLICATIONS_TABLE,
+          Item: applicationItem,
+        })
+      );
+
+      // Create Negotiation Item
+      const negotiationId = uuidv4();
+      
+      const negotiationItem: any = {
+        applicationId: { S: applicationId },
+        negotiationId: { S: negotiationId },
+        jobId: { S: jobId },
+        fromType: { S: "professional" },
+        fromUserSub: { S: userSub },
+        toUserSub: { S: clinicUserSub },
+        clinicId: { S: clinicId },
+        negotiationStatus: { S: "pending" },
+        createdAt: { S: timestamp },
+        updatedAt: { S: timestamp },
+        message: {
+          S: responseData.counterProposalMessage || "Counter-proposal submitted"
+        },
+      };
+
+      if (jobType === "permanent") {
+        negotiationItem.proposedSalaryMin = {
+          N: String(responseData.proposedSalaryMin)
+        };
+        negotiationItem.proposedSalaryMax = {
+          N: String(responseData.proposedSalaryMax)
+        };
+      } else {
+        negotiationItem.proposedHourlyRate = {
+          N: String(responseData.proposedHourlyRate)
+        };
+      }
+
+      await dynamodb.send(
+        new PutItemCommand({
+          TableName: JOB_NEGOTIATIONS_TABLE,
+          Item: negotiationItem,
+        })
+      );
+      console.log("   -> Application and Negotiation items created.");
+    }
+
+    // 8. Update Invitation Status
+    console.log(`7. Final Step: Updating Invitation Status to '${responseData.response}'`);
+    await dynamodb.send(
+      new UpdateItemCommand({
+        TableName: JOB_INVITATIONS_TABLE,
+        Key: {
+          jobId: { S: jobId },
+          professionalUserSub: { S: professionalUserSub },
+        },
+        UpdateExpression:
+          "SET #status = :status, #respondedAt = :respondedAt, #responseMessage = :message, #updatedAt = :updatedAt",
+        ExpressionAttributeNames: {
+          "#status": "invitationStatus",
+          "#respondedAt": "respondedAt",
+          "#responseMessage": "responseMessage",
+          "#updatedAt": "updatedAt",
+        },
+        ExpressionAttributeValues: {
+          ":status": { S: responseData.response },
+          ":respondedAt": { S: timestamp },
+          ":message": { S: responseData.message || "" },
+          ":updatedAt": { S: timestamp },
+        },
+      })
+    );
+    console.log("   -> Invitation Updated.");
+
+    // 9. Success Response
+    console.log("--- HANDLER FINISHED SUCCESS ---");
+    return {
+      statusCode: 200,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({
+        message: `Invitation ${responseData.response} successfully`,
+        invitationId,
+        jobId,
+        response: responseData.response,
+        applicationId,
+        respondedAt: timestamp,
+        jobType: jobType,
+        nextSteps:
+          responseData.response === "accepted"
+            ? "Job has been scheduled. Wait for clinic confirmation."
+            : responseData.response === "negotiating"
+            ? "Negotiation started. Clinic will review your proposal."
+            : "Invitation declined. Thank you for your response.",
+      }),
+    };
+  } catch (error: any) {
+    console.error("!!! CRITICAL LAMBDA ERROR !!!");
+    console.error("Error Message:", error.message);
+    console.error("Full Error Stack:", error);
+
+    // Auth error handling
+    if (
+      error.message === "Authorization header missing" ||
+      error.message?.startsWith("Invalid authorization header") ||
+      error.message === "Invalid access token format" ||
+      error.message === "Failed to decode access token" ||
+      error.message === "User sub not found in token claims"
+    ) {
+      return {
+        statusCode: 401,
+        headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "OPTIONS,POST,GET,PUT,DELETE",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+        },
+        body: JSON.stringify({
+          error: "Unauthorized",
+          details: error.message,
+        }),
+      };
+    }
+
+    // General error handling
+    return {
+      statusCode: 500,
+      headers: {
+        "Access-Control-Allow-Origin": "*", 
+        "Access-Control-Allow-Methods": "OPTIONS,POST,GET,PUT,DELETE",
+        "Access-Control-Allow-Headers": "Content-Type,Authorization",
+      },
+      body: JSON.stringify({ 
+          error: "Internal Server Error",
+          details: error.message || "Unknown error occurred" 
+      }),
+    };
+  }
+};

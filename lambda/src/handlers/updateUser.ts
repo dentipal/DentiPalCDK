@@ -39,7 +39,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     body: JSON.stringify(bodyObj)
 });
 
-const VALID_SUBGROUPS: string[] = ["ClinicAdmin", "ClinicManager", "ClinicViewer"];
+const VALID_SUBGROUPS: string[] = ["clinicadmin", "clinicmanager", "clinicviewer"];
 
 // --- 2. Type Definitions ---
 
@@ -217,7 +217,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         // 2. Check if user is Root or ClinicAdmin
         const isRootUser: boolean = groups.includes("root");
-        const isClinicAdmin: boolean = groups.includes("ClinicAdmin");
+        const isClinicAdmin: boolean = groups.includes("clinicadmin");
         
         if (!isRootUser && !isClinicAdmin) {
             return json(403, {

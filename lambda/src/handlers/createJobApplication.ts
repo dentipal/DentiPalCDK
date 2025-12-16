@@ -8,7 +8,7 @@ import { CORS_HEADERS } from "./corsHeaders";
 // --- 1. Configuration ---
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings"; 
-const APPLICATIONS_TABLE = process.env.APPLICATIONS_TABLE || "DentiPal-JobApplications";
+const APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-V5-JobApplications";
 const JOB_NEGOTIATIONS_TABLE = process.env.JOB_NEGOTIATIONS_TABLE || "DentiPal-JobNegotiations";
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-ClinicProfiles";
 
@@ -34,7 +34,7 @@ interface ApplyJobBody {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
+    const method = event.httpMethod || (event.requestContext as any)?.http?.method || "POST";
 
     // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
@@ -84,37 +84,41 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         console.log("Job ID extracted:", jobId);
 
-        // 5. Check if Job Exists
-        const jobResult = await ddbDoc.send(new GetCommand({
+        // 5. Check if Job Exists (using GSI on jobId)
+        const jobQuery = await ddbDoc.send(new QueryCommand({
             TableName: JOB_POSTINGS_TABLE,
-            Key: { jobId: jobId }
+            IndexName: "jobId-index-1", // Ensure this index exists in the table schema
+            KeyConditionExpression: "jobId = :jobId",
+            ExpressionAttributeValues: {
+                ":jobId": jobId,
+            },
+            Limit: 1,
         }));
-        
-        if (!jobResult.Item) {
+
+        if (!jobQuery.Items || jobQuery.Items.length === 0) {
             return json(404, { error: "Job posting not found" });
         }
 
-        const jobItem = jobResult.Item;
-        const clinicIdFromJob = jobItem.clinicUserSub || jobItem.clinicId; 
+        const jobItem = jobQuery.Items[0];
+        const clinicIdFromJob = jobItem.clinicId; // Ensure `clinicId` is part of the schema
 
         if (!clinicIdFromJob) {
             return json(400, { error: "Clinic ID not found in job posting configuration." });
         }
 
-        const jobStatus = jobItem.status || 'active';
-        if (jobStatus !== 'active') {
-            return json(409, { 
-                error: "Conflict", 
+        const jobStatus = jobItem.status || "active";
+        if (jobStatus !== "active") {
+            return json(409, {
+                error: "Conflict",
                 message: "Cannot apply to this job",
-                details: { currentStatus: jobStatus, reason: "Job is not accepting applications" } 
+                details: { currentStatus: jobStatus, reason: "Job is not accepting applications" },
             });
         }
 
         // 6. Check for Duplicate Application
         const existingAppsResponse = await ddbDoc.send(new QueryCommand({
             TableName: APPLICATIONS_TABLE,
-            KeyConditionExpression: "jobId = :jobId",
-            FilterExpression: "professionalUserSub = :userSub",
+            KeyConditionExpression: "jobId = :jobId AND professionalUserSub = :userSub",
             ExpressionAttributeValues: {
                 ":jobId": jobId,
                 ":userSub": userSub
@@ -134,7 +138,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const timestamp = new Date().toISOString();
         const hasProposedRate = applicationData.proposedRate !== undefined && applicationData.proposedRate !== null;
 
-        const applicationItem = {
+        const applicationItem: Record<string, any> = {
             jobId: jobId,               // Partition Key
             professionalUserSub: userSub, // Sort Key
             applicationId: applicationId,
@@ -145,12 +149,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             updatedAt: timestamp,
             
             // Optional Fields
-            applicationMessage: applicationData.message,
-            availability: applicationData.availability,
+            applicationMessage: applicationData.message || null,
+            availability: applicationData.availability || null,
             startDate: applicationData.startDate || null,
             notes: applicationData.notes || null,
-            proposedRate: hasProposedRate ? Number(applicationData.proposedRate) : undefined,
-            negotiationId: undefined as string | undefined
+            proposedRate: hasProposedRate ? Number(applicationData.proposedRate) : null,
+            negotiationId: null
         };
 
         let negotiationId: string | undefined;

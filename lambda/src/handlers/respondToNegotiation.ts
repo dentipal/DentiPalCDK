@@ -130,7 +130,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     // 3. Load Negotiation Item
     const negotiationRes = await dynamodb.send(
       new GetItemCommand({
-        TableName: process.env.JOB_NEGOTIATIONS_TABLE!,
+        TableName: process.env.JOB_NEGOTIATIONS_TABLE,
         Key: {
           applicationId: { S: applicationId },
           negotiationId: { S: negotiationId },
@@ -152,7 +152,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
 
     const jobRes = await dynamodb.send(
       new QueryCommand({
-        TableName: process.env.JOB_POSTINGS_TABLE!,
+        TableName: process.env.JOB_POSTINGS_TABLE,
         IndexName: "JobIdIndex", // Assuming JobIdIndex is the GSI name
         KeyConditionExpression: "jobId = :jobId",
         ExpressionAttributeValues: {

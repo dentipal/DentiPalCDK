@@ -47,7 +47,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 2. Input Parsing and Validation
-        const { userSub, clinicId } = JSON.parse(event.body || '{}') as DeleteAssignmentRequestBody;
+        let requestBody: DeleteAssignmentRequestBody;
+        try {
+            requestBody = JSON.parse(event.body || '{}');
+        } catch (parseError) {
+            console.error("Error parsing request body:", parseError);
+            return {
+                statusCode: 400,
+                headers: CORS_HEADERS,
+                body: JSON.stringify({
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Invalid JSON in request body",
+                    timestamp: new Date().toISOString()
+                })
+            };
+        }
+
+        const { userSub, clinicId } = requestBody;
 
         if (!userSub || !clinicId) {
             console.warn("[VALIDATION] Missing required fields: userSub or clinicId.");

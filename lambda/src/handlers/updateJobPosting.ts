@@ -3,7 +3,6 @@ import { DynamoDBDocumentClient, GetCommand, UpdateCommand, UpdateCommandInput }
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { CORS_HEADERS } from "./corsHeaders";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
-// ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 
 // --- 1. AWS and Environment Setup ---
@@ -24,10 +23,8 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 
 // --- 3. Type Definitions ---
 
-/** Union type for allowed job types */
 type JobType = 'temporary' | 'multi_day_consulting' | 'permanent';
 
-/** Interface for the data expected in the request body (input fields) */
 interface UpdateJobPostingBody {
     // Common fields
     professional_role?: string;
@@ -36,13 +33,13 @@ interface UpdateJobPostingBody {
     meal_break?: boolean;
     
     // Temporary/Multi-Day fields
-    date?: string; // Used by temporary
-    hours?: number; // Used by temporary
-    hourly_rate?: number; // Used by temporary/multi_day_consulting
+    date?: string; 
+    hours?: number; 
+    hourly_rate?: number; 
     
     // Multi-Day fields
     dates?: string[];
-    total_days?: number; // Calculated field
+    total_days?: number; 
     hours_per_day?: number;
     project_duration?: string;
     
@@ -58,7 +55,6 @@ interface UpdateJobPostingBody {
     [key: string]: any;
 }
 
-/** Interface for the DynamoDB Job Item structure (Unmarshalled) */
 interface JobItem {
     jobId: string;
     clinicUserSub: string;
@@ -93,14 +89,28 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const userInfo = extractUserFromBearerToken(authHeader);
         const userSub = userInfo.sub;
 
-        // Extract job ID from path parameters
-        const jobId: string | undefined = event.pathParameters?.jobId;
+        // 🔍 JOB ID EXTRACTION (Fixed)
+        // 1. Try direct path parameter (Standard API Gateway)
+        let jobId = event.pathParameters?.jobId;
+
+        // 2. Fallback: Try extracting from proxy path (e.g., jobs/123)
+        if (!jobId && event.pathParameters?.proxy) {
+            const pathParts = event.pathParameters.proxy.split('/');
+            // Takes the last segment of the URL as the ID
+            jobId = pathParts[pathParts.length - 1]; 
+        }
+
+        console.log("DEBUG: Extracted Job ID:", jobId);
+
         if (!jobId) {
             return json(400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Job ID is required",
-                details: { pathFormat: "PUT /job-postings/{jobId}" },
+                details: { 
+                    pathParams: event.pathParameters,
+                    hint: "URL should be /jobs/{jobId}" 
+                },
                 timestamp: new Date().toISOString()
             });
         }
@@ -120,7 +130,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Step 1: Get existing job to verify ownership and job type ---
         const getCommand = new GetCommand({
             TableName: JOB_POSTINGS_TABLE,
-            Key: { jobId: jobId }
+            Key: { jobId: jobId, clinicUserSub: userSub } // Composite Key
         });
         
         const existingJobResponse = await ddbDoc.send(getCommand);
@@ -244,7 +254,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Step 3: Build Update Expression ---
         const updateExpressions: string[] = [];
         const expressionAttributeNames: Record<string, string> = {};
-        const expressionAttributeValues: Record<string, any> = {}; // any because DocumentClient handles marshalling
+        const expressionAttributeValues: Record<string, any> = {}; 
         let fieldsUpdatedCount = 0;
 
         // Helper function to add a field to the update expression
@@ -257,9 +267,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                  updateExpressions.push(`${attrKey} = :${attrName}`);
                  expressionAttributeNames[attrKey] = dbName;
                  
-                 // For String Sets (SS), DocumentClient marshalls JavaScript Sets.
-                 // If we pass an array, it might be marshalled as a List (L) by default.
-                 // To strictly adhere to the 'SS' type intent, we convert arrays to Sets.
                  if (type === 'SS' && Array.isArray(value)) {
                      expressionAttributeValues[`:${attrName}`] = new Set(value);
                  } else {
@@ -308,10 +315,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         expressionAttributeNames['#updated_at'] = 'updated_at';
         expressionAttributeValues[':updated_at'] = updatedTimestamp;
 
+        // Validate clinicUserSub and jobId
+        if (!clinicUserSub || !jobId) {
+            console.error("Invalid Key: Missing clinicUserSub or jobId", { clinicUserSub, jobId });
+            return json(500, {
+                error: "Internal Server Error",
+                statusCode: 500,
+                message: "Invalid Key: Missing clinicUserSub or jobId",
+                details: { clinicUserSub, jobId },
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        console.log("Updating job with Key:", { clinicUserSub, jobId });
+
         // --- Step 4: Update the job ---
         const updateCommand: UpdateCommandInput = {
             TableName: JOB_POSTINGS_TABLE,
-            Key: { jobId: jobId },
+            Key: {
+                clinicUserSub: clinicUserSub,
+                jobId: jobId
+            },
             UpdateExpression: `SET ${updateExpressions.join(', ')}`,
             ExpressionAttributeNames: expressionAttributeNames,
             ExpressionAttributeValues: expressionAttributeValues,
@@ -336,7 +360,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     catch (error: any) {
         console.error('Error updating job posting:', error);
         
-        // ✅ Check for Auth errors and return 401
         if (error.message === "Authorization header missing" || 
             error.message?.startsWith("Invalid authorization header") ||
             error.message === "Invalid access token format" ||

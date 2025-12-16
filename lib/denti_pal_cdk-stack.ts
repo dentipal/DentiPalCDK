@@ -1176,6 +1176,14 @@ export class DentiPalCDKStack extends cdk.Stack {
     drivingLicensesBucket.grantReadWrite(lambdaFunction);
     professionalLicensesBucket.grantReadWrite(lambdaFunction);
 
+
+// Additional permission for dynamodb:Scan on JobPostings table
+    lambdaFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Scan'],
+      resources: [
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/DentiPal-JobPostings`,
+      ],
+    }));
     // ========================================================================
     // 5. REST API Gateway
     //    - Configuration updated to include CloudWatch Logging Role and Settings

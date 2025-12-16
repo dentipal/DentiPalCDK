@@ -10,7 +10,8 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
-
+const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
+const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE;
 
 /* ─────────────────────────────────────────────────────────────────────────────
    ADD #1: Helper to normalize DynamoDB date attributes to string[]
@@ -51,8 +52,8 @@ const makeJobDetailsFetcher = () => {
     if (cache.has(jobId)) return cache.get(jobId) || {};
 
     const cmd = new QueryCommand({
-      TableName: "DentiPal-JobPostings",
-      IndexName: "jobId-index",
+      TableName:JOB_POSTINGS_TABLE,
+      IndexName: "jobId-index-1",
       KeyConditionExpression: "jobId = :jobId",
       ExpressionAttributeValues: {
         ":jobId": { S: jobId },
@@ -138,7 +139,7 @@ export const handler = async (
     }
 
     const appsCmd = new QueryCommand({
-      TableName: "DentiPal-JobApplications",
+      TableName:JOB_APPLICATIONS_TABLE,
       IndexName: "clinicId-jobId-index",
       KeyConditionExpression: "clinicId = :clinicId",
       ExpressionAttributeValues: {

@@ -96,7 +96,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Step 3: Verify user is clinic or Root
         const isClinicUser = userType.toLowerCase() === "clinic" || groups.includes("clinic");
-        const isRootUser = groups.includes("root");
+        const isRootUser = groups.includes("Root");
 
         if (!isClinicUser && !isRootUser) {
             console.warn("🚫 Unauthorized userType for profile update:", userType);
@@ -125,7 +125,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!existingProfile.Item) {
             console.warn("⚠️ Clinic profile not found for clinicId:", clinicId);
-            return json(404, { error: "Clinic profile not found" });
+            return json(404, { error: "Clinic profile not found",clinicId:clinicId});
         }
 
         // Step 6: Prepare update fields
