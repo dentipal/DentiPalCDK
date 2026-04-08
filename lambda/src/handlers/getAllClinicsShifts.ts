@@ -130,11 +130,18 @@ export const handler = async (
     const requesterSub = userInfo?.sub || "";
     console.log(`[getAllClinicsShifts] Executing data fetch for userSub requests: ${requesterSub}`);
 
-    const clinicUserSub = extractClinicUserSub(event);
+    let clinicUserSub = extractClinicUserSub(event);
     if (!clinicUserSub) {
       console.warn(`[getAllClinicsShifts] Execution halted: Missing clinicUserSub from URL mapping`);
       return json(400, { error: "clinicUserSub is required in the path" });
     }
+
+    // FIX: If the path is /dashboard/all/..., the extracted sub evaluates to "all".
+    // Since the user is fetching their own clinics, we override it to their token's sub.
+    if (clinicUserSub === "all") {
+      clinicUserSub = requesterSub;
+    }
+
     console.log(`[getAllClinicsShifts] Target clinic owner Sub parsed: ${clinicUserSub}`);
 
     const groups: string[] = (userInfo?.groups || userInfo?.["cognito:groups"] || []) as string[];
