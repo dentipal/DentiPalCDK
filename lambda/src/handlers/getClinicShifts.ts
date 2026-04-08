@@ -312,10 +312,36 @@ export const handler = async (
           lastKey = res.LastEvaluatedKey;
         } while (lastKey);
 
+        // Batch fetch profiles
+        const profSubs = [...new Set(inviteItems.map(item => s(item.professionalUserSub)).filter(Boolean))];
+        const profilesMap = new Map();
+
+        if (process.env.PROFILES_TABLE && profSubs.length > 0) {
+          const { BatchGetItemCommand } = require("@aws-sdk/client-dynamodb");
+          const { unmarshall } = require("@aws-sdk/util-dynamodb");
+          for (let i = 0; i < profSubs.length; i += 100) {
+            const chunk = profSubs.slice(i, i + 100);
+            try {
+              const resp: any = await dynamodb.send(new BatchGetItemCommand({ RequestItems: { [process.env.PROFILES_TABLE]: { Keys: chunk.map((subStr: any) => ({ userSub: { S: subStr } })) } } }));
+              const arr = resp.Responses?.[process.env.PROFILES_TABLE] || [];
+              arr.forEach((item: any) => {
+                const p = unmarshall(item);
+                profilesMap.set(p.userSub, p);
+              });
+            } catch(e) { console.error("Profile fetch error", e); }
+          }
+        }
+
         // Map and enrich invites
         responseData = inviteItems.map(item => {
           const jobId = s(item.jobId);
           const job = jobMap.get(jobId) || {};
+          const profSub = s(item.professionalUserSub);
+          
+          const profile = profilesMap.get(profSub);
+          const first_name = profile?.first_name || '';
+          const last_name = profile?.last_name || '';
+          const fullName = profile ? `${first_name} ${last_name}`.trim() : "Professional";
           
           return {
             ...job, // Bring in all job properties
@@ -323,8 +349,10 @@ export const handler = async (
             invitationId: s(item.invitationId),
             jobId: jobId,
             clinicId: s(item.clinicId),
-            professionalUserSub: s(item.professionalUserSub),
-            professionalName: "Professional", // Could be fetched if needed
+            professionalUserSub: profSub,
+            professionalName: fullName,
+            first_name,
+            last_name,
             invitationStatus: s(item.invitationStatus) || "pending",
             applicationStatus: s(item.invitationStatus) || "pending", // fallback for table column
             sentAt: s(item.sentAt),
