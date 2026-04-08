@@ -59,7 +59,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const buckets: Record<FileType, string | undefined> = {
             "profile-image": process.env.PROFILE_IMAGES_BUCKET,
-            "clinic-office-image": process.env.PROFILE_IMAGES_BUCKET, // Reuse the same bucket for clinic images
+            "clinic-office-image": process.env.CLINIC_OFFICE_IMAGES_BUCKET,
             "professional-resume": process.env.PROFESSIONAL_RESUMES_BUCKET,
             "video-resume": process.env.VIDEO_RESUMES_BUCKET,
             "professional-license": process.env.PROFESSIONAL_LICENSES_BUCKET,
