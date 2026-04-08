@@ -43,7 +43,8 @@ const transformBody = (body: any): any => {
         state: "state",
         zipCode: "zip_code",
         phone: "clinic_phone",
-        email: "clinic_email"
+        email: "clinic_email",
+        officeImage: "office_image_key"
     };
 
     if (body.location) {
@@ -94,7 +95,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!clinicIdFromPath && (event.pathParameters?.proxy || event.path)) {
             const rawPath = event.pathParameters?.proxy || event.path;
             const pathParts = rawPath.split("/").filter(Boolean);
-            const clinicsIndex = pathParts.findIndex(p => p === "clinics" || p === "clinic-profiles");
+            const clinicsIndex = pathParts.findIndex((p: string) => p === "clinics" || p === "clinic-profiles");
             if (clinicsIndex !== -1 && pathParts.length > clinicsIndex + 1) {
                 clinicIdFromPath = pathParts[clinicsIndex + 1];
             } else if (pathParts[pathParts.length - 1] === 'profile' && pathParts.length >= 2) {
@@ -157,7 +158,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             "num_hygienists", "number_of_operatories", "parking_type", "practice_type",
             "primary_contact_first_name", "primary_contact_last_name", "primary_practice_area",
             "software_used", "state", "description", "website", "dental_association",
-            "clinic_email", "zip_code", "address_line_1"
+            "clinic_email", "zip_code", "address_line_1", "office_image_key"
         ];
 
         const validUpdateFields: any = {};
