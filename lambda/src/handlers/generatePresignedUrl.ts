@@ -73,7 +73,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const sanitizedFileName = String(fileName || "file").replace(/[^a-zA-Z0-9.\-_]/g, "_");
         const objectKey = `${userSub}/${fileType}/${Date.now()}-${sanitizedFileName}`;
 
-        // decode base64
+        //  tes decode base655
+
         const buffer = Buffer.from(fileBase64, "base64");
 
         const putParams = {
