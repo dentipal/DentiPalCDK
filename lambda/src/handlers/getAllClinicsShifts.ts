@@ -128,20 +128,25 @@ export const handler = async (
     const authHeader = event.headers?.Authorization || event.headers?.authorization;
     const userInfo = extractUserFromBearerToken(authHeader);
     const requesterSub = userInfo?.sub || "";
+    console.log(`[getAllClinicsShifts] Executing data fetch for userSub requests: ${requesterSub}`);
 
     const clinicUserSub = extractClinicUserSub(event);
     if (!clinicUserSub) {
+      console.warn(`[getAllClinicsShifts] Execution halted: Missing clinicUserSub from URL mapping`);
       return json(400, { error: "clinicUserSub is required in the path" });
     }
+    console.log(`[getAllClinicsShifts] Target clinic owner Sub parsed: ${clinicUserSub}`);
 
     const groups: string[] = (userInfo?.groups || userInfo?.["cognito:groups"] || []) as string[];
     const isRoot = Array.isArray(groups) && groups.includes("Root");
 
     if (!isRoot && requesterSub && requesterSub !== clinicUserSub) {
+      console.warn(`[getAllClinicsShifts] Security Block: User ${requesterSub} attempted to fetch foreign data map for ${clinicUserSub}`);
       return json(403, { error: "Forbidden: You can only access your own clinic data" });
     }
 
     // 2. Fetch All Shifts (Postings) for this Clinic User
+    console.log(`[getAllClinicsShifts] Initiating DynamoDB query sweep on JOB_POSTINGS_TABLE for clinicUserSub...`);
     const shiftsItems = await queryAll({
       TableName: JOB_POSTINGS_TABLE,
       KeyConditionExpression: "clinicUserSub = :cus",
@@ -178,10 +183,12 @@ export const handler = async (
 
     // Get unique Clinic IDs to query applications
     const clinicIds = Array.from(new Set(allShifts.map((x) => x.clinicId).filter(Boolean)));
+    console.log(`[getAllClinicsShifts] Aggregated successfully: ${allShifts.length} base shifts matched spread across ${clinicIds.length} unique underlying clinics.`);
 
     // 3. Fetch All Applications (if any clinics exist)
     const applicationItems: any[] = [];
     if (clinicIds.length > 0) {
+      console.log(`[getAllClinicsShifts] Pinging JOB_APPLICATIONS_TABLE for ${clinicIds.length} targeted clinics...`);
       for (const clinicId of clinicIds) {
         const apps = await queryAll({
           TableName: JOB_APPLICATIONS_TABLE,
@@ -193,9 +200,13 @@ export const handler = async (
         });
         applicationItems.push(...apps);
       }
+      console.log(`[getAllClinicsShifts] Grabbed identical match for ${applicationItems.length} active applications tied to these clinics.`);
+    } else {
+      console.log(`[getAllClinicsShifts] Sweeper detected exactly 0 clinics for this user. Application fetch skipped.`);
     }
 
     // 4. Enrich Applications with Job Data
+    console.log(`[getAllClinicsShifts] Initializing mapping unification to tie shifts to application entities...`);
     const appsEnriched = applicationItems.map((it) => {
       const jobId = s(it.jobId);
       const job = jobMap.get(jobId) || {};
@@ -207,12 +218,12 @@ export const handler = async (
         clinicId: s(it.clinicId),
         jobId,
         professionalUserSub: s(it.professionalUserSub),
-        professionalName: s(it.professionalName) || "Professional", 
+        professionalName: s(it.professionalName) || "Professional",
         applicationStatus: status,
         appliedAt: s(it.appliedAt),
         proposedRate: n(it.proposedRate) ?? n(it.proposed_rate),
         negotiationId: s(it.negotiationId),
-        
+
         // Enriched Job Details
         jobTitle: job.jobTitle || "No Title",
         date: job.date || null,
@@ -225,12 +236,12 @@ export const handler = async (
     // 5. Categorize (Bucketing Logic)
 
     // A. Scheduled Jobs: Confirmed/Booked applications
-    const scheduledJobs = appsEnriched.filter((a) => 
+    const scheduledJobs = appsEnriched.filter((a) =>
       SCHEDULED_STATUSES.includes(a.applicationStatus)
     );
 
     // B. Completed Jobs: Finished/Paid applications
-    const completedJobs = appsEnriched.filter((a) => 
+    const completedJobs = appsEnriched.filter((a) =>
       COMPLETED_STATUSES.includes(a.applicationStatus)
     );
 
@@ -253,7 +264,7 @@ export const handler = async (
       // If job is already filled or done, it's not open
       if (scheduledJobIds.has(job.jobId)) return false;
       if (completedJobIds.has(job.jobId)) return false;
-      
+
       // If the job itself was cancelled by the clinic
       const jobStatus = normalizeStatus(job.status);
       if (TERMINAL_IGNORE_STATUSES.includes(jobStatus)) return false;
@@ -261,29 +272,112 @@ export const handler = async (
       return true;
     });
 
-    // 6. Response
-    return json(200, {
-      clinicUserSub,
-      counts: {
-        openShifts: openShifts.length,
-        scheduledJobs: scheduledJobs.length,
-        actionNeededJobs: actionNeededJobs.length,
-        completedJobs: completedJobs.length,
-        totalShifts: allShifts.length,
-      },
-      data: {
-        openShifts,       // Jobs that no one has taken yet
-        scheduledJobs,    // Applications that are booked
-        actionNeededJobs, // Applications waiting for your review
-        completedJobs,    // Applications that are finished
-      }
+    const unifiedResponse = {
+      statusCode: 200,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({
+        message: "All clinics jobs and applications categorized successfully.",
+        metadata: {
+          openJobs: openShifts.length,
+          actionNeededJobs: actionNeededJobs.length,
+          scheduledJobs: scheduledJobs.length,
+          completedJobs: completedJobs.length,
+          totalShifts: allShifts.length,
+        },
+        data: {
+          openShifts,
+          scheduledJobs,
+          actionNeededJobs,
+          completedJobs,
+        }
+      })
+    };
+    
+    // Group the categorized shifts by clinic ID
+    const groupedOpenShifts: Record<string, any[]> = {};
+    const groupedActionNeeded: Record<string, any[]> = {};
+    const groupedScheduled: Record<string, any[]> = {};
+    const groupedCompleted: Record<string, any[]> = {};
+    const groupedInvites: Record<string, any[]> = {};
+
+    openShifts.forEach((job) => {
+      const cid = job.clinicId || "unknown";
+      if (!groupedOpenShifts[cid]) groupedOpenShifts[cid] = [];
+      groupedOpenShifts[cid].push(job);
     });
 
-  } catch (error: any) {
-    console.error("Error fetching clinic jobs details:", error);
-    return json(500, {
-      error: "Failed to fetch clinic jobs details",
-      details: error?.message || String(error),
+    actionNeededJobs.forEach((job) => {
+      const cid = job.clinicId || "unknown";
+      if (!groupedActionNeeded[cid]) groupedActionNeeded[cid] = [];
+      groupedActionNeeded[cid].push(job);
     });
+
+    scheduledJobs.forEach((job) => {
+      const cid = job.clinicId || "unknown";
+      if (!groupedScheduled[cid]) groupedScheduled[cid] = [];
+      groupedScheduled[cid].push(job);
+    });
+
+    completedJobs.forEach((job) => {
+      const cid = job.clinicId || "unknown";
+      if (!groupedCompleted[cid]) groupedCompleted[cid] = [];
+      groupedCompleted[cid].push(job);
+    });
+
+    // You can also populate invites here if retrieved, keeping empty for placeholder
+    const payloadMap: Record<string, any> = {
+      open: groupedOpenShifts,
+      action: groupedActionNeeded,
+      scheduled: groupedScheduled,
+      completed: groupedCompleted,
+      invites: groupedInvites,
+    };
+
+    const path = event.path || (event as any).rawPath || "";
+    console.log(`[getAllClinicsShifts] Incoming request path: ${path}`);
+    console.log(`[getAllClinicsShifts] Total Clinics Grouped -> Open: ${Object.keys(groupedOpenShifts).length}, Scheduled: ${Object.keys(groupedScheduled).length}, Completed: ${Object.keys(groupedCompleted).length}`);
+
+    let finalData: any = {
+      openShifts: groupedOpenShifts,
+      actionNeededJobs: groupedActionNeeded,
+      scheduledJobs: groupedScheduled,
+      completedJobs: groupedCompleted,
+      invitesShifts: groupedInvites,
+    };
+
+    if (path.includes("open-shifts")) {
+      console.log("[getAllClinicsShifts] Dynamic Route matched: open-shifts. Serving groupedOpenShifts.");
+      finalData = payloadMap.open;
+    } else if (path.includes("action-needed")) {
+      console.log("[getAllClinicsShifts] Dynamic Route matched: action-needed. Serving groupedActionNeeded.");
+      finalData = payloadMap.action;
+    } else if (path.includes("scheduled-shifts")) {
+      console.log("[getAllClinicsShifts] Dynamic Route matched: scheduled-shifts. Serving groupedScheduled.");
+      finalData = payloadMap.scheduled;
+    } else if (path.includes("completed-shifts")) {
+      console.log("[getAllClinicsShifts] Dynamic Route matched: completed-shifts. Serving groupedCompleted.");
+      finalData = payloadMap.completed;
+    } else if (path.includes("invites-shifts")) {
+      console.log("[getAllClinicsShifts] Dynamic Route matched: invites-shifts. Serving groupedInvites.");
+      finalData = payloadMap.invites;
+    } else {
+       console.log("[getAllClinicsShifts] No specific sub-route matched. Returning massive aggregated block.");
+    }
+
+    return {
+      statusCode: 200,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({
+        message: "All clinics categorized shifts successfully retrieved.",
+        data: finalData,
+      }),
+    };
+  } catch (error: any) {
+    console.error("Error retrieving all clinic shifts:", error);
+    return {
+      statusCode: 500,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({ error: "Failed to retrieve shifts.", details: error.message }),
+    };
   }
 };
