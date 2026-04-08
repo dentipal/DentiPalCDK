@@ -106,6 +106,7 @@ import { handler as sendReferralInviteHandler } from "./handlers/sendReferralInv
 
 import { handler as generatePresignedUrlHandler } from "./handlers/generatePresignedUrl";
 import { handler as getClinicOfficeImagesHandler } from "./handlers/getClinicOfficeImages";
+import { handler as getUserMeHandler } from "./handlers/getUserMe";
 
 import { handler as getActionNeededHandler } from "./handlers/getActionNeeded";
 import {
@@ -149,6 +150,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
     const routes: Routes = {
         // User management routes
         "POST:/users": createUserHandler,
+        "GET:/users/me": getUserMeHandler,
         "GET:/users": getUserHandler,
         "GET:/clinics/{clinicId}/users": getClinicUsersHandler,
         "PUT:/users/{userId}": updateUserHandler,
