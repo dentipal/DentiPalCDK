@@ -1058,6 +1058,12 @@ export class DentiPalCDKStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
     });
 
+    const clinicOfficeImagesBucket = new s3.Bucket(this, 'ClinicOfficeImagesBucket', {
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
+
     // Tables used specifically by the WebSocket handler
     const chatTables = [
         connectionsTable, 
@@ -1114,6 +1120,7 @@ export class DentiPalCDKStack extends cdk.Stack {
         PROFESSIONAL_RESUMES_BUCKET: professionalResumesBucket.bucketName,
         DRIVING_LICENSES_BUCKET: drivingLicensesBucket.bucketName,
         PROFESSIONAL_LICENSES_BUCKET: professionalLicensesBucket.bucketName,
+        CLINIC_OFFICE_IMAGES_BUCKET: clinicOfficeImagesBucket.bucketName,
       },
       timeout: cdk.Duration.seconds(60),
       memorySize: 256,
@@ -1175,6 +1182,7 @@ export class DentiPalCDKStack extends cdk.Stack {
     professionalResumesBucket.grantReadWrite(lambdaFunction);
     drivingLicensesBucket.grantReadWrite(lambdaFunction);
     professionalLicensesBucket.grantReadWrite(lambdaFunction);
+    clinicOfficeImagesBucket.grantReadWrite(lambdaFunction);
 
 
 // Additional permission for dynamodb:Scan on JobPostings table
