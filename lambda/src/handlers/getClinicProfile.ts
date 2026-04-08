@@ -1,8 +1,9 @@
 import {
     DynamoDBClient,
     QueryCommand,
-    QueryCommandInput, // Import the input type
+    QueryCommandInput,
     QueryCommandOutput,
+    GetItemCommand,
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
@@ -18,6 +19,7 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE as string;
 const CLINIC_JOBS_POSTED_TABLE = process.env.CLINIC_JOBS_POSTED_TABLE as string;
 const CLINICS_JOBS_COMPLETED_TABLE = process.env.CLINICS_JOBS_COMPLETED_TABLE as string;
+const CLINICS_TABLE = process.env.CLINICS_TABLE as string;
 
 // Helper to build JSON responses with shared CORS
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
@@ -59,7 +61,7 @@ interface DynamoDBItem {
     contact_email?: AttributeValue; // S
     contact_phone?: AttributeValue; // S
     special_requirements?: AttributeValue; // SS
-    clinic_office_image_key?: AttributeValue; // S
+    office_image_key?: AttributeValue; // S — stored by addClinic upload
     // Fields specific to the Completed Jobs table
     acceptedRate?: AttributeValue; // N (assumed)
     [key: string]: AttributeValue | undefined;
@@ -100,7 +102,7 @@ interface ClinicProfileBase {
         phone: string;
     };
     specialRequirements: string[];
-    clinicOfficeImageKey: string;
+    officeImageKey: string;
 }
 
 // Interface for the enriched clinic profile with stats
@@ -108,6 +110,15 @@ interface EnrichedClinicProfile extends ClinicProfileBase {
     jobsPosted: number;
     jobsCompleted: number;
     totalPaid: number;
+    clinicName: string;
+    location: {
+        addressLine1: string;
+        addressLine2: string;
+        addressLine3: string;
+        city: string;
+        state: string;
+        zipCode: string;
+    };
 }
 
 /**
@@ -201,7 +212,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     phone: str(clinic.contact_phone),
                 },
                 specialRequirements: strArr(clinic.special_requirements),
-                clinicOfficeImageKey: str(clinic.clinic_office_image_key),
+                officeImageKey: str(clinic.office_image_key),
             };
         });
 
@@ -210,50 +221,70 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // -----------------------------------------------------------------
         const enrichedProfiles: EnrichedClinicProfile[] = await Promise.all(
             clinicProfiles.map(async (clinic) => {
-                // --- Get Posted Jobs Count ---
-                // FIX: Explicitly type params as QueryCommandInput to allow 'Select' property string literal
-                const postedParams: QueryCommandInput = {
-                    TableName: CLINIC_JOBS_POSTED_TABLE,
-                    IndexName: "ClinicIdIndex", 
-                    KeyConditionExpression: "clinicId = :clinicId",
-                    ExpressionAttributeValues: {
-                        ":clinicId": { S: clinic.clinicId },
-                    },
-                    Select: "COUNT", // Now correctly interpreted as specific string literal
-                };
-                const postedResult: QueryCommandOutput = await dynamodb.send(new QueryCommand(postedParams));
+                // Run all three lookups concurrently
+                const [postedResult, completedResult, clinicBaseResult] = await Promise.all([
+                    // Posted jobs count
+                    dynamodb.send(new QueryCommand({
+                        TableName: CLINIC_JOBS_POSTED_TABLE,
+                        IndexName: "ClinicIdIndex",
+                        KeyConditionExpression: "clinicId = :clinicId",
+                        ExpressionAttributeValues: { ":clinicId": { S: clinic.clinicId } },
+                        Select: "COUNT",
+                    } as QueryCommandInput)),
+                    // Completed jobs
+                    dynamodb.send(new QueryCommand({
+                        TableName: CLINICS_JOBS_COMPLETED_TABLE,
+                        IndexName: "clinicId-index",
+                        KeyConditionExpression: "clinicId = :clinicId",
+                        ExpressionAttributeValues: { ":clinicId": { S: clinic.clinicId } },
+                    } as QueryCommandInput)),
+                    // Clinic base info (name + address from CLINICS_TABLE)
+                    CLINICS_TABLE
+                        ? dynamodb.send(new GetItemCommand({
+                            TableName: CLINICS_TABLE,
+                            Key: { clinicId: { S: clinic.clinicId } },
+                            ProjectionExpression: "#n, addressLine1, addressLine2, addressLine3, city, #st, zipCode, pincode",
+                            ExpressionAttributeNames: { "#n": "name", "#st": "state" },
+                        })).catch(err => {
+                            console.warn(`[getClinicProfile] CLINICS_TABLE lookup failed for ${clinic.clinicId}:`, err);
+                            return null;
+                        })
+                        : Promise.resolve(null),
+                ]);
+
                 const jobsPosted: number = postedResult.Count || 0;
 
-                // --- Get Completed Jobs Count & Total Paid ---
-                const completedParams: QueryCommandInput = {
-                    TableName: CLINICS_JOBS_COMPLETED_TABLE,
-                    IndexName: "clinicId-index",
-                    KeyConditionExpression: "clinicId = :clinicId",
-                    ExpressionAttributeValues: {
-                        ":clinicId": { S: clinic.clinicId },
-                    },
-                };
-                const completedResult: QueryCommandOutput = await dynamodb.send(
-                    new QueryCommand(completedParams)
-                );
-
                 const completedItems: DynamoDBItem[] = (completedResult.Items as DynamoDBItem[] || []);
-
                 const jobsCompleted: number = completedItems.length;
-                    
-                // Calculate Total Paid
                 const totalPaid: number = completedItems.reduce((acc, item) => {
-                    // ⚠️ ASSUMPTION: 'acceptedRate' is a Number (N)
-                    const amount = parseFloat(item.acceptedRate?.N || "0");
-                    return acc + amount;
+                    return acc + parseFloat(item.acceptedRate?.N || "0");
                 }, 0);
 
-                // Return the original clinic data + the new stats
+                // Merge clinic base info (name + address)
+                let clinicName = clinic.clinicName;
+                let location = clinic.location;
+
+                if (clinicBaseResult?.Item) {
+                    const c = clinicBaseResult.Item;
+                    const s = (attr: AttributeValue | undefined) => attr?.S || "";
+                    if (!clinicName) clinicName = c.name?.S || "";
+                    location = {
+                        addressLine1: s(c.addressLine1) || location.addressLine1,
+                        addressLine2: s(c.addressLine2) || location.addressLine2,
+                        addressLine3: s(c.addressLine3) || location.addressLine3,
+                        city: s(c.city) || location.city,
+                        state: s(c.state) || location.state,
+                        zipCode: s(c.zipCode) || s(c.pincode) || location.zipCode,
+                    };
+                }
+
                 return {
                     ...clinic,
-                    jobsPosted: jobsPosted,
-                    jobsCompleted: jobsCompleted,
-                    totalPaid: totalPaid,
+                    clinicName,
+                    location,
+                    jobsPosted,
+                    jobsCompleted,
+                    totalPaid,
                 };
             })
         );
