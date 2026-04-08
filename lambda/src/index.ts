@@ -8,6 +8,7 @@ import { handler as deleteOwnAccountHandler } from "./handlers/deleteOwnAccount"
 import { handler as getClinicUsersHandler } from "./handlers/getClinicUsers";
 import { handler as getUsersClinicsHandler } from "./handlers/getUsersClinics";
 import { handler as getAllClinicsShiftsHandler } from "./handlers/getAllClinicsShifts";
+import { handler as getClinicShiftsHandler } from "./handlers/getClinicShifts";
 
 import { handler as createClinicHandler } from "./handlers/createClinic";
 import { handler as getAllClinicsHandler } from "./handlers/getAllClinics";
@@ -199,6 +200,14 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/dashboard/all/scheduled-shifts": getAllClinicsShiftsHandler,
         "GET:/dashboard/all/completed-shifts": getAllClinicsShiftsHandler,
         "GET:/dashboard/all/invites-shifts": getAllClinicsShiftsHandler,
+
+        // --- SPECIFIC CLINIC DASHBOARD ROUTES ---
+        "GET:/clinics/{clinicId}/open-shifts": getClinicShiftsHandler,
+        "GET:/clinics/{clinicId}/action-needed": getClinicShiftsHandler,
+        "GET:/clinics/{clinicId}/scheduled-shifts": getClinicShiftsHandler,
+        "GET:/clinics/{clinicId}/completed-shifts": getClinicShiftsHandler,
+        "GET:/clinics/{clinicId}/invites-shifts": getClinicShiftsHandler,
+
 
         // Get all professionals
         "GET:/allprofessionals": getAllProfessionalsHandler,
