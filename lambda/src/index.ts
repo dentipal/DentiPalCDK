@@ -105,6 +105,7 @@ import { handler as confirmPasswordHandler } from "./handlers/confirmPassword";
 import { handler as sendReferralInviteHandler } from "./handlers/sendReferralInvite";
 
 import { handler as generatePresignedUrlHandler } from "./handlers/generatePresignedUrl";
+import { handler as getClinicOfficeImagesHandler } from "./handlers/getClinicOfficeImages";
 
 import { handler as getActionNeededHandler } from "./handlers/getActionNeeded";
 import {
@@ -114,7 +115,6 @@ import {
     getProfessionalLicense,
     getDrivingLicense,
     getVideoResume,
-    getClinicOfficeImage,
 } from "./handlers/getFileUrl";
 import { handler as deleteFileHandler } from "./handlers/deleteFile";
 // Ensure this file is saved in lambda/handlers/updateFile.ts
@@ -308,7 +308,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/files/professional-licenses": getProfessionalLicense,
         "GET:/files/driving-licenses": getDrivingLicense,
         "GET:/files/video-resumes": getVideoResume,
-        "GET:/files/clinic-office-images": getClinicOfficeImage,
+        "GET:/files/clinic-office-images": getClinicOfficeImagesHandler,
         // Backwards-compatible legacy route
         // "GET:/files/certificates": getFileUrlHandler,
         // "PUT:/files/profile-images": updateProfileImage,
