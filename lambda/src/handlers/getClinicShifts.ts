@@ -154,8 +154,15 @@ export const handler = async (
       hourlyRate: n(it.hourly_rate),
       salaryMin: n(it.salary_min),
       salaryMax: n(it.salary_max),
+      location: s(it.location) || s(it.addressLine1),
+      fullAddress: s(it.fullAddress) || s(it.addressLine1),
+      city: s(it.city),
+      state: s(it.state),
+      shiftDetails: s(it.shiftDetails),
       status: s(it.status) || "unknown",
       createdAt: s(it.createdAt),
+      createdBy: s(it.createdBy) || s(it.created_by),
+      creatorName: s(it.creatorName) || s(it.createdBy),
     }));
 
     const jobMap = new Map<string, any>();
@@ -231,6 +238,47 @@ export const handler = async (
         if (TERMINAL_IGNORE_STATUSES.includes(st)) return false;
         return true;
       });
+
+      const profSubs = [...new Set(actionNeededJobs.map((a: any) => a.professionalUserSub).filter(Boolean))];
+      const profilesMap = new Map();
+
+      if (process.env.PROFILES_TABLE && profSubs.length > 0) {
+        const { BatchGetItemCommand, QueryCommand } = require("@aws-sdk/client-dynamodb");
+        const { unmarshall } = require("@aws-sdk/util-dynamodb");
+        for (let i = 0; i < profSubs.length; i += 100) {
+          const chunk = profSubs.slice(i, i + 100);
+          try {
+            const resp: any = await dynamodb.send(new BatchGetItemCommand({ RequestItems: { [process.env.PROFILES_TABLE]: { Keys: chunk.map((s: any) => ({ userSub: { S: s } })) } } }));
+            const arr = resp.Responses?.[process.env.PROFILES_TABLE] || [];
+            arr.forEach((item: any) => {
+              const p = unmarshall(item);
+              profilesMap.set(p.userSub, p);
+            });
+          } catch(e) { console.error("Profile fetch error", e); }
+        }
+
+        // Add negotiation fetching
+        for(const app of actionNeededJobs) {
+           if((app.applicationStatus || "").toLowerCase() === "negotiating" && process.env.JOB_NEGOTIATIONS_TABLE) {
+              try {
+                const negoResp: any = await dynamodb.send(new QueryCommand({
+                  TableName: process.env.JOB_NEGOTIATIONS_TABLE,
+                  IndexName: "applicationId-index",
+                  KeyConditionExpression: "applicationId = :aid",
+                  ExpressionAttributeValues: { ":aid": { S: app.applicationId } }
+                }));
+                const items = (negoResp.Items || []).map((it:any) => unmarshall(it));
+                if (items.length) {
+                  items.sort((a:any, b:any)=> new Date(b.updatedAt||b.createdAt||0).getTime() - new Date(a.updatedAt||a.createdAt||0).getTime());
+                  app.negotiation = items[0];
+                }
+              } catch(e){}
+           }
+           app.professional = profilesMap.get(app.professionalUserSub) || null;
+           app.professionalName = app.professional?.first_name ? `${app.professional.first_name} ${app.professional.last_name || ''}`.trim() : app.professionalName;
+        }
+      }
+
       responseData = actionNeededJobs;
     }
 
