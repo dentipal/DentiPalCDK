@@ -18,6 +18,7 @@ interface RequestBody {
     fileName: string;
     contentType: string;
     fileBase64: string; // base64-encoded file payload
+    clinicId?: string;
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
@@ -50,10 +51,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (method !== "POST") return json(405, { error: "Method not allowed" });
         if (!event.body) return json(400, { error: "Request body is required" });
 
-        const { fileType, fileName, contentType, fileBase64 } = JSON.parse(event.body) as RequestBody;
+        const { fileType, fileName, contentType, fileBase64, clinicId } = JSON.parse(event.body) as RequestBody;
 
         const allowed: FileType[] = ["profile-image", "professional-resume", "video-resume", "professional-license", "certificate", "driving-license", "clinic-office-image"];
         if (!allowed.includes(fileType)) return json(400, { error: "Invalid fileType" });
+
+        if (fileType === "clinic-office-image" && !clinicId) return json(400, { error: "clinicId is required for clinic-office-image uploads" });
 
         if (!fileBase64) return json(400, { error: "fileBase64 is required (base64-encoded)" });
 
@@ -71,7 +74,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!bucketName) return json(500, { error: `Server configuration error: Missing bucket for ${fileType}` });
 
         const sanitizedFileName = String(fileName || "file").replace(/[^a-zA-Z0-9.\-_]/g, "_");
-        const objectKey = `${userSub}/${fileType}/${Date.now()}-${sanitizedFileName}`;
+        // Clinic office images are keyed by clinicId so they can be retrieved by clinic.
+        // All other file types are keyed by userSub.
+        const keyPrefix = fileType === "clinic-office-image" ? clinicId! : userSub;
+        const objectKey = `${keyPrefix}/${fileType}/${Date.now()}-${sanitizedFileName}`;
 
         // decode base64
         const buffer = Buffer.from(fileBase64, "base64");
@@ -109,7 +115,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 createdAt: new Date().toISOString(),
                 uploadStatus: "complete"
             };
-            const metaKey = `${userSub}/${fileType}/.meta/${Date.now()}-${sanitizedFileName}.json`;
+            const metaKey = `${keyPrefix}/${fileType}/.meta/${Date.now()}-${sanitizedFileName}.json`;
             await s3Client.send(new PutObjectCommand({ Bucket: bucketName, Key: metaKey, Body: JSON.stringify(meta), ContentType: "application/json" }));
             console.log("Upload metadata stored to S3", { bucket: bucketName, metaKey });
         } catch (metaErr) {
