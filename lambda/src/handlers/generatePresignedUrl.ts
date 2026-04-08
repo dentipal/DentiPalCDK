@@ -11,7 +11,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     body: JSON.stringify(bodyObj)
 });
 
-type FileType = "profile-image" | "professional-resume" | "video-resume" | "professional-license" | "certificate" | "driving-license";
+type FileType = "profile-image" | "professional-resume" | "video-resume" | "professional-license" | "certificate" | "driving-license" | "clinic-office-image";
 
 interface RequestBody {
     fileType: FileType;
@@ -52,13 +52,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const { fileType, fileName, contentType, fileBase64 } = JSON.parse(event.body) as RequestBody;
 
-        const allowed: FileType[] = ["profile-image", "professional-resume", "video-resume", "professional-license", "certificate", "driving-license"];
+        const allowed: FileType[] = ["profile-image", "professional-resume", "video-resume", "professional-license", "certificate", "driving-license", "clinic-office-image"];
         if (!allowed.includes(fileType)) return json(400, { error: "Invalid fileType" });
 
         if (!fileBase64) return json(400, { error: "fileBase64 is required (base64-encoded)" });
 
         const buckets: Record<FileType, string | undefined> = {
             "profile-image": process.env.PROFILE_IMAGES_BUCKET,
+            "clinic-office-image": process.env.PROFILE_IMAGES_BUCKET, // Reuse the same bucket for clinic images
             "professional-resume": process.env.PROFESSIONAL_RESUMES_BUCKET,
             "video-resume": process.env.VIDEO_RESUMES_BUCKET,
             "professional-license": process.env.PROFESSIONAL_LICENSES_BUCKET,
