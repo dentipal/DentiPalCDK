@@ -64,6 +64,7 @@ const generateFileUrl = async (
       "professional-license": process.env.PROFESSIONAL_LICENSES_BUCKET,
       "professional-resume": process.env.PROFESSIONAL_RESUMES_BUCKET,
       "driving-license": process.env.DRIVING_LICENSES_BUCKET,
+      "clinic-office-image": process.env.CLINIC_OFFICE_IMAGES_BUCKET,
     };
 
     const bucket = buckets[fileType];
@@ -142,6 +143,7 @@ export const getProfessionalResume = async (event: APIGatewayProxyEvent) => gene
 export const getProfessionalLicense = async (event: APIGatewayProxyEvent) => generateFileUrl(event, "professional-license");
 export const getDrivingLicense = async (event: APIGatewayProxyEvent) => generateFileUrl(event, "driving-license");
 export const getVideoResume = async (event: APIGatewayProxyEvent) => generateFileUrl(event, "video-resume");
+export const getClinicOfficeImage = async (event: APIGatewayProxyEvent) => generateFileUrl(event, "clinic-office-image");
 
 // Keep generic handler for backward compatibility; it will route based on path segments.
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
@@ -155,6 +157,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       "professional-licenses": "professional-license",
       "professional-resumes": "professional-resume",
       "driving-licenses": "driving-license",
+      "clinic-office-images": "clinic-office-image",
     };
     const fileType = map[pathFileType];
     if (fileType) return generateFileUrl(event, fileType);

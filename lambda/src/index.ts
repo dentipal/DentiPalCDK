@@ -114,6 +114,7 @@ import {
     getProfessionalLicense,
     getDrivingLicense,
     getVideoResume,
+    getClinicOfficeImage,
 } from "./handlers/getFileUrl";
 import { handler as deleteFileHandler } from "./handlers/deleteFile";
 // Ensure this file is saved in lambda/handlers/updateFile.ts
@@ -307,6 +308,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/files/professional-licenses": getProfessionalLicense,
         "GET:/files/driving-licenses": getDrivingLicense,
         "GET:/files/video-resumes": getVideoResume,
+        "GET:/files/clinic-office-images": getClinicOfficeImage,
         // Backwards-compatible legacy route
         // "GET:/files/certificates": getFileUrlHandler,
         // "PUT:/files/profile-images": updateProfileImage,

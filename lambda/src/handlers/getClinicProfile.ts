@@ -59,6 +59,7 @@ interface DynamoDBItem {
     contact_email?: AttributeValue; // S
     contact_phone?: AttributeValue; // S
     special_requirements?: AttributeValue; // SS
+    clinic_office_image_key?: AttributeValue; // S
     // Fields specific to the Completed Jobs table
     acceptedRate?: AttributeValue; // N (assumed)
     [key: string]: AttributeValue | undefined;
@@ -99,6 +100,7 @@ interface ClinicProfileBase {
         phone: string;
     };
     specialRequirements: string[];
+    clinicOfficeImageKey: string;
 }
 
 // Interface for the enriched clinic profile with stats
@@ -199,6 +201,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     phone: str(clinic.contact_phone),
                 },
                 specialRequirements: strArr(clinic.special_requirements),
+                clinicOfficeImageKey: str(clinic.clinic_office_image_key),
             };
         });
 
