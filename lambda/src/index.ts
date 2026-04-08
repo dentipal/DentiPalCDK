@@ -239,7 +239,6 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
 
         // Action needed/pending applications
         "GET:/action-needed": getActionNeededHandler,
-        "GET:/clinics/{clinicId}/action-needed": getActionNeededHandler,
 
         // Professional job filtering by role
         "GET:/professionals/filtered-jobs": getProfessionalFilteredJobsHandler,
