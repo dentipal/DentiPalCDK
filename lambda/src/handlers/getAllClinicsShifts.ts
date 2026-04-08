@@ -220,7 +220,9 @@ export const handler = async (
       const status = normalizeStatus(it.applicationStatus);
 
       return {
-        // Application Details
+        ...job, // Bring in all job properties
+        
+        // Application Details OVERRIDING
         applicationId: s(it.applicationId),
         clinicId: s(it.clinicId),
         jobId,
@@ -233,9 +235,6 @@ export const handler = async (
 
         // Enriched Job Details
         jobTitle: job.jobTitle || "No Title",
-        date: job.date || null,
-        start_time: job.start_time || null,
-        end_time: job.end_time || null,
         hourlyRate: job.hourlyRate || null,
       };
     });
@@ -366,8 +365,53 @@ export const handler = async (
       finalData = payloadMap.completed;
     } else if (path.includes("invites-shifts")) {
       console.log("[getAllClinicsShifts] Dynamic Route matched: invites-shifts. Serving groupedInvites.");
-      finalData = payloadMap.invites;
-    } else {
+      
+      if (process.env.JOB_INVITATIONS_TABLE && clinicIds.length > 0) {
+        const { ScanCommand } = require("@aws-sdk/client-dynamodb");
+        let inviteItems: any[] = [];
+        let lastKey;
+        do {
+          const res: any = await dynamodb.send(new ScanCommand({
+            TableName: process.env.JOB_INVITATIONS_TABLE,
+            ExclusiveStartKey: lastKey
+          }));
+          if (res.Items) inviteItems.push(...res.Items);
+          lastKey = res.LastEvaluatedKey;
+        } while (lastKey);
+
+        const clinicIdSet = new Set(clinicIds);
+        inviteItems.forEach(item => {
+          const cid = s(item.clinicId);
+          if (!clinicIdSet.has(cid)) return;
+          
+          const jobId = s(item.jobId);
+          const job = jobMap.get(jobId) || {};
+          
+          const enriched = {
+            ...job, // Bring in all job properties
+            
+            invitationId: s(item.invitationId),
+            jobId: jobId,
+            clinicId: cid,
+            professionalUserSub: s(item.professionalUserSub),
+            professionalName: "Professional",
+            invitationStatus: s(item.invitationStatus) || "pending",
+            applicationStatus: s(item.invitationStatus) || "pending",
+            sentAt: s(item.sentAt),
+            appliedAt: s(item.sentAt),
+            updatedAt: s(item.updatedAt),
+            message: s(item.message),
+            rateOffered: n(item.rateOffered),
+            
+            jobTitle: job.jobTitle || "No Title",
+            hourlyRate: job.hourlyRate || null,
+          };
+          if (!groupedInvites[cid]) groupedInvites[cid] = [];
+          groupedInvites[cid].push(enriched);
+        });
+      }
+      
+      finalData = groupedInvites;
        console.log("[getAllClinicsShifts] No specific sub-route matched. Returning massive aggregated block.");
     }
 
