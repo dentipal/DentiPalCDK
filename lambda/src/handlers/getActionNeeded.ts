@@ -41,7 +41,7 @@ const str = (attr: any): string => {
 };
 
 function extractClinicIdFromPath(path: string): string {
-  // Path format: /clinics/{clinicId}/action-needed
+  // Path format /clinics/{clinicId}/action-needed
   const match = path.match(/\/clinics\/([^\/]+)\/action-needed/);
   return match ? match[1] : "";
 }
