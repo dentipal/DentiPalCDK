@@ -183,6 +183,8 @@ export const handler = async (
       const status = normalizeStatus(it.applicationStatus);
 
       return {
+        ...job, // Bring in all job properties
+        
         applicationId: s(it.applicationId),
         clinicId: s(it.clinicId),
         jobId,
@@ -194,9 +196,6 @@ export const handler = async (
         negotiationId: s(it.negotiationId),
 
         jobTitle: job.jobTitle || "No Title",
-        date: job.date || null,
-        start_time: job.start_time || null,
-        end_time: job.end_time || null,
         hourlyRate: job.hourlyRate || null,
       };
     });
@@ -247,9 +246,52 @@ export const handler = async (
     }
 
     if (isInvites) {
-      // Stub or implement invites logic if JOB_INVITATIONS_TABLE is available
-      // Typically invites are queried from an Invitations table 
-      responseData = []; 
+      if (process.env.JOB_INVITATIONS_TABLE) {
+        // Scan invitations for the target clinic
+        const { ScanCommand } = require("@aws-sdk/client-dynamodb");
+        let inviteItems: any[] = [];
+        let lastKey;
+        do {
+          const res: any = await dynamodb.send(new ScanCommand({
+            TableName: process.env.JOB_INVITATIONS_TABLE,
+            FilterExpression: "clinicId = :cid",
+            ExpressionAttributeValues: {
+              ":cid": { S: targetClinicId }
+            },
+            ExclusiveStartKey: lastKey
+          }));
+          if (res.Items) inviteItems.push(...res.Items);
+          lastKey = res.LastEvaluatedKey;
+        } while (lastKey);
+
+        // Map and enrich invites
+        responseData = inviteItems.map(item => {
+          const jobId = s(item.jobId);
+          const job = jobMap.get(jobId) || {};
+          
+          return {
+            ...job, // Bring in all job properties
+            
+            invitationId: s(item.invitationId),
+            jobId: jobId,
+            clinicId: s(item.clinicId),
+            professionalUserSub: s(item.professionalUserSub),
+            professionalName: "Professional", // Could be fetched if needed
+            invitationStatus: s(item.invitationStatus) || "pending",
+            applicationStatus: s(item.invitationStatus) || "pending", // fallback for table column
+            sentAt: s(item.sentAt),
+            appliedAt: s(item.sentAt), // map to appliedAt for the shared shift table
+            updatedAt: s(item.updatedAt),
+            message: s(item.message),
+            rateOffered: n(item.rateOffered),
+            
+            jobTitle: job.jobTitle || "No Title",
+            hourlyRate: job.hourlyRate || null,
+          };
+        });
+      } else {
+        responseData = []; 
+      }
     }
 
     return json(200, {
