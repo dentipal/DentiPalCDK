@@ -7,6 +7,7 @@ import { handler as deleteUserHandler } from "./handlers/deleteUser";
 import { handler as deleteOwnAccountHandler } from "./handlers/deleteOwnAccount";
 import { handler as getClinicUsersHandler } from "./handlers/getClinicUsers";
 import { handler as getUsersClinicsHandler } from "./handlers/getUsersClinics";
+import { handler as getAllClinicsShiftsHandler } from "./handlers/getAllClinicsShifts";
 
 import { handler as createClinicHandler } from "./handlers/createClinic";
 import { handler as getAllClinicsHandler } from "./handlers/getAllClinics";
@@ -104,7 +105,7 @@ import { handler as sendReferralInviteHandler } from "./handlers/sendReferralInv
 
 import { handler as generatePresignedUrlHandler } from "./handlers/generatePresignedUrl";
 
-import { handler as getActionNeededHandler } from "./handlers/getActionNeeded"; 
+import { handler as getActionNeededHandler } from "./handlers/getActionNeeded";
 import {
     handler as getFileUrlHandler,
     getProfileImage,
@@ -142,7 +143,7 @@ interface Routes {
 // RESTful routing based on resource path and HTTP method
 const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | null => {
     const routeKey = `${httpMethod}:${resource}`;
-    
+
     const routes: Routes = {
         // User management routes
         "POST:/users": createUserHandler,
@@ -191,6 +192,13 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/clinic-profile/{clinicId}": getClinicProfileDetailsHandler,
         "PUT:/clinic-profiles/{clinicId}": updateClinicProfileDetailsPageHandler,
         "DELETE:/clinic-profiles/{clinicId}": deleteClinicProfileHandler,
+
+        // --- ALL CLINICS DASHBOARD ROUTES ---
+        "GET:/dashboard/all/open-shifts": getAllClinicsShiftsHandler,
+        "GET:/dashboard/all/action-needed": getAllClinicsShiftsHandler,
+        "GET:/dashboard/all/scheduled-shifts": getAllClinicsShiftsHandler,
+        "GET:/dashboard/all/completed-shifts": getAllClinicsShiftsHandler,
+        "GET:/dashboard/all/invites-shifts": getAllClinicsShiftsHandler,
 
         // Get all professionals
         "GET:/allprofessionals": getAllProfessionalsHandler,
@@ -313,7 +321,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:public/publicprofessionals": publicProfessionalsHandler,
         "GET:public/publicJobs": publicClinicsHandler,
         "GET:/clinics/{clinicId}/address": getClinicAddressHandler,
-        
+
         // --- Stage-prefixed duplicates (for API Gateway stage = prod) ---
         "GET:/prod/negotiations": getAllNegotiationsProfHandler,
         "GET:/prod/allnegotiations": getAllNegotiationsProfHandler,
