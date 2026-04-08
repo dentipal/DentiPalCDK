@@ -384,7 +384,7 @@ export const handler = async (
         }
 
         // Add negotiation fetching
-        for(const app of FlatActionNeeded) {
+        for(const app of FlatActionNeeded as any[]) {
            if((app.applicationStatus || "").toLowerCase() === "negotiating" && process.env.JOB_NEGOTIATIONS_TABLE) {
               try {
                 const negoResp: any = await dynamodb.send(new QueryCommand({
