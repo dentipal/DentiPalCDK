@@ -21,6 +21,7 @@ const transformBody = (body: any): any => {
     const transformed: any = {};
     const mapping: Record<string, string> = {
         clinicName: "clinic_name",
+        title: "title",
         primaryContactFirstName: "primary_contact_first_name",
         primaryContactLastName: "primary_contact_last_name",
         practiceType: "practice_type",
@@ -35,10 +36,11 @@ const transformBody = (body: any): any => {
         assistedHygieneAvailable: "assisted_hygiene_available",
         freeParkingAvailable: "free_parking_available",
         insurancePlansAccepted: "insurance_plans_accepted",
-        notes: "description",
+        notes: "notes",
+        parkingCost: "parking_cost",
         website: "website",
         dentalAssociation: "dental_association",
-        addressLine1: "address_line_1",
+        addressLine1: "addressLine1",
         city: "city",
         state: "state",
         zipCode: "zip_code",
@@ -48,7 +50,7 @@ const transformBody = (body: any): any => {
     };
 
     if (body.location) {
-        if (body.location.addressLine1) transformed.address_line_1 = body.location.addressLine1;
+        if (body.location.addressLine1) transformed.addressLine1 = body.location.addressLine1;
         if (body.location.city) transformed.city = body.location.city;
         if (body.location.state) transformed.state = body.location.state;
         if (body.location.zipCode) transformed.zip_code = body.location.zipCode;
@@ -153,12 +155,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const dynamoBody = transformBody(requestBody);
 
         const allowedFields = [
-            "assisted_hygiene_available", "booking_out_period", "city", "clinic_name", "clinic_phone",
+            "assisted_hygiene_available", "booking_out_period", "city", "clinic_name", "clinic_phone", "title",
             "free_parking_available", "insurance_plans_accepted", "num_assistants", "num_doctors",
-            "num_hygienists", "number_of_operatories", "parking_type", "practice_type",
+            "num_hygienists", "number_of_operatories", "parking_type", "parking_cost", "practice_type",
             "primary_contact_first_name", "primary_contact_last_name", "primary_practice_area",
-            "software_used", "state", "description", "website", "dental_association",
-            "clinic_email", "zip_code", "address_line_1", "office_image_key"
+            "software_used", "state", "notes", "website", "dental_association",
+            "clinic_email", "zip_code", "addressLine1", "office_image_key"
         ];
 
         const validUpdateFields: any = {};

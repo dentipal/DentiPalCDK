@@ -14,6 +14,7 @@ import { CORS_HEADERS } from "./corsHeaders";
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE as string;
+const CLINICS_TABLE = process.env.CLINICS_TABLE as string;
 
 // Helper to build JSON responses with shared CORS
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
@@ -29,6 +30,7 @@ interface DynamoDBClinicItem {
     clinicId?: AttributeValue;
     userSub?: AttributeValue;
     clinic_name?: AttributeValue;
+    title?: AttributeValue;
     practice_type?: AttributeValue;
     primary_practice_area?: AttributeValue;
     primary_contact_first_name?: AttributeValue;
@@ -41,13 +43,16 @@ interface DynamoDBClinicItem {
     booking_out_period?: AttributeValue; // S
     software_used?: AttributeValue; // S
     parking_type?: AttributeValue; // S
+    parking_cost?: AttributeValue; // N
     free_parking_available?: AttributeValue; // BOOL
     createdAt?: AttributeValue; // S
     updatedAt?: AttributeValue; // S
     addressLine1?: AttributeValue; // S
+    address_line_1?: AttributeValue; // S (legacy column name)
     city?: AttributeValue; // S
     state?: AttributeValue; // S
     zip_code?: AttributeValue; // S
+    zipCode?: AttributeValue; // S (alternative column name)
     contact_email?: AttributeValue; // S
     clinic_phone?: AttributeValue; // S
     insurance_plans_accepted?: AttributeValue; // SS
@@ -55,6 +60,7 @@ interface DynamoDBClinicItem {
     website?: AttributeValue; // S
     dental_association?: AttributeValue; // S
     notes?: AttributeValue; // S
+    description?: AttributeValue; // S (notes may be stored as description)
     [key: string]: AttributeValue | undefined;
 }
 
@@ -63,6 +69,7 @@ interface ClinicProfile {
     clinicId: string;
     userSub: string;
     clinicName: string;
+    title: string;
     practiceType: string;
     primaryPracticeArea: string;
     primaryContactFirstName: string;
@@ -73,8 +80,9 @@ interface ClinicProfile {
     numAssistants: number;
     numDoctors: number;
     bookingOutPeriod: string;
-    softwareUsed: string;
+    softwareUsed: string[];
     parkingType: string;
+    parkingCost: number | null;
     freeParkingAvailable: boolean;
     createdAt: string;
     updatedAt: string;
@@ -106,14 +114,35 @@ const unmarshallClinic = (clinic: DynamoDBClinicItem | undefined): ClinicProfile
     if (!clinic) return null;
 
     const safeParseInt = (attr: AttributeValue | undefined): number => (attr?.N ? parseInt(attr.N, 10) : 0);
+    const safeParseFloat = (attr: AttributeValue | undefined): number | null => {
+        if (!attr?.N) return null;
+        const v = parseFloat(attr.N);
+        return Number.isFinite(v) ? v : null;
+    };
     const str = (attr: AttributeValue | undefined): string => attr?.S || "";
     const bool = (attr: AttributeValue | undefined): boolean => attr?.BOOL || false;
     const strArr = (attr: AttributeValue | undefined): string[] => attr?.SS || [];
+
+    // Handle software_used stored as String (S), List (L), or StringSet (SS)
+    const parseSoftwareUsed = (attr: AttributeValue | undefined): string[] => {
+        if (!attr) return [];
+        if (attr.L) {
+            return attr.L
+                .map((v: AttributeValue) => v.S || "")
+                .filter(Boolean);
+        }
+        if (attr.SS) return attr.SS;
+        if (attr.S) {
+            return attr.S.split(",").map((s: string) => s.trim()).filter(Boolean);
+        }
+        return [];
+    };
 
     return {
         clinicId: str(clinic.clinicId),
         userSub: str(clinic.userSub),
         clinicName: str(clinic.clinic_name),
+        title: str(clinic.title),
         practiceType: str(clinic.practice_type),
         primaryPracticeArea: str(clinic.primary_practice_area),
         primaryContactFirstName: str(clinic.primary_contact_first_name),
@@ -124,16 +153,17 @@ const unmarshallClinic = (clinic: DynamoDBClinicItem | undefined): ClinicProfile
         numAssistants: safeParseInt(clinic.num_assistants),
         numDoctors: safeParseInt(clinic.num_doctors),
         bookingOutPeriod: str(clinic.booking_out_period),
-        softwareUsed: str(clinic.software_used),
+        softwareUsed: parseSoftwareUsed(clinic.software_used),
         parkingType: str(clinic.parking_type),
+        parkingCost: safeParseFloat(clinic.parking_cost),
         freeParkingAvailable: bool(clinic.free_parking_available),
         createdAt: str(clinic.createdAt),
         updatedAt: str(clinic.updatedAt),
         location: {
-            addressLine1: str(clinic.addressLine1),
+            addressLine1: str(clinic.addressLine1) || str(clinic.address_line_1),
             city: str(clinic.city),
             state: str(clinic.state),
-            zipCode: str(clinic.zip_code),
+            zipCode: str(clinic.zip_code) || str(clinic.zipCode),
         },
         contactInfo: {
             email: str(clinic.contact_email),
@@ -143,7 +173,7 @@ const unmarshallClinic = (clinic: DynamoDBClinicItem | undefined): ClinicProfile
         createdBy: str(clinic.createdBy),
         website: str(clinic.website),
         dentalAssociation: str(clinic.dental_association),
-        notes: str(clinic.notes),
+        notes: str(clinic.notes) || str(clinic.description),
     };
 };
 
@@ -209,6 +239,43 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 6. Format Data and Respond
         const clinicData = unmarshallClinic(item);
+
+        // 7. Enrich with data from CLINICS_TABLE (address, name may only be stored there)
+        if (clinicData && CLINICS_TABLE) {
+            try {
+                const clinicBaseResult = await dynamodb.send(new GetItemCommand({
+                    TableName: CLINICS_TABLE,
+                    Key: { clinicId: { S: clinicId } },
+                    ProjectionExpression: "#n, addressLine1, addressLine2, city, #st, zipCode, pincode",
+                    ExpressionAttributeNames: { "#n": "name", "#st": "state" },
+                }));
+
+                if (clinicBaseResult.Item) {
+                    const c = clinicBaseResult.Item;
+                    const s = (attr: AttributeValue | undefined): string => attr?.S || "";
+
+                    // Merge: only fill in fields that are empty in the profile
+                    if (!clinicData.clinicName) {
+                        clinicData.clinicName = s(c.name);
+                    }
+                    if (!clinicData.location.addressLine1) {
+                        clinicData.location.addressLine1 = s(c.addressLine1);
+                    }
+                    if (!clinicData.location.city) {
+                        clinicData.location.city = s(c.city);
+                    }
+                    if (!clinicData.location.state) {
+                        clinicData.location.state = s(c.state);
+                    }
+                    if (!clinicData.location.zipCode) {
+                        clinicData.location.zipCode = s(c.zipCode) || s(c.pincode);
+                    }
+                }
+            } catch (clinicFetchErr) {
+                console.warn(`[getClinicProfileDetails] CLINICS_TABLE lookup failed for ${clinicId}:`, clinicFetchErr);
+                // Don't fail the whole request if this lookup fails
+            }
+        }
 
         return json(200, {
             message: "Clinic profile retrieved successfully",

@@ -80,7 +80,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 4. Extract Clinic ID
-        let clinicId: string | undefined = event.pathParameters?.clinicId || event.pathParameters?.proxy;
+        let clinicId: string | undefined = event.pathParameters?.clinicId;
+        if (!clinicId) {
+            // Fallback: extract from proxy path (e.g. "clinics/uuid" → "uuid")
+            const proxy = event.pathParameters?.proxy || event.path || "";
+            const parts = proxy.split("/").filter(Boolean);
+            const clinicsIdx = parts.indexOf("clinics");
+            clinicId = clinicsIdx >= 0 && parts[clinicsIdx + 1]
+                ? parts[clinicsIdx + 1]
+                : parts[parts.length - 1];
+        }
         console.log("Extracted clinicId:", clinicId);
 
         if (!clinicId) {
@@ -125,16 +134,35 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Check if any address component is present
         if (addressLine1 || addressLine2 || addressLine3 || city || state || pincode) {
-            const address: string = buildAddress({ 
-                addressLine1: addressLine1 || "", 
-                addressLine2: addressLine2 || undefined, 
-                addressLine3: addressLine3 || undefined, 
-                city: city || "", 
-                state: state || "", 
-                pincode: pincode || "" 
+            const address: string = buildAddress({
+                addressLine1: addressLine1 || "",
+                addressLine2: addressLine2 || undefined,
+                addressLine3: addressLine3 || undefined,
+                city: city || "",
+                state: state || "",
+                pincode: pincode || ""
             });
             updateExpression.push("address = :address");
             expressionAttributeValues[":address"] = { S: address };
+
+            // Also store individual address fields for lookups
+            if (addressLine1) {
+                updateExpression.push("addressLine1 = :addressLine1");
+                expressionAttributeValues[":addressLine1"] = { S: addressLine1 };
+            }
+            if (city) {
+                updateExpression.push("city = :city");
+                expressionAttributeValues[":city"] = { S: city };
+            }
+            if (state) {
+                updateExpression.push("#st = :state");
+                expressionAttributeValues[":state"] = { S: state };
+                expressionAttributeNames["#st"] = "state";
+            }
+            if (pincode) {
+                updateExpression.push("pincode = :pincode");
+                expressionAttributeValues[":pincode"] = { S: pincode };
+            }
         }
 
         // Always update timestamp
@@ -165,7 +193,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
              });
         }
 
-        // 7. Execute DynamoDB Update
+        // 7. Execute DynamoDB Update (upsert - creates record if it doesn't exist)
         const command = new UpdateItemCommand({
             TableName: CLINICS_TABLE,
             Key: { clinicId: { S: clinicId } },
@@ -173,7 +201,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             ExpressionAttributeValues: expressionAttributeValues,
             // Only include ExpressionAttributeNames if needed (i.e., if '#name' was used)
             ExpressionAttributeNames: Object.keys(expressionAttributeNames).length > 0 ? expressionAttributeNames : undefined,
-            ConditionExpression: "attribute_exists(clinicId)", // Ensure item exists
         });
 
         await dynamoClient.send(command);
