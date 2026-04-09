@@ -49,6 +49,7 @@ interface DynamoDBItem {
     clinic_software?: AttributeValue; // S
     software_used?: AttributeValue; // S
     parking_type?: AttributeValue; // S
+    parking_cost?: AttributeValue; // N
     free_parking_available?: AttributeValue; // BOOL
     createdAt?: AttributeValue; // S
     updatedAt?: AttributeValue; // S
@@ -62,6 +63,8 @@ interface DynamoDBItem {
     contact_phone?: AttributeValue; // S
     special_requirements?: AttributeValue; // SS
     office_image_key?: AttributeValue; // S — stored by addClinic upload
+    notes?: AttributeValue; // S
+    description?: AttributeValue; // S (notes may be stored as description)
     // Fields specific to the Completed Jobs table
     acceptedRate?: AttributeValue; // N (assumed)
     [key: string]: AttributeValue | undefined;
@@ -84,8 +87,9 @@ interface ClinicProfileBase {
     numDoctors: number;
     bookingOutPeriod: string;
     clinic_software: string;
-    software_used: string;
+    software_used: string[];
     parkingType: string;
+    parkingCost: number | null;
     freeParkingAvailable: boolean;
     createdAt: string;
     updatedAt: string;
@@ -103,6 +107,7 @@ interface ClinicProfileBase {
     };
     specialRequirements: string[];
     officeImageKey: string;
+    notes: string;
 }
 
 // Interface for the enriched clinic profile with stats
@@ -166,17 +171,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Unmarshal the main clinic profiles (full version)
         const clinicProfiles: ClinicProfileBase[] = (result.Items as DynamoDBItem[]).map((clinic) => {
-            
+
             // Helper to safely parse int, defaulting to 0
-            const parseNum = (attr: AttributeValue | undefined): number => 
+            const parseNum = (attr: AttributeValue | undefined): number =>
                 attr?.N ? parseInt(attr.N, 10) : 0;
+            const parseFloat2 = (attr: AttributeValue | undefined): number | null => {
+                if (!attr?.N) return null;
+                const v = parseFloat(attr.N);
+                return Number.isFinite(v) ? v : null;
+            };
             // Helper to safely get string, defaulting to ""
             const str = (attr: AttributeValue | undefined): string => attr?.S || "";
             // Helper to safely get boolean, defaulting to false
             const bool = (attr: AttributeValue | undefined): boolean => attr?.BOOL || false;
             // Helper to safely get string array (SS), defaulting to []
             const strArr = (attr: AttributeValue | undefined): string[] => attr?.SS || [];
-            
+
+            // Handle software_used stored as String (S), List (L), or StringSet (SS)
+            const parseSoftwareUsed = (attr: AttributeValue | undefined): string[] => {
+                if (!attr) return [];
+                if (attr.L) {
+                    return attr.L
+                        .map((v: AttributeValue) => v.S || "")
+                        .filter(Boolean);
+                }
+                if (attr.SS) return attr.SS;
+                if (attr.S) {
+                    return attr.S.split(",").map((s: string) => s.trim()).filter(Boolean);
+                }
+                return [];
+            };
+
 
             return {
                 clinicId: str(clinic.clinicId),
@@ -194,8 +219,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 numDoctors: parseNum(clinic.num_doctors),
                 bookingOutPeriod: str(clinic.booking_out_period) || "immediate",
                 clinic_software: str(clinic.clinic_software),
-                software_used: str(clinic.software_used),
+                software_used: parseSoftwareUsed(clinic.software_used),
                 parkingType: str(clinic.parking_type),
+                parkingCost: parseFloat2(clinic.parking_cost),
                 freeParkingAvailable: bool(clinic.free_parking_available),
                 createdAt: str(clinic.createdAt),
                 updatedAt: str(clinic.updatedAt),
@@ -213,6 +239,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 },
                 specialRequirements: strArr(clinic.special_requirements),
                 officeImageKey: str(clinic.office_image_key),
+                notes: str(clinic.notes) || str(clinic.description),
             };
         });
 
