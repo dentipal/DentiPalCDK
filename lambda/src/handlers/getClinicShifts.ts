@@ -343,9 +343,10 @@ export const handler = async (
         do {
           const res: any = await dynamodb.send(new ScanCommand({
             TableName: process.env.JOB_INVITATIONS_TABLE,
-            FilterExpression: "clinicId = :cid",
+            FilterExpression: "clinicId = :cid AND invitationStatus <> :accepted",
             ExpressionAttributeValues: {
-              ":cid": { S: targetClinicId }
+              ":cid": { S: targetClinicId },
+              ":accepted": { S: "accepted" }
             },
             ExclusiveStartKey: lastKey
           }));

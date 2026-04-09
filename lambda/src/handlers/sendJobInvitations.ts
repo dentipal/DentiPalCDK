@@ -177,26 +177,18 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
             };
         }
 
-        // 6. Role Compatibility Check
-        const incompatibleProfessionals: ProfessionalItem[] = existingProfessionals.filter(
-            (p) =>
-                (p.role?.S !== jobRole) &&
-                (jobRole !== "dual_role_front_da") &&
-                (p.role?.S !== "dual_role_front_da")
+        // 6. Role Compatibility Check — skip incompatible, don't block the whole batch
+        const compatibleUserSubs = new Set(
+            existingProfessionals
+                .filter(
+                    (p) =>
+                        p.role?.S === jobRole ||
+                        jobRole === "dual_role_front_da" ||
+                        p.role?.S === "dual_role_front_da"
+                )
+                .map((p) => p.userSub?.S)
+                .filter((s): s is string => !!s)
         );
-
-        if (incompatibleProfessionals.length > 0) {
-            const names: string[] = incompatibleProfessionals.map(
-                (p) => `${p.full_name?.S || "Unknown"} (${p.role?.S || "Unknown role"})`
-            );
-            return {
-                statusCode: 400,
-                headers,
-                body: JSON.stringify({
-                    error: `Role mismatch for professionals: ${names.join(", ")}. Job requires: ${jobRole}`,
-                }),
-            };
-        }
 
         // 7. Send Invitations
         const timestamp: string = new Date().toISOString();
@@ -204,6 +196,14 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         const errors: InvitationError[] = [];
 
         for (const profSub of professionalUserSubs) {
+            if (!compatibleUserSubs.has(profSub)) {
+                const prof = existingProfessionals.find((p) => p.userSub?.S === profSub);
+                errors.push({
+                    professionalUserSub: profSub,
+                    error: `Role mismatch: professional role '${prof?.role?.S || "unknown"}' does not match job role '${jobRole}'`,
+                });
+                continue;
+            }
             try {
                 const invitationId: string = uuidv4();
                 

@@ -146,7 +146,7 @@ export const handler = async (event: any) => {
         try {
           const jobCommand = new QueryCommand({
             TableName: process.env.JOB_POSTINGS_TABLE,
-            IndexName: "jobId-index",
+            IndexName: "jobId-index-1",
             KeyConditionExpression: "jobId = :jobId",
             ExpressionAttributeValues: {
               ":jobId": { S: application.jobId },

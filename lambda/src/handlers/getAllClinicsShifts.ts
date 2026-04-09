@@ -471,7 +471,9 @@ export const handler = async (
         } while (lastKey);
 
         const clinicIdSet = new Set(clinicIds);
-        const filteredInvites = inviteItems.filter(item => clinicIdSet.has(s(item.clinicId)));
+        const filteredInvites = inviteItems.filter(item =>
+          clinicIdSet.has(s(item.clinicId)) && s(item.invitationStatus) !== "accepted"
+        );
         
         const profSubs = [...new Set(filteredInvites.map(item => s(item.professionalUserSub)).filter(Boolean))];
         const profilesMap = new Map();
