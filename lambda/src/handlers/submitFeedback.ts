@@ -230,8 +230,10 @@ Sent At: ${sentAtIST} (${nowIso})
     const effectiveEmail = userEmailFromToken || fallbackEmail;
     if (contact && effectiveEmail) replyTo.push(effectiveEmail);
 
+    const sourceEmail = effectiveEmail || SES_FROM;
+    
     const sesResp = await ses.send(new SendEmailCommand({
-      Source: SES_FROM,
+      Source: sourceEmail,
       Destination: { ToAddresses: toAddresses },
       ReplyToAddresses: replyTo.length ? replyTo : undefined,
       Message: { Subject: { Data: subject }, Body: { Html: { Data: htmlBody }, Text: { Data: textBody } } }
