@@ -221,12 +221,27 @@ export const handler = async (
            try {
               const jobDateTime = new Date(jobDate);
               if (jobEndTime) {
-                 const [hours, minutes] = jobEndTime.split(':').map(Number);
-                 jobDateTime.setHours(hours || 23, minutes || 59, 0, 0);
+                 const timeStr = String(jobEndTime).toLowerCase().trim();
+                 const isPM = timeStr.includes('pm') || timeStr.includes('p.m.');
+                 const isAM = timeStr.includes('am') || timeStr.includes('a.m.');
+                 const cleanTime = timeStr.replace(/[^0-9:]/g, ''); 
+                 
+                 const [hToken, mToken] = cleanTime.split(':');
+                 let hours = parseInt(hToken, 10);
+                 const minutes = parseInt(mToken, 10) || 0;
+
+                 if (!isNaN(hours)) {
+                     if (isPM && hours < 12) hours += 12;
+                     if (isAM && hours === 12) hours = 0;
+                 } else {
+                     hours = 23;
+                 }
+                 jobDateTime.setHours(hours, minutes, 0, 0);
               } else {
                  jobDateTime.setHours(23, 59, 59, 0);
               }
-              if (jobDateTime < now) {
+              
+              if (jobDateTime < now && !isNaN(jobDateTime.getTime())) {
                  a.applicationStatus = "completed"; 
                  a.status = "completed";
               }
