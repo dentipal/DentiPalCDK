@@ -209,6 +209,46 @@ export const handler = async (
 
     // 6. Categorize the target subset
     let responseData: any[] = [];
+    
+    // Dynamically mark scheduled jobs as completed if their time has passed
+    const now = new Date();
+    appsEnriched.forEach(a => {
+      if (SCHEDULED_STATUSES.includes(a.applicationStatus)) {
+        const jobDate = a.date || a.start_date || a.jobDate || a.shiftDate;
+        const jobEndTime = a.end_time || a.endTime || a.shiftEndTime;
+        
+        if (jobDate) {
+           try {
+              const jobDateTime = new Date(jobDate);
+              if (jobEndTime) {
+                 const timeStr = String(jobEndTime).toLowerCase().trim();
+                 const isPM = timeStr.includes('pm') || timeStr.includes('p.m.');
+                 const isAM = timeStr.includes('am') || timeStr.includes('a.m.');
+                 const cleanTime = timeStr.replace(/[^0-9:]/g, ''); 
+                 
+                 const [hToken, mToken] = cleanTime.split(':');
+                 let hours = parseInt(hToken, 10);
+                 const minutes = parseInt(mToken, 10) || 0;
+
+                 if (!isNaN(hours)) {
+                     if (isPM && hours < 12) hours += 12;
+                     if (isAM && hours === 12) hours = 0;
+                 } else {
+                     hours = 23;
+                 }
+                 jobDateTime.setHours(hours, minutes, 0, 0);
+              } else {
+                 jobDateTime.setHours(23, 59, 59, 0);
+              }
+              
+              if (jobDateTime < now && !isNaN(jobDateTime.getTime())) {
+                 a.applicationStatus = "completed"; 
+                 a.status = "completed";
+              }
+           } catch(e) {}
+        }
+      }
+    });
 
     const scheduledJobIds = new Set();
     const completedJobIds = new Set();
@@ -242,14 +282,15 @@ export const handler = async (
       const profSubs = [...new Set(actionNeededJobs.map((a: any) => a.professionalUserSub).filter(Boolean))];
       const profilesMap = new Map();
 
-      if (process.env.PROFILES_TABLE && profSubs.length > 0) {
+      const PROF_TBL = process.env.PROFESSIONAL_PROFILES_TABLE || process.env.PROFILES_TABLE;
+      if (PROF_TBL && profSubs.length > 0) {
         const { BatchGetItemCommand, QueryCommand } = require("@aws-sdk/client-dynamodb");
         const { unmarshall } = require("@aws-sdk/util-dynamodb");
         for (let i = 0; i < profSubs.length; i += 100) {
           const chunk = profSubs.slice(i, i + 100);
           try {
-            const resp: any = await dynamodb.send(new BatchGetItemCommand({ RequestItems: { [process.env.PROFILES_TABLE]: { Keys: chunk.map((s: any) => ({ userSub: { S: s } })) } } }));
-            const arr = resp.Responses?.[process.env.PROFILES_TABLE] || [];
+            const resp: any = await dynamodb.send(new BatchGetItemCommand({ RequestItems: { [PROF_TBL]: { Keys: chunk.map((s: any) => ({ userSub: { S: s } })) } } }));
+            const arr = resp.Responses?.[PROF_TBL] || [];
             arr.forEach((item: any) => {
               const p = unmarshall(item);
               profilesMap.set(p.userSub, p);
@@ -312,10 +353,37 @@ export const handler = async (
           lastKey = res.LastEvaluatedKey;
         } while (lastKey);
 
+        // Batch fetch profiles
+        const profSubs = [...new Set(inviteItems.map(item => s(item.professionalUserSub)).filter(Boolean))];
+        const profilesMap = new Map();
+
+        const PROF_TBL = process.env.PROFESSIONAL_PROFILES_TABLE || process.env.PROFILES_TABLE;
+        if (PROF_TBL && profSubs.length > 0) {
+          const { BatchGetItemCommand } = require("@aws-sdk/client-dynamodb");
+          const { unmarshall } = require("@aws-sdk/util-dynamodb");
+          for (let i = 0; i < profSubs.length; i += 100) {
+            const chunk = profSubs.slice(i, i + 100);
+            try {
+              const resp: any = await dynamodb.send(new BatchGetItemCommand({ RequestItems: { [PROF_TBL]: { Keys: chunk.map((subStr: any) => ({ userSub: { S: subStr } })) } } }));
+              const arr = resp.Responses?.[PROF_TBL] || [];
+              arr.forEach((item: any) => {
+                const p = unmarshall(item);
+                profilesMap.set(p.userSub, p);
+              });
+            } catch(e) { console.error("Profile fetch error", e); }
+          }
+        }
+
         // Map and enrich invites
         responseData = inviteItems.map(item => {
           const jobId = s(item.jobId);
           const job = jobMap.get(jobId) || {};
+          const profSub = s(item.professionalUserSub);
+          
+          const profile = profilesMap.get(profSub);
+          const first_name = profile?.first_name || '';
+          const last_name = profile?.last_name || '';
+          const fullName = profile ? `${first_name} ${last_name}`.trim() : "Professional";
           
           return {
             ...job, // Bring in all job properties
@@ -323,8 +391,10 @@ export const handler = async (
             invitationId: s(item.invitationId),
             jobId: jobId,
             clinicId: s(item.clinicId),
-            professionalUserSub: s(item.professionalUserSub),
-            professionalName: "Professional", // Could be fetched if needed
+            professionalUserSub: profSub,
+            professionalName: fullName,
+            first_name,
+            last_name,
             invitationStatus: s(item.invitationStatus) || "pending",
             applicationStatus: s(item.invitationStatus) || "pending", // fallback for table column
             sentAt: s(item.sentAt),

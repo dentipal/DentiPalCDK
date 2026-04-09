@@ -8,6 +8,7 @@ import { unmarshall } from "@aws-sdk/util-dynamodb";
 import {
     CognitoIdentityProviderClient,
     AdminGetUserCommand,
+    AdminListGroupsForUserCommand,
     AttributeType
 } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
@@ -37,6 +38,8 @@ interface UserDetails {
     email: string;
     phone: string;
     status?: string;
+    role?: string;
+    assignedClinicsCount?: number;
     error?: string;
 }
 
@@ -144,6 +147,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(500, { error: "Configuration error: USER_POOL_ID missing" });
         }
 
+        // Step 3.5: Pre-calculate the assigned clinics count for all users based on allClinics
+        const userClinicCountMap = new Map<string, number>();
+        allClinics.forEach(clinic => {
+            if (clinic.AssociatedUsers && Array.isArray(clinic.AssociatedUsers)) {
+                clinic.AssociatedUsers.forEach(uSub => {
+                    userClinicCountMap.set(uSub, (userClinicCountMap.get(uSub) || 0) + 1);
+                });
+            }
+        });
+
         const userDetailsPromises = Array.from(uniqueUserSubsToFetch).map(async (userSubToFetch): Promise<UserDetails> => {
             try {
                 const getUserCommand = new AdminGetUserCommand({
@@ -160,12 +173,29 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 const userEmail = getAttribute(userResponse.UserAttributes, "email");
                 const userPhoneNumber = getAttribute(userResponse.UserAttributes, "phone_number");
 
+                // Fetch user groups to get their role
+                let userRole = "N/A";
+                try {
+                    const listGroupsCommand = new AdminListGroupsForUserCommand({
+                        UserPoolId: USER_POOL_ID,
+                        Username: userSubToFetch
+                    });
+                    const groupsResponse = await cognitoClient.send(listGroupsCommand);
+                    if (groupsResponse.Groups && groupsResponse.Groups.length > 0) {
+                        userRole = groupsResponse.Groups[0].GroupName || "N/A";
+                    }
+                } catch (groupErr) {
+                    console.warn(`Could not fetch groups for user ${userSubToFetch}:`, groupErr);
+                }
+
                 return {
                     sub: userSubToFetch,
                     name: userName || "N/A",
                     email: userEmail || "N/A",
                     phone: userPhoneNumber || "N/A",
-                    status: userResponse.UserStatus
+                    status: userResponse.UserStatus,
+                    role: userRole,
+                    assignedClinicsCount: userClinicCountMap.get(userSubToFetch) || 0
                 };
             } catch (cognitoError: any) {
                 console.error(`Error fetching details for user ${userSubToFetch}:`, cognitoError.message);
@@ -174,6 +204,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     name: "Error Fetching",
                     email: "Error Fetching",
                     phone: "Error Fetching",
+                    role: "Error Fetching",
+                    assignedClinicsCount: 0,
                     error: cognitoError.message
                 };
             }

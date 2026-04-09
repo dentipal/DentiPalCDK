@@ -191,13 +191,24 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
       let shiftEndDateTime: Date | null = null;
       const jobType: string = job.job_type;
 
-      // Helper function to ensure time is HH:MM:SS for Date constructor
+      // Helper function to convert time to standard HH:MM:SS for Date constructor
       const formatTimeForDate = (timeStr: string | undefined): string | null => {
         if (!timeStr) return null;
-        const parts = timeStr.split(':');
-        if (parts.length === 3) return timeStr; // Already HH:MM:SS
-        if (parts.length === 2) return `${timeStr}:00`; // HH:MM -> HH:MM:00
-        return null;
+        const timeLower = timeStr.toLowerCase().trim();
+        const isPM = timeLower.includes('pm') || timeLower.includes('p.m.');
+        const isAM = timeLower.includes('am') || timeLower.includes('a.m.');
+        const cleanTime = timeLower.replace(/[^0-9:]/g, '');
+        const parts = cleanTime.split(':');
+        
+        let h = parseInt(parts[0], 10);
+        let m = parseInt(parts[1], 10) || 0;
+        
+        if (isNaN(h)) return null;
+        if (isPM && h < 12) h += 12;
+        if (isAM && h === 12) h = 0;
+        
+        const pad = (n: number) => n.toString().padStart(2, '0');
+        return `${pad(h)}:${pad(m)}:00`;
       };
 
       const endTimeFormatted: string | null = formatTimeForDate(job.end_time);
