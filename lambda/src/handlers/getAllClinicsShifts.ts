@@ -247,6 +247,31 @@ export const handler = async (
     });
 
     // 5. Categorize (Bucketing Logic)
+    
+    const now = new Date();
+    // Dynamically mark scheduled jobs as completed if their time has passed
+    appsEnriched.forEach(a => {
+      if (SCHEDULED_STATUSES.includes(a.applicationStatus)) {
+        const jobDate = a.date || a.start_date || a.jobDate || a.shiftDate;
+        const jobEndTime = a.end_time || a.endTime || a.shiftEndTime;
+        
+        if (jobDate) {
+           try {
+              const jobDateTime = new Date(jobDate);
+              if (jobEndTime) {
+                 const [hours, minutes] = jobEndTime.split(':').map(Number);
+                 jobDateTime.setHours(hours || 23, minutes || 59, 0, 0);
+              } else {
+                 jobDateTime.setHours(23, 59, 59, 0);
+              }
+              if (jobDateTime < now) {
+                 a.applicationStatus = "completed"; 
+                 a.status = "completed";
+              }
+           } catch(e) {}
+        }
+      }
+    });
 
     // A. Scheduled Jobs: Confirmed/Booked applications
     const scheduledJobs = appsEnriched.filter((a) =>
@@ -368,14 +393,15 @@ export const handler = async (
       const profSubs = [...new Set(FlatActionNeeded.map((a: any) => a.professionalUserSub).filter(Boolean))];
       const profilesMap = new Map();
 
-      if (process.env.PROFILES_TABLE && profSubs.length > 0) {
+      const PROF_TBL = process.env.PROFESSIONAL_PROFILES_TABLE || process.env.PROFILES_TABLE;
+      if (PROF_TBL && profSubs.length > 0) {
         const { BatchGetItemCommand, QueryCommand } = require("@aws-sdk/client-dynamodb");
         const { unmarshall } = require("@aws-sdk/util-dynamodb");
         for (let i = 0; i < profSubs.length; i += 100) {
           const chunk = profSubs.slice(i, i + 100);
           try {
-            const resp: any = await dynamodb.send(new BatchGetItemCommand({ RequestItems: { [process.env.PROFILES_TABLE]: { Keys: chunk.map((s: any) => ({ userSub: { S: s } })) } } }));
-            const arr = resp.Responses?.[process.env.PROFILES_TABLE] || [];
+            const resp: any = await dynamodb.send(new BatchGetItemCommand({ RequestItems: { [PROF_TBL]: { Keys: chunk.map((s: any) => ({ userSub: { S: s } })) } } }));
+            const arr = resp.Responses?.[PROF_TBL] || [];
             arr.forEach((item: any) => {
               const p = unmarshall(item);
               profilesMap.set(p.userSub, p);
@@ -434,14 +460,15 @@ export const handler = async (
         const profSubs = [...new Set(filteredInvites.map(item => s(item.professionalUserSub)).filter(Boolean))];
         const profilesMap = new Map();
 
-        if (process.env.PROFILES_TABLE && profSubs.length > 0) {
+        const PROF_TBL = process.env.PROFESSIONAL_PROFILES_TABLE || process.env.PROFILES_TABLE;
+        if (PROF_TBL && profSubs.length > 0) {
           const { BatchGetItemCommand } = require("@aws-sdk/client-dynamodb");
           const { unmarshall } = require("@aws-sdk/util-dynamodb");
           for (let i = 0; i < profSubs.length; i += 100) {
             const chunk = profSubs.slice(i, i + 100);
             try {
-              const resp: any = await dynamodb.send(new BatchGetItemCommand({ RequestItems: { [process.env.PROFILES_TABLE]: { Keys: chunk.map((subStr: any) => ({ userSub: { S: subStr } })) } } }));
-              const arr = resp.Responses?.[process.env.PROFILES_TABLE] || [];
+              const resp: any = await dynamodb.send(new BatchGetItemCommand({ RequestItems: { [PROF_TBL]: { Keys: chunk.map((subStr: any) => ({ userSub: { S: subStr } })) } } }));
+              const arr = resp.Responses?.[PROF_TBL] || [];
               arr.forEach((item: any) => {
                 const p = unmarshall(item);
                 profilesMap.set(p.userSub, p);
