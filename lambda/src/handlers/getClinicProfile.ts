@@ -258,12 +258,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                         ExpressionAttributeValues: { ":clinicId": { S: clinic.clinicId } },
                         Select: "COUNT",
                     } as QueryCommandInput)),
-                    // Completed jobs
+                    // Completed jobs (filter by completed/paid status)
                     dynamodb.send(new QueryCommand({
                         TableName: CLINICS_JOBS_COMPLETED_TABLE,
                         IndexName: "clinicId-index",
                         KeyConditionExpression: "clinicId = :clinicId",
-                        ExpressionAttributeValues: { ":clinicId": { S: clinic.clinicId } },
+                        FilterExpression: "#appStatus IN (:completed, :paid)",
+                        ExpressionAttributeNames: { "#appStatus": "applicationStatus" },
+                        ExpressionAttributeValues: {
+                            ":clinicId": { S: clinic.clinicId },
+                            ":completed": { S: "completed" },
+                            ":paid": { S: "paid" },
+                        },
                     } as QueryCommandInput)),
                     // Clinic base info (name + address from CLINICS_TABLE)
                     CLINICS_TABLE
