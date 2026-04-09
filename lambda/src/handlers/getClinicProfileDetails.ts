@@ -30,6 +30,7 @@ interface DynamoDBClinicItem {
     clinicId?: AttributeValue;
     userSub?: AttributeValue;
     clinic_name?: AttributeValue;
+    title?: AttributeValue;
     practice_type?: AttributeValue;
     primary_practice_area?: AttributeValue;
     primary_contact_first_name?: AttributeValue;
@@ -68,6 +69,7 @@ interface ClinicProfile {
     clinicId: string;
     userSub: string;
     clinicName: string;
+    title: string;
     practiceType: string;
     primaryPracticeArea: string;
     primaryContactFirstName: string;
@@ -140,6 +142,7 @@ const unmarshallClinic = (clinic: DynamoDBClinicItem | undefined): ClinicProfile
         clinicId: str(clinic.clinicId),
         userSub: str(clinic.userSub),
         clinicName: str(clinic.clinic_name),
+        title: str(clinic.title),
         practiceType: str(clinic.practice_type),
         primaryPracticeArea: str(clinic.primary_practice_area),
         primaryContactFirstName: str(clinic.primary_contact_first_name),

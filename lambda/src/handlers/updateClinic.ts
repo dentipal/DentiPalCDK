@@ -80,7 +80,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 4. Extract Clinic ID
-        let clinicId: string | undefined = event.pathParameters?.clinicId || event.pathParameters?.proxy;
+        let clinicId: string | undefined = event.pathParameters?.clinicId;
+        if (!clinicId) {
+            // Fallback: extract from proxy path (e.g. "clinics/uuid" → "uuid")
+            const proxy = event.pathParameters?.proxy || event.path || "";
+            const parts = proxy.split("/").filter(Boolean);
+            const clinicsIdx = parts.indexOf("clinics");
+            clinicId = clinicsIdx >= 0 && parts[clinicsIdx + 1]
+                ? parts[clinicsIdx + 1]
+                : parts[parts.length - 1];
+        }
         console.log("Extracted clinicId:", clinicId);
 
         if (!clinicId) {

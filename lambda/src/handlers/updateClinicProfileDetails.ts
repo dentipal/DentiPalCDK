@@ -21,6 +21,7 @@ const transformBody = (body: any): any => {
     const transformed: any = {};
     const mapping: Record<string, string> = {
         clinicName: "clinic_name",
+        title: "title",
         primaryContactFirstName: "primary_contact_first_name",
         primaryContactLastName: "primary_contact_last_name",
         practiceType: "practice_type",
@@ -154,7 +155,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const dynamoBody = transformBody(requestBody);
 
         const allowedFields = [
-            "assisted_hygiene_available", "booking_out_period", "city", "clinic_name", "clinic_phone",
+            "assisted_hygiene_available", "booking_out_period", "city", "clinic_name", "clinic_phone", "title",
             "free_parking_available", "insurance_plans_accepted", "num_assistants", "num_doctors",
             "num_hygienists", "number_of_operatories", "parking_type", "parking_cost", "practice_type",
             "primary_contact_first_name", "primary_contact_last_name", "primary_practice_area",
