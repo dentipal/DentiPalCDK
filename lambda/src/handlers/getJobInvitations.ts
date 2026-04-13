@@ -72,14 +72,15 @@ export const handler: APIGatewayProxyHandler = async (
     const queryParams = event.queryStringParameters || {};
     const limit = queryParams.limit ? parseInt(queryParams.limit) : 50;
 
-    // Filter only sent invitations
+    // Return sent + declined invitations (accepted ones move to scheduled tab via applications)
     const scanParams: ScanCommandInput = {
       TableName: process.env.JOB_INVITATIONS_TABLE!,
       FilterExpression:
-        "professionalUserSub = :userSub AND invitationStatus = :status",
+        "professionalUserSub = :userSub AND invitationStatus IN (:sent, :declined)",
       ExpressionAttributeValues: {
         ":userSub": { S: professionalUserSub },
-        ":status": { S: "sent" },
+        ":sent": { S: "sent" },
+        ":declined": { S: "declined" },
       },
       Limit: limit,
     };
@@ -113,7 +114,7 @@ export const handler: APIGatewayProxyHandler = async (
 
           const jobQuery: QueryCommandInput = {
             TableName: process.env.JOB_POSTINGS_TABLE!,
-            IndexName: "jobId-index",
+            IndexName: "jobId-index-1",
             KeyConditionExpression: "jobId = :jobId",
             ExpressionAttributeValues: {
               ":jobId": { S: invitation.jobId },
@@ -199,9 +200,9 @@ export const handler: APIGatewayProxyHandler = async (
               job.professional_role?.S || "Unknown Role";
           }
         } catch (jobError: any) {
-          console.warn(
+          console.error(
             `Failed to fetch job details for JobId: ${invitation.jobId}:`,
-            jobError
+            jobError.message || jobError
           );
         }
 
@@ -215,11 +216,11 @@ export const handler: APIGatewayProxyHandler = async (
     );
 
     return json(200, {
-      message: "Sent invitations fetched successfully.",
+      message: "Invitations fetched successfully.",
       invitations,
       totalCount: invitations.length,
       filters: {
-        status: "sent",
+        statuses: ["sent", "declined"],
         limit,
       },
     });

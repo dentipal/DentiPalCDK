@@ -207,7 +207,7 @@ async function enrichWithClinicAndJob(neg: DynamoDBNegotiationItem): Promise<Enr
         if (negotiation.jobId) {
             const jobResult: QueryCommandOutput = await dynamodb.send(new QueryCommand({
                 TableName: TABLE_JOBS,
-                IndexName: "jobId-index",
+                IndexName: "jobId-index-1",
                 KeyConditionExpression: "jobId = :jobId",
                 ExpressionAttributeValues: { ":jobId": { S: negotiation.jobId } },
                 Limit: 1,

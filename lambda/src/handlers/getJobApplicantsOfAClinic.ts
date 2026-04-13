@@ -93,7 +93,7 @@ async function getJobsUsingQuery(jobIds: string[], clinicId: string) {
     const attempts = [
       new QueryCommand({
         TableName: POSTINGS_TABLE,
-        IndexName: "jobId-index",
+        IndexName: "jobId-index-1",
         KeyConditionExpression: "jobId = :jid",
         ExpressionAttributeValues: { ":jid": { S: jobId } },
       }),
