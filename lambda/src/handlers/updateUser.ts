@@ -115,7 +115,7 @@ async function removeFromClinicSubgroups(username: string): Promise<void> {
     }));
     
     const current: string[] = res.Groups?.map(g => g.GroupName || '') || [];
-    const clinicGroups: string[] = current.filter(g => VALID_SUBGROUPS.includes(g));
+    const clinicGroups: string[] = current.filter(g => VALID_SUBGROUPS.includes(g.toLowerCase()));
     
     for (const groupName of clinicGroups) {
         await cognito.send(new AdminRemoveUserFromGroupCommand({
@@ -259,7 +259,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 1. Validate subgroup
-        if (subgroup && !VALID_SUBGROUPS.includes(subgroup)) {
+        if (subgroup && !VALID_SUBGROUPS.includes(subgroup.toLowerCase())) {
             return json(400, {
                 error: "Bad Request",
                 statusCode: 400,
