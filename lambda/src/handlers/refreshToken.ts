@@ -6,8 +6,8 @@ import {
   InitiateAuthCommandOutput,
 } from "@aws-sdk/client-cognito-identity-provider";
 import {
-  APIGatewayProxyEventV2,
-  APIGatewayProxyStructuredResultV2
+  APIGatewayProxyEvent,
+  APIGatewayProxyResult
 } from "aws-lambda";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
@@ -28,15 +28,8 @@ interface RefreshedTokens {
   tokenType: string;
 }
 
-/** Defines the standard Lambda/API Gateway response structure. */
-// FIX: Extend APIGatewayProxyStructuredResultV2 instead of the Union type APIGatewayProxyResultV2
-interface HandlerResponse extends APIGatewayProxyStructuredResultV2 {
-  statusCode: number;
-  body: string; // The body is always a stringified JSON object
-}
-
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): HandlerResponse => ({
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
   headers: CORS_HEADERS,
   body: JSON.stringify(bodyObj)
@@ -57,9 +50,9 @@ const cognito = new CognitoIdentityProviderClient({ region: REGION });
  * @param event The API Gateway Proxy event.
  * @returns A promise resolving to an API Gateway Proxy result (HandlerResponse).
  */
-export const handler = async (event: APIGatewayProxyEventV2): Promise<HandlerResponse> => {
-  // CORS Preflight (V2 events usually handle CORS in API Gateway, but adding here for consistency)
-  if (event.requestContext.http.method === "OPTIONS") {
+export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+  // CORS Preflight
+  if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };
   }
 
