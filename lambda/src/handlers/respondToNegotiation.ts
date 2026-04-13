@@ -158,7 +158,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     const jobRes = await dynamodb.send(
       new QueryCommand({
         TableName: process.env.JOB_POSTINGS_TABLE,
-        IndexName: "JobIdIndex", // Assuming JobIdIndex is the GSI name
+        IndexName: "JobIdIndex-2",
         KeyConditionExpression: "jobId = :jobId",
         ExpressionAttributeValues: {
           ":jobId": { S: jobId },
