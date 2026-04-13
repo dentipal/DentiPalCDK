@@ -296,7 +296,42 @@
           const profileItem = sub ? profileMap.get(sub) : undefined;
 
           const negId = a?.negotiationId?.S;
-          const negotiationItem = negId ? negMap.get(negId) : undefined;
+          const rawNeg = negId ? negMap.get(negId) : undefined;
+
+          // Unmarshall negotiation item from DynamoDB AttributeValue format to plain values
+          const negotiationItem = rawNeg
+            ? {
+                negotiationId: rawNeg.negotiationId?.S || null,
+                applicationId: rawNeg.applicationId?.S || null,
+                jobId: rawNeg.jobId?.S || null,
+                clinicId: rawNeg.clinicId?.S || null,
+                professionalUserSub: rawNeg.professionalUserSub?.S || null,
+                negotiationStatus: rawNeg.negotiationStatus?.S || null,
+                clinicResponse: rawNeg.clinicResponse?.S || null,
+                professionalResponse: rawNeg.professionalResponse?.S || null,
+                clinicCounterHourlyRate: rawNeg.clinicCounterHourlyRate?.N
+                  ? parseFloat(rawNeg.clinicCounterHourlyRate.N)
+                  : null,
+                professionalCounterHourlyRate: rawNeg.professionalCounterHourlyRate?.N
+                  ? parseFloat(rawNeg.professionalCounterHourlyRate.N)
+                  : null,
+                proposedHourlyRate: rawNeg.proposedHourlyRate?.N
+                  ? parseFloat(rawNeg.proposedHourlyRate.N)
+                  : null,
+                agreedHourlyRate: rawNeg.agreedHourlyRate?.N
+                  ? parseFloat(rawNeg.agreedHourlyRate.N)
+                  : null,
+                counterSalaryMin: rawNeg.counterSalaryMin?.N
+                  ? parseFloat(rawNeg.counterSalaryMin.N)
+                  : null,
+                counterSalaryMax: rawNeg.counterSalaryMax?.N
+                  ? parseFloat(rawNeg.counterSalaryMax.N)
+                  : null,
+                message: rawNeg.message?.S || rawNeg.clinicMessage?.S || rawNeg.professionalMessage?.S || null,
+                createdAt: rawNeg.createdAt?.S || null,
+                updatedAt: rawNeg.updatedAt?.S || null,
+              }
+            : undefined;
 
           return {
             ...a,

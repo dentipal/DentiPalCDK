@@ -45,6 +45,9 @@ interface EnrichedNegotiation {
     negotiationStatus: string;
     clinicResponse: string;
     proposedHourlyRate: number | null;
+    clinicCounterHourlyRate: number | null;
+    professionalCounterHourlyRate: number | null;
+    agreedHourlyRate: number | null;
     message: string;
     createdAt: string;
     updatedAt: string;
@@ -175,6 +178,9 @@ async function enrichWithClinicAndJob(neg: DynamoDBNegotiationItem): Promise<Enr
         negotiationStatus: neg.negotiationStatus?.S || "",
         clinicResponse: neg.clinicResponse?.S || "",
         proposedHourlyRate: neg.proposedHourlyRate?.N ? parseFloat(neg.proposedHourlyRate.N) : null,
+        clinicCounterHourlyRate: neg.clinicCounterHourlyRate?.N ? parseFloat(neg.clinicCounterHourlyRate.N) : null,
+        professionalCounterHourlyRate: neg.professionalCounterHourlyRate?.N ? parseFloat(neg.professionalCounterHourlyRate.N) : null,
+        agreedHourlyRate: neg.agreedHourlyRate?.N ? parseFloat(neg.agreedHourlyRate.N) : null,
         message: neg.message?.S || "",
         createdAt: neg.createdAt?.S || "",
         updatedAt: neg.updatedAt?.S || "",
