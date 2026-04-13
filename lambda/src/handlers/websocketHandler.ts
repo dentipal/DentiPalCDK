@@ -4,6 +4,7 @@ import {
     UpdateItemCommand,
     QueryCommand,
     DeleteItemCommand,
+    GetItemCommand,
     ScanCommand,
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
@@ -41,6 +42,7 @@ const REGION = process.env.AWS_REGION || "us-east-1";
 const MESSAGES_TABLE = process.env.MESSAGES_TABLE!;
 const CONNS_TABLE = process.env.CONNS_TABLE!;
 const CONVOS_TABLE = process.env.CONVOS_TABLE!;
+const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
 const USER_POOL_ID = process.env.USER_POOL_ID!; // Still needed for AdminGetUser
 
 const ddb = new DynamoDBClient({ region: REGION });
@@ -97,11 +99,40 @@ async function send(client: ApiGatewayManagementApiClient, connectionId: string,
             })
         );
     } catch (err) {
-        if ((err as Error).name !== "GoneException")
-            console.error("PostToConnection failed", {
-                error: (err as Error).message,
-                stack: (err as Error).stack,
-            });
+        if ((err as Error).name === "GoneException") {
+            console.log("Connection gone, cleaning up:", connectionId);
+            // Clean up stale connection from DynamoDB
+            try {
+                const q = await ddb.send(
+                    new QueryCommand({
+                        TableName: CONNS_TABLE,
+                        IndexName: "connectionId-index",
+                        KeyConditionExpression: "connectionId = :cid",
+                        ExpressionAttributeValues: { ":cid": { S: connectionId } },
+                    })
+                );
+                await Promise.all(
+                    (q.Items || []).map((item) =>
+                        ddb.send(
+                            new DeleteItemCommand({
+                                TableName: CONNS_TABLE,
+                                Key: {
+                                    userKey: { S: item.userKey.S! },
+                                    connectionId: { S: connectionId },
+                                },
+                            })
+                        )
+                    )
+                );
+            } catch (cleanupErr) {
+                console.warn("Failed to clean up gone connection:", connectionId, (cleanupErr as Error).message);
+            }
+            return; // Do NOT re-throw GoneException
+        }
+        console.error("PostToConnection failed", {
+            error: (err as Error).message,
+            stack: (err as Error).stack,
+        });
         throw err;
     }
 }
@@ -157,11 +188,34 @@ async function getCognitoNameBySub(sub: string): Promise<string> {
     }
 }
 
-// Try to grab a human display for a clinic from its active connections
+// Try to grab a human display for a clinic — Clinics table first, then active connections
 async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
     if (!clinicKey) return "";
     if (nameCache.has(clinicKey)) return nameCache.get(clinicKey)!;
 
+    const clinicId = clinicKey.replace(/^clinic#/, "");
+
+    // 1. Try DentiPal-Clinics table (most reliable — works even when clinic is offline)
+    try {
+        const result = await ddb.send(
+            new GetItemCommand({
+                TableName: CLINICS_TABLE,
+                Key: { clinicId: { S: clinicId } },
+            })
+        );
+        const name =
+            result.Item?.clinicName?.S ||
+            result.Item?.name?.S ||
+            result.Item?.businessName?.S;
+        if (name?.trim()) {
+            nameCache.set(clinicKey, name.trim());
+            return name.trim();
+        }
+    } catch (e) {
+        console.warn("Clinics table lookup failed for", clinicId, (e as Error).message);
+    }
+
+    // 2. Fallback: check active connections for display name
     try {
         const q = await ddb.send(
             new QueryCommand({
@@ -171,29 +225,27 @@ async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
             })
         );
         const items = q.Items || [];
-        if (!items.length) {
-            const fallback = clinicKey.slice(7);
-            nameCache.set(clinicKey, fallback);
-            return fallback;
+        if (items.length) {
+            const best = items.reduce((a, b) => {
+                const an = Number(a.connectedAt?.N || 0);
+                const bn = Number(b.connectedAt?.N || 0);
+                return an >= bn ? a : b;
+            });
+            const display =
+                (best.display && sanitizeDisplayName(best.display.S)) || "";
+            if (display) {
+                nameCache.set(clinicKey, display);
+                return display;
+            }
         }
-
-        // pick the most recent connection by connectedAt
-        const best = items.reduce((a, b) => {
-            const an = Number(a.connectedAt?.N || 0);
-            const bn = Number(b.connectedAt?.N || 0);
-            return an >= bn ? a : b;
-        });
-
-        const display =
-            (best.display && sanitizeDisplayName(best.display.S)) || clinicKey.slice(7);
-        nameCache.set(clinicKey, display);
-        return display;
     } catch (e) {
-        console.error("getClinicDisplayByKey failed", { clinicKey, error: (e as Error).message });
-        const fallback = clinicKey.slice(7);
-        nameCache.set(clinicKey, fallback);
-        return fallback;
+        console.warn("Connections lookup failed for", clinicKey, (e as Error).message);
     }
+
+    // 3. Last resort fallback
+    const fallback = `Clinic ${clinicId.slice(0, 6)}`;
+    nameCache.set(clinicKey, fallback);
+    return fallback;
 }
 
 // ============== ACCESS TOKEN DECODING UTILITIES (Adapted) ==============
@@ -511,16 +563,34 @@ async function onDisconnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
     return { statusCode: 200, body: "Disconnected" };
 }
 
-async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> { 
+async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
     const claims = await validateToken(event);
-    const userKey = userKeyFromClaims(claims);
     const connClient = wsClientFromEvent(event);
     const connectionId = event.requestContext.connectionId;
+
+    // Read optional clinicId from body for multi-clinic filtering
+    let bodyClinicId: string | null = null;
+    try {
+        const body = JSON.parse(event.body || "{}");
+        bodyClinicId = body.clinicId || null;
+    } catch {
+        // ignore parse errors
+    }
+
+    // Determine which key to query with:
+    // - If body has a specific clinicId AND user is clinic type, use that clinicId
+    // - Otherwise fall back to connection-based user key
+    let queryKey: string;
+    if (claims.userType === "Clinic" && bodyClinicId && bodyClinicId !== "all") {
+        queryKey = `clinic#${bodyClinicId}`;
+    } else {
+        queryKey = userKeyFromClaims(claims);
+    }
 
     try {
         let items: Record<string, AttributeValue>[] = [];
 
-        if (userKey.startsWith("clinic#")) {
+        if (queryKey.startsWith("clinic#")) {
             // Use GSI for clinic
             const res = await ddb
                 .send(
@@ -528,7 +598,7 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                         TableName: CONVOS_TABLE,
                         IndexName: "clinicKey-lastMessageAt",
                         KeyConditionExpression: "clinicKey = :uk",
-                        ExpressionAttributeValues: { ":uk": { S: userKey } },
+                        ExpressionAttributeValues: { ":uk": { S: queryKey } },
                         ScanIndexForward: false, // newest first
                     })
                 )
@@ -542,13 +612,13 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                         new ScanCommand({
                             TableName: CONVOS_TABLE,
                             FilterExpression: "clinicKey = :uk",
-                            ExpressionAttributeValues: { ":uk": { S: userKey } },
+                            ExpressionAttributeValues: { ":uk": { S: queryKey } },
                         })
                     )
                     .catch(() => ({ Items: [] }));
                 items = scan.Items || [];
             }
-        } else if (userKey.startsWith("prof#")) {
+        } else if (queryKey.startsWith("prof#")) {
             // Use GSI for professional
             const res = await ddb
                 .send(
@@ -556,7 +626,7 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                         TableName: CONVOS_TABLE,
                         IndexName: "profKey-lastMessageAt",
                         KeyConditionExpression: "profKey = :uk",
-                        ExpressionAttributeValues: { ":uk": { S: userKey } },
+                        ExpressionAttributeValues: { ":uk": { S: queryKey } },
                         ScanIndexForward: false, // newest first
                     })
                 )
@@ -576,15 +646,17 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                 const clinicUnread = Number(it.clinicUnread?.N || 0);
                 const profUnread = Number(it.profUnread?.N || 0);
 
+                // Determine if I am the clinic side of this conversation
+                const iAmClinic = claims.userType === "Clinic";
                 let recipientName = "";
-                if (userKey === clinicKey) {
+                if (iAmClinic) {
                     const profSub = (profKey || "").replace(/^prof#/, "");
                     recipientName = await getCognitoNameBySub(profSub);
                 } else {
                     recipientName = await getClinicDisplayByKey(clinicKey || "");
                 }
 
-                const unreadCount = userKey === clinicKey ? clinicUnread : profUnread;
+                const unreadCount = iAmClinic ? clinicUnread : profUnread;
 
                 return {
                     conversationId,
@@ -835,12 +907,19 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
             })
         );
 
-        // Notify recipient
+        // Notify recipient AND sender's other connections (multi-tab support)
         const recipientKey = isSenderClinic ? `prof#${professionalSub}` : `clinic#${clinicId}`;
-        const recipientConnections = await getConnections(recipientKey);
+        const senderConnKey = isSenderClinic ? `clinic#${clinicId}` : `prof#${professionalSub}`;
+        const currentConnectionId = event.requestContext.connectionId;
+
+        const [recipientConnections, senderConnections] = await Promise.all([
+            getConnections(recipientKey),
+            getConnections(senderConnKey),
+        ]);
+
         const connClient = wsClientFromEvent(event);
 
-        // Structure the payload for the recipient
+        // Structure the payload
         const flat = {
             type: "message",
             conversationId,
@@ -853,28 +932,41 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
             clinicId,
             professionalSub,
         };
-        const payload = { ...flat, message: flat }; // Duplicated for compatibility/easy access
+        const payload = { ...flat, message: flat };
 
+        // Push to all recipient connections
         await Promise.all(
             recipientConnections.map(async (connectionId) => {
                 try {
                     await send(connClient, connectionId, payload);
                 } catch (err) {
-                    if ((err as Error).name === "GoneException") {
-                        // Clean up dead connection
-                        await deleteConnection(recipientKey, connectionId);
-                    } else {
-                        console.error("Failed to notify recipient:", { 
-                            connectionId,
-                            error: (err as Error).message,
-                        });
-                    }
+                    console.error("Failed to notify recipient:", {
+                        connectionId,
+                        error: (err as Error).message,
+                    });
                 }
             })
         );
 
-        // Sender ack (minimal)
-        await send(connClient, event.requestContext.connectionId, {
+        // Push to sender's OTHER connections (not the current one — that gets an ack)
+        const otherSenderConns = senderConnections.filter(cid => cid !== currentConnectionId);
+        if (otherSenderConns.length) {
+            await Promise.all(
+                otherSenderConns.map(async (connectionId) => {
+                    try {
+                        await send(connClient, connectionId, payload);
+                    } catch (err) {
+                        console.error("Failed to notify sender's other connection:", {
+                            connectionId,
+                            error: (err as Error).message,
+                        });
+                    }
+                })
+            );
+        }
+
+        // Sender ack on the current connection
+        await send(connClient, currentConnectionId, {
             type: "ack",
             messageId,
             conversationId,
@@ -904,7 +996,7 @@ async function onDefault(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayP
 }
 
 // ============== MAIN HANDLER ==============
-exports.handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => { 
+export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => { 
     // Assert the event shape to include connectionId, as it must be present for WebSocket invocations
     const wsEvent = event as WebSocketAPIGatewayEventV2;
 

@@ -7,6 +7,10 @@ import {
   DynamoDBClientConfig,
 } from "@aws-sdk/client-dynamodb";
 import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import {
   APIGatewayProxyEventV2,
   APIGatewayProxyStructuredResultV2,
   APIGatewayProxyEvent,
@@ -41,6 +45,7 @@ type Actor = "clinic" | "professional";
 const REGION: string = process.env.REGION!;
 
 const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
+const eb = new EventBridgeClient({ region: REGION });
 
 // Valid responses for request body validation
 const VALID_RESPONSES: ReadonlyArray<NegotiationResponsePayload['response']> = ["accepted", "declined", "counter_offer"];
@@ -373,7 +378,39 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
       })
     );
 
-    // 10. Success Response
+    // 10. Publish EventBridge event when negotiation is accepted (triggers inbox conversation)
+    if (isAccepted && professionalUserSub) {
+      const clinicId = strFrom(negotiationItem.clinicId) || strFrom(jobItem.clinicId) || strFrom(appItem.clinicId);
+      if (clinicId) {
+        try {
+          const shiftDetails = {
+            date: strFrom(jobItem.date) || strFrom(jobItem.shiftDate) || "TBD",
+            role: strFrom(jobItem.role) || strFrom(jobItem.professionalRole) || strFrom(jobItem.jobTitle) || "Professional",
+            rate: finalAcceptedHourlyRate || 0,
+          };
+
+          await eb.send(new PutEventsCommand({
+            Entries: [{
+              Source: "denti-pal.api",
+              DetailType: "ShiftEvent",
+              Detail: JSON.stringify({
+                eventType: "shift-scheduled",
+                clinicId,
+                professionalSub: professionalUserSub,
+                shiftDetails,
+              }),
+            }],
+          }));
+          console.log("EventBridge ShiftEvent (shift-scheduled) published for negotiation acceptance.");
+        } catch (ebError: any) {
+          console.error("Failed to publish EventBridge event for negotiation acceptance:", ebError.message);
+        }
+      } else {
+        console.error("WARNING: clinicId missing — inbox conversation not created for negotiation acceptance.");
+      }
+    }
+
+    // 11. Success Response
     return json(200, {
       message: `Negotiation ${body.response} successfully`,
       negotiationId,
