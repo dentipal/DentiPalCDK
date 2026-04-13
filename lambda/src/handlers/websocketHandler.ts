@@ -55,7 +55,8 @@ const nameCache = new Map<string, string>(); // keys: "prof#<sub>" or "clinic#<i
 interface UserClaims {
     userType: "Clinic" | "Professional";
     sub: string;
-    clinicId?: string; 
+    clinicId?: string;
+    isRoot?: boolean; // Root users can connect without clinicId (super-admin)
     email: string;
     name: string;
 }
@@ -313,7 +314,8 @@ function extractUserInfoFromAccessTokenClaims(claims: Record<string, any>): User
         userType: userType,
         email: claims.email || "",
         name: displayName,
-        clinicId: claims['custom:clinicId'] as string | undefined // May be undefined/null
+        clinicId: claims['custom:clinicId'] as string | undefined, // May be undefined/null
+        isRoot: groups.includes("Root"),
     } as UserClaims;
 }
 
@@ -365,7 +367,7 @@ async function claimsFromConnection(event: WebSocketAPIGatewayEventV2): Promise<
     if (userKey.startsWith("prof#")) {
         return {
             userType: "Professional",
-            clinicId: undefined, 
+            clinicId: undefined,
             sub: userKey.slice(5),
             email: display,
             name: display,
@@ -417,7 +419,7 @@ async function validateToken(event: WebSocketAPIGatewayEventV2): Promise<UserCla
 
         return {
             ...claims,
-            clinicId: clinicId, // Ensure clinicId is set if found
+            clinicId: clinicId,
         } as UserClaims;
     } else {
         // For non-$connect routes, we primarily rely on the stored connection claims
@@ -467,7 +469,8 @@ async function validateToken(event: WebSocketAPIGatewayEventV2): Promise<UserCla
             claims.email = claims.email || tokenClaims.email || "";
         }
 
-        if (claims.userType === "Clinic" && !claims.clinicId) {
+        // Root users can operate without clinicId
+        if (claims.userType === "Clinic" && !claims.clinicId && !claims.isRoot) {
             console.error("Missing clinicId for Clinic user in connection or body");
             throw new Error("Clinic user requires clinicId");
         }
@@ -577,9 +580,7 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
         // ignore parse errors
     }
 
-    // Determine which key to query with:
-    // - If body has a specific clinicId AND user is clinic type, use that clinicId
-    // - Otherwise fall back to connection-based user key
+    // Determine which key to query with
     let queryKey: string;
     if (claims.userType === "Clinic" && bodyClinicId && bodyClinicId !== "all") {
         queryKey = `clinic#${bodyClinicId}`;
@@ -591,7 +592,6 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
         let items: Record<string, AttributeValue>[] = [];
 
         if (queryKey.startsWith("clinic#")) {
-            // Use GSI for clinic
             const res = await ddb
                 .send(
                     new QueryCommand({
@@ -599,14 +599,13 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                         IndexName: "clinicKey-lastMessageAt",
                         KeyConditionExpression: "clinicKey = :uk",
                         ExpressionAttributeValues: { ":uk": { S: queryKey } },
-                        ScanIndexForward: false, // newest first
+                        ScanIndexForward: false,
                     })
                 )
                 .catch(() => ({ Items: [] }));
             items = res.Items || [];
 
             if (!items.length) {
-                // Fallback scan if GSI is not ready or Query failed (rare)
                 const scan = await ddb
                     .send(
                         new ScanCommand({
@@ -619,7 +618,6 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                 items = scan.Items || [];
             }
         } else if (queryKey.startsWith("prof#")) {
-            // Use GSI for professional
             const res = await ddb
                 .send(
                     new QueryCommand({
@@ -627,7 +625,7 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                         IndexName: "profKey-lastMessageAt",
                         KeyConditionExpression: "profKey = :uk",
                         ExpressionAttributeValues: { ":uk": { S: queryKey } },
-                        ScanIndexForward: false, // newest first
+                        ScanIndexForward: false,
                     })
                 )
                     .catch(() => ({ Items: [] }));

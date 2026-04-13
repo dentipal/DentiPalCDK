@@ -207,43 +207,119 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       ConditionExpression: "attribute_not_exists(FeedbackID)"
     }));
 
-    // Email (3 fields + subject with userType)
+    // Email
     const toAddresses: string[] = (SES_TO as string).split(",").map(s => s.trim()).filter(Boolean);
-    const subject: string = `[DentiPal Website Feedback] (${userType}) ${ft}`;
+    const effectiveEmail = userEmailFromToken || fallbackEmail;
+    const reporterDisplay = effectiveEmail || userSub || "Anonymous";
+
+    const subject: string = `[DentiPal Feedback] (${userType}) ${ft} — from ${reporterDisplay}`;
+
+    const feedbackTypeColor = ft.toLowerCase() === "bug" ? "#DC3545"
+      : ft.toLowerCase() === "suggestion" ? "#2563eb"
+      : "#f59e0b";
 
     const htmlBody: string = `
-            <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">
-                <p><b>User Type:</b> ${escapeHtml(userType)}</p>
-                <p><b>Message:</b><br/>${escapeHtmlMultiline(msg)}</p>
-                <p><b>Sent At:</b> ${escapeHtml(sentAtIST)} <span style="color:#888">(${escapeHtml(nowIso)})</span></p>
-            </div>
-        `;
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"/></head>
+<body style="margin:0;padding:0;background-color:#fff0f5;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#fff0f5;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+
+        <!-- Header -->
+        <tr><td style="background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);padding:32px 40px;text-align:center;">
+          <h1 style="margin:0;font-size:28px;color:#532b21;letter-spacing:0.5px;">DentiPal</h1>
+          <p style="margin:8px 0 0;color:#7a4a3a;font-size:14px;">Feedback Report</p>
+        </td></tr>
+
+        <!-- Badge -->
+        <tr><td style="padding:24px 40px 0;text-align:center;">
+          <span style="display:inline-block;background:${feedbackTypeColor};color:#fff;padding:6px 20px;border-radius:20px;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">${escapeHtml(ft)}</span>
+        </td></tr>
+
+        <!-- Reporter Info -->
+        <tr><td style="padding:24px 40px;">
+          <table width="100%" style="background:#fef7f5;border-radius:12px;padding:20px;" cellpadding="0" cellspacing="0">
+            <tr><td style="padding:20px;">
+              <p style="margin:0 0 8px;font-size:13px;color:#999;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Reported By</p>
+              <p style="margin:0 0 16px;font-size:18px;font-weight:700;color:#333;">${escapeHtml(reporterDisplay)}</p>
+              <table cellpadding="0" cellspacing="0" style="font-size:14px;color:#555;">
+                <tr><td style="padding:4px 16px 4px 0;color:#999;">User Type</td><td style="padding:4px 0;font-weight:600;">${escapeHtml(userType)}</td></tr>
+                <tr><td style="padding:4px 16px 4px 0;color:#999;">Email</td><td style="padding:4px 0;font-weight:600;">${escapeHtml(effectiveEmail || "Not provided")}</td></tr>
+                <tr><td style="padding:4px 16px 4px 0;color:#999;">Contact</td><td style="padding:4px 0;font-weight:600;">${contact ? "Yes, wants a reply" : "No"}</td></tr>
+              </table>
+            </td></tr>
+          </table>
+        </td></tr>
+
+        <!-- Message -->
+        <tr><td style="padding:0 40px 24px;">
+          <p style="margin:0 0 8px;font-size:13px;color:#999;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Message</p>
+          <div style="background:#f9fafb;border-left:4px solid #f8ccc1;padding:16px 20px;border-radius:0 8px 8px 0;font-size:15px;line-height:1.7;color:#333;">
+            ${escapeHtmlMultiline(msg)}
+          </div>
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="background:#fef7f5;padding:20px 40px;border-top:1px solid #fde8e4;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px;color:#999;">
+            <tr>
+              <td>${escapeHtml(sentAtIST)}</td>
+              <td style="text-align:right;">ID: ${escapeHtml(userSub || "anonymous")}</td>
+            </tr>
+          </table>
+        </td></tr>
+
+      </table>
+      <p style="text-align:center;font-size:12px;color:#ccc;margin-top:16px;">DentiPal - Connecting Dental Professionals</p>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
     const textBody: string =
-      `User Type: ${userType}
+      `DentiPal Feedback Report
+========================
+Type: ${ft}
+Reported By: ${reporterDisplay}
+User Type: ${userType}
+Email: ${effectiveEmail || "Not provided"}
+Contact Requested: ${contact ? "Yes" : "No"}
+
 Message:
 ${msg}
 
 Sent At: ${sentAtIST} (${nowIso})
+User ID: ${userSub || "anonymous"}
 `;
 
     const replyTo: string[] = [];
-    const effectiveEmail = userEmailFromToken || fallbackEmail;
-    if (contact && effectiveEmail) replyTo.push(effectiveEmail);
+    if (effectiveEmail) replyTo.push(effectiveEmail);
 
-    const sourceEmail = effectiveEmail || SES_FROM;
-    
-    const sesResp = await ses.send(new SendEmailCommand({
-      Source: sourceEmail,
-      Destination: { ToAddresses: toAddresses },
-      ReplyToAddresses: replyTo.length ? replyTo : undefined,
-      Message: { Subject: { Data: subject }, Body: { Html: { Data: htmlBody }, Text: { Data: textBody } } }
-    }));
+    let emailSent = false;
+    try {
+      const sesResp = await ses.send(new SendEmailCommand({
+        Source: SES_FROM as string,
+        Destination: { ToAddresses: toAddresses },
+        ReplyToAddresses: replyTo.length ? replyTo : undefined,
+        Message: { Subject: { Data: subject }, Body: { Html: { Data: htmlBody }, Text: { Data: textBody } } }
+      }));
+      emailSent = true;
 
-    if (process.env.DEBUG === "true") {
-      console.log("SES MessageId:", sesResp?.MessageId);
+      if (process.env.DEBUG === "true") {
+        console.log("SES MessageId:", sesResp?.MessageId);
+      }
+    } catch (sesErr) {
+      // Email failed but feedback is already saved in DynamoDB — don't return 500
+      console.error("SES email failed (feedback still saved):", (sesErr as Error).message);
     }
 
-    return json(201, { message: "Feedback submitted & emailed.", feedbackId: id, createdAt: nowIso });
+    return json(201, {
+      message: emailSent ? "Feedback submitted & emailed." : "Feedback submitted (email notification failed).",
+      feedbackId: id,
+      createdAt: nowIso,
+    });
   } catch (err) {
     const error = err as Error & { name?: string, code?: string };
     const errId = crypto.randomUUID?.() || Date.now().toString();

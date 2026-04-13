@@ -115,7 +115,7 @@ async function removeFromClinicSubgroups(username: string): Promise<void> {
     }));
     
     const current: string[] = res.Groups?.map(g => g.GroupName || '') || [];
-    const clinicGroups: string[] = current.filter(g => VALID_SUBGROUPS.includes(g));
+    const clinicGroups: string[] = current.filter(g => VALID_SUBGROUPS.includes(g.toLowerCase()));
     
     for (const groupName of clinicGroups) {
         await cognito.send(new AdminRemoveUserFromGroupCommand({
@@ -216,8 +216,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const groups = userInfo.groups || [];
         
         // 2. Check if user is Root or ClinicAdmin
-        const isRootUser: boolean = groups.includes("root");
-        const isClinicAdmin: boolean = groups.includes("clinicadmin");
+        const lowerGroups = groups.map((g: string) => g.toLowerCase());
+        const isRootUser: boolean = lowerGroups.includes("root");
+        const isClinicAdmin: boolean = lowerGroups.includes("clinicadmin");
         
         if (!isRootUser && !isClinicAdmin) {
             return json(403, {
@@ -258,7 +259,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 1. Validate subgroup
-        if (subgroup && !VALID_SUBGROUPS.includes(subgroup)) {
+        if (subgroup && !VALID_SUBGROUPS.includes(subgroup.toLowerCase())) {
             return json(400, {
                 error: "Bad Request",
                 statusCode: 400,

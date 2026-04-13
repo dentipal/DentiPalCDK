@@ -192,30 +192,92 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (sendWelcomeEmail) {
             console.log(`Attempting to send welcome email to ${email}...`);
 
-            const subject = "Your DentiPal account details";
+            const subject = "Your DentiPal Account Details";
+            const clinicsLine = Array.isArray(clinicIds) && clinicIds.length ? clinicIds.join(", ") : "";
+
+            const htmlBody = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"/></head>
+<body style="margin:0;padding:0;background-color:#fff0f5;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#fff0f5;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+
+        <!-- Header -->
+        <tr><td style="background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);padding:32px 40px;text-align:center;">
+          <h1 style="margin:0;font-size:28px;color:#532b21;letter-spacing:0.5px;">DentiPal</h1>
+          <p style="margin:8px 0 0;color:#7a4a3a;font-size:14px;">Account Created</p>
+        </td></tr>
+
+        <!-- Greeting -->
+        <tr><td style="padding:32px 40px 16px;">
+          <h2 style="margin:0;font-size:22px;color:#333;">Hello, ${firstName}!</h2>
+          <p style="margin:8px 0 0;font-size:15px;color:#666;">Your DentiPal account has been created by your administrator. Here are your login details:</p>
+        </td></tr>
+
+        <!-- Credentials Card -->
+        <tr><td style="padding:0 40px 24px;">
+          <table width="100%" style="background:#fef7f5;border-radius:12px;" cellpadding="0" cellspacing="0">
+            <tr><td style="padding:20px 24px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="font-size:15px;">
+                <tr>
+                  <td style="padding:8px 0;color:#999;width:100px;">Email</td>
+                  <td style="padding:8px 0;font-weight:600;color:#333;">${email}</td>
+                </tr>
+                <tr>
+                  <td style="padding:8px 0;color:#999;border-top:1px solid #fde8e4;">Password</td>
+                  <td style="padding:8px 0;font-weight:600;color:#333;border-top:1px solid #fde8e4;font-family:monospace;background:#fff5f3;padding-left:8px;border-radius:4px;">${password}</td>
+                </tr>
+                <tr>
+                  <td style="padding:8px 0;color:#999;border-top:1px solid #fde8e4;">Role</td>
+                  <td style="padding:8px 0;font-weight:600;color:#333;border-top:1px solid #fde8e4;">${subgroup}</td>
+                </tr>
+                ${clinicsLine ? `<tr>
+                  <td style="padding:8px 0;color:#999;border-top:1px solid #fde8e4;">Clinics</td>
+                  <td style="padding:8px 0;font-weight:600;color:#333;border-top:1px solid #fde8e4;">${clinicsLine}</td>
+                </tr>` : ""}
+              </table>
+            </td></tr>
+          </table>
+        </td></tr>
+
+        <!-- Security Warning -->
+        <tr><td style="padding:0 40px 24px;">
+          <div style="background:#fff5f3;border-left:4px solid #f8ccc1;padding:14px 18px;border-radius:0 8px 8px 0;">
+            <p style="margin:0;font-size:14px;color:#532b21;font-weight:600;">For security, please sign in and change your password immediately.</p>
+          </div>
+        </td></tr>
+
+        <!-- CTA Button -->
+        <tr><td style="padding:0 40px 32px;text-align:center;">
+          <a href="https://app.dentipal.com/login" style="display:inline-block;background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);color:#532b21;padding:14px 36px;border-radius:10px;font-weight:700;font-size:15px;text-decoration:none;">
+            Sign In Now
+          </a>
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="background:#fef7f5;padding:20px 40px;border-top:1px solid #fde8e4;text-align:center;">
+          <p style="margin:0 0 4px;font-size:13px;color:#999;">If you did not expect this email, please contact your administrator.</p>
+          <p style="margin:0;font-size:12px;color:#ccc;">DentiPal. All rights reserved.</p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
             const textBody =
                 `Hello ${firstName},\n\n` +
                 `Your DentiPal account has been created.\n\n` +
                 `Email: ${email}\n` +
-                `Password: ${password}\n` + 
+                `Password: ${password}\n` +
                 `Role: ${subgroup}\n` +
-                (Array.isArray(clinicIds) && clinicIds.length ? `Clinics: ${clinicIds.join(", ")}\n` : "") +
+                (clinicsLine ? `Clinics: ${clinicsLine}\n` : "") +
                 `\nFor security, please sign in and change your password immediately.\n` +
+                `Sign in: https://app.dentipal.com/login\n\n` +
                 `If you did not expect this email, please contact your administrator.\n`;
-
-            const htmlBody =
-                `<div style="font-family: sans-serif;">` +
-                `<p>Hello ${firstName},</p>` +
-                `<p>Your DentiPal account has been created.</p>` +
-                `<ul>` +
-                `<li><b>Email:</b> ${email}</li>` +
-                `<li><b>Password:</b> ${password}</li>` +
-                `<li><b>Role:</b> ${subgroup}</li>` +
-                (Array.isArray(clinicIds) && clinicIds.length ? `<li><b>Clinics:</b> ${clinicIds.join(", ")}</li>` : "") +
-                `</ul>` +
-                `<p><i>For security, please sign in and change your password immediately.</i></p>` +
-                `<p>If you did not expect this email, please contact your administrator.</p>` +
-                `</div>`;
 
             const emailParams: SendEmailCommandInput = {
                 Source: process.env.SES_FROM_EMAIL || "swarajparamata@gmail.com",
