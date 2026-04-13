@@ -216,8 +216,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const groups = userInfo.groups || [];
         
         // 2. Check if user is Root or ClinicAdmin
-        const isRootUser: boolean = groups.includes("root");
-        const isClinicAdmin: boolean = groups.includes("clinicadmin");
+        const lowerGroups = groups.map((g: string) => g.toLowerCase());
+        const isRootUser: boolean = lowerGroups.includes("root");
+        const isClinicAdmin: boolean = lowerGroups.includes("clinicadmin");
         
         if (!isRootUser && !isClinicAdmin) {
             return json(403, {
