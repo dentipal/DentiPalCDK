@@ -52,8 +52,13 @@ const generateFileUrl = async (
 
     const userSubToAccess = event.queryStringParameters?.userSub || userSub;
 
-    // Security check
-    if (userSubToAccess !== userSub && userType !== "clinic") {
+    // Determine if user has clinic-level access (via custom:user_type OR cognito groups)
+    const clinicGroups = ["Root", "ClinicAdmin", "ClinicManager", "ClinicViewer"];
+    const userGroups = userInfo.groups || [];
+    const isClinicUser = userType === "clinic" || userGroups.some(g => clinicGroups.includes(g));
+
+    // Security check: only clinic users can access other users' files
+    if (userSubToAccess !== userSub && !isClinicUser) {
       return json(403, { error: "Access denied" });
     }
 
@@ -85,10 +90,10 @@ const generateFileUrl = async (
 
       const headResponse: HeadObjectCommandOutput = await s3Client.send(headCommand);
 
-      // File ownership check
+      // File ownership check - clinic users can access any professional's files
       const uploadedBy = headResponse.Metadata?.["uploaded-by"];
 
-      if (uploadedBy && uploadedBy !== userSubToAccess) {
+      if (uploadedBy && uploadedBy !== userSubToAccess && !isClinicUser) {
         console.warn(`Access denied: uploadedBy (${uploadedBy}) does not match userSubToAccess (${userSubToAccess})`);
         return json(403, { error: "Access denied - file not owned by specified user" });
       }

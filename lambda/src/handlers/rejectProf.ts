@@ -96,7 +96,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // 4. Update DynamoDB
     const updateParams: UpdateItemCommandInput = {
-      TableName: "DentiPal-JobApplications", // Assuming table name is constant, consider using process.env.JOB_APPLICATIONS_TABLE
+      TableName: process.env.JOB_APPLICATIONS_TABLE || "DentiPal-V5-JobApplications",
       Key: {
         jobId: { S: jobId },
         professionalUserSub: { S: professionalUserSub }

@@ -1,13 +1,9 @@
 import {
   DynamoDBClient,
   QueryCommand,
-  ScanCommand,
   BatchGetItemCommand,
-  DescribeTableCommand,
   QueryCommandInput,
-  ScanCommandInput,
   BatchGetItemCommandInput,
-  DescribeTableCommandInput,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
@@ -28,26 +24,6 @@ const dynamodb = new DynamoDBClient({ region: REGION });
 // ✅ ADDED: Import auth utility
 import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS } from "./corsHeaders";
-
-async function getTableSchema(tableName: string) {
-  try {
-    const input: DescribeTableCommandInput = { TableName: tableName };
-    const res = await dynamodb.send(new DescribeTableCommand(input));
-
-    return {
-      keySchema: res.Table?.KeySchema,
-      attributeDefinitions: res.Table?.AttributeDefinitions,
-      gsis: (res.Table?.GlobalSecondaryIndexes || []).map((g) => ({
-        indexName: g.IndexName,
-        keySchema: g.KeySchema,
-        projection: g.Projection?.ProjectionType,
-      })),
-    };
-  } catch (e: any) {
-    console.error(`❌ describe ${tableName}:`, e.message);
-    return null;
-  }
-}
 
 async function batchGetAll(request: BatchGetItemCommandInput, maxRetries = 3) {
   let result: any = { Responses: {}, UnprocessedKeys: {} };
@@ -72,6 +48,39 @@ async function batchGetAll(request: BatchGetItemCommandInput, maxRetries = 3) {
   return result;
 }
 
+// Chunk an array into groups of maxSize (DynamoDB BatchGetItem limit is 100)
+function chunk<T>(arr: T[], maxSize: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < arr.length; i += maxSize) {
+    chunks.push(arr.slice(i, i + maxSize));
+  }
+  return chunks;
+}
+
+// BatchGetItem with automatic chunking for >100 keys
+async function batchGetChunked(
+  tables: Record<string, { Keys: Record<string, AttributeValue>[] }>,
+  maxRetries = 3
+) {
+  // Collect all keys across tables, chunk to 100 total per request
+  const allResponses: Record<string, any[]> = {};
+
+  // Process each table separately to ensure no single request exceeds 100 keys
+  for (const [tableName, tableRequest] of Object.entries(tables)) {
+    allResponses[tableName] = [];
+    const keyChunks = chunk(tableRequest.Keys, 100);
+
+    for (const keyChunk of keyChunks) {
+      const result = await batchGetAll({
+        RequestItems: { [tableName]: { Keys: keyChunk } },
+      }, maxRetries);
+      allResponses[tableName].push(...(result.Responses?.[tableName] || []));
+    }
+  }
+
+  return { Responses: allResponses };
+}
+
 const dedupe = (arr: any[]) => {
   const s = new Set();
   const out: any[] = [];
@@ -87,42 +96,47 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 });
 
 async function getJobsUsingQuery(jobIds: string[], clinicId: string) {
-  const jobs: any[] = [];
-
-  for (const jobId of jobIds) {
-    const attempts = [
-      new QueryCommand({
-        TableName: POSTINGS_TABLE,
-        IndexName: "jobId-index-1",
-        KeyConditionExpression: "jobId = :jid",
-        ExpressionAttributeValues: { ":jid": { S: jobId } },
-      }),
-      new QueryCommand({
-        TableName: POSTINGS_TABLE,
-        KeyConditionExpression: "clinicId = :cid AND jobId = :jid",
-        ExpressionAttributeValues: {
-          ":cid": { S: clinicId },
-          ":jid": { S: jobId },
-        },
-      }),
-    ];
-
-    let added = false;
-
-    for (const cmd of attempts) {
+  // Run all job queries in parallel instead of sequentially
+  const results = await Promise.all(
+    jobIds.map(async (jobId) => {
+      // Try GSI first, then primary key
       try {
-        const r = await dynamodb.send(cmd);
+        const r = await dynamodb.send(
+          new QueryCommand({
+            TableName: POSTINGS_TABLE,
+            IndexName: "jobId-index-1",
+            KeyConditionExpression: "jobId = :jid",
+            ExpressionAttributeValues: { ":jid": { S: jobId } },
+          })
+        );
         if (r.Items && r.Items.length) {
-          jobs.push(unmarshall(r.Items[0] as Record<string, AttributeValue>));
-          added = true;
-          break;
+          return unmarshall(r.Items[0] as Record<string, AttributeValue>);
         }
       } catch {}
-    }
-    if (!added) console.warn(`⚠️ job not found for jobId=${jobId}`);
-  }
 
-  return jobs;
+      // Fallback to primary key query
+      try {
+        const r = await dynamodb.send(
+          new QueryCommand({
+            TableName: POSTINGS_TABLE,
+            KeyConditionExpression: "clinicId = :cid AND jobId = :jid",
+            ExpressionAttributeValues: {
+              ":cid": { S: clinicId },
+              ":jid": { S: jobId },
+            },
+          })
+        );
+        if (r.Items && r.Items.length) {
+          return unmarshall(r.Items[0] as Record<string, AttributeValue>);
+        }
+      } catch {}
+
+      console.warn(`⚠️ job not found for jobId=${jobId}`);
+      return null;
+    })
+  );
+
+  return results.filter(Boolean);
 }
 
 function chooseLatestNegotiation(items: any[]) {
@@ -254,23 +268,17 @@ export const handler = async (
       });
     }
 
-    const postingsSchema = await getTableSchema(POSTINGS_TABLE);
-    const profilesSchema = await getTableSchema(PROFILES_TABLE);
-    const negotiationsSchema = await getTableSchema(NEGOTIATIONS_TABLE);
+    const CLINIC_ID_INDEX = process.env.CLINIC_ID_INDEX || "clinicId-index";
 
-    console.log("📊 Postings schema:", postingsSchema);
-    console.log("📊 Profiles schema:", profilesSchema);
-    console.log("📊 Negotiations schema:", negotiationsSchema);
-
-    const scanInput: ScanCommandInput = {
+    const queryInput: QueryCommandInput = {
       TableName: APPLICATIONS_TABLE,
-      FilterExpression: "#c = :clinicId",
-      ExpressionAttributeNames: { "#c": "clinicId" },
+      IndexName: CLINIC_ID_INDEX,
+      KeyConditionExpression: "clinicId = :clinicId",
       ExpressionAttributeValues: { ":clinicId": { S: clinicId } },
     };
 
-    const scanResp = await dynamodb.send(new ScanCommand(scanInput));
-    const applications = (scanResp.Items || []).map((it) => unmarshall(it as Record<string, AttributeValue>));
+    const queryResp = await dynamodb.send(new QueryCommand(queryInput));
+    const applications = (queryResp.Items || []).map((it) => unmarshall(it as Record<string, AttributeValue>));
 
     console.log(`📋 Found ${applications.length} applications`);
 
@@ -314,11 +322,9 @@ export const handler = async (
 
     for (let i = 0; i < keyVariations.length && !success; i++) {
       try {
-        const batchResp = await batchGetAll({
-          RequestItems: {
-            [POSTINGS_TABLE]: { Keys: keyVariations[i] },
-            [PROFILES_TABLE]: { Keys: profileKeys },
-          },
+        const batchResp = await batchGetChunked({
+          [POSTINGS_TABLE]: { Keys: keyVariations[i] },
+          [PROFILES_TABLE]: { Keys: profileKeys },
         });
 
         postingsRaw = (batchResp.Responses?.[POSTINGS_TABLE] || []).map((item: Record<string, AttributeValue>) => unmarshall(item));
@@ -334,8 +340,8 @@ export const handler = async (
       postingsRaw = await getJobsUsingQuery(jobIds, clinicId);
 
       try {
-        const pr = await batchGetAll({
-          RequestItems: { [PROFILES_TABLE]: { Keys: profileKeys } },
+        const pr = await batchGetChunked({
+          [PROFILES_TABLE]: { Keys: profileKeys },
         });
 
         profilesRaw = (pr.Responses?.[PROFILES_TABLE] || []).map((item: Record<string, AttributeValue>) => unmarshall(item));

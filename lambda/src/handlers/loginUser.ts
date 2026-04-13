@@ -22,7 +22,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 const norm = (s: string | undefined): string =>
   String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
-const CLINIC_GROUPS_NORM = new Set(["Root", "ClinicAdmin", "ClinicManager", "ClinicViewer"]);
+const CLINIC_GROUPS_NORM = new Set(["root", "clinicadmin", "clinicmanager", "clinicviewer"]);
 
 function isClinicRole(groups: string[] | undefined): boolean {
   const normalized = (groups || []).map(norm);
@@ -58,7 +58,7 @@ export const handler = async (
   console.log("Login request received:", event.body);
 
   try {
-    const loginData: { email?: string; password?: string } = JSON.parse(event.body || "{}");
+    const loginData: { email?: string; password?: string; userType?: string } = JSON.parse(event.body || "{}");
 
     if (!loginData.email || !loginData.password) {
       console.warn("Missing required fields");
@@ -108,6 +108,34 @@ export const handler = async (
     console.log("User sub:", userSub);
     console.log("User groups:", userGroups);
     console.log("User email:", email);
+
+    // Portal-side validation: reject if user type doesn't match requested portal
+    if (loginData.userType) {
+      const userIsClinic = isClinicRole(userGroups);
+      const requestedClinic = loginData.userType === "clinic";
+
+      if (requestedClinic && !userIsClinic) {
+        console.warn(`[login] Portal mismatch: professional user tried clinic login. Email: ${email}`);
+        return json(403, {
+          error: "Forbidden",
+          message: "This is a professional account. Please use the Professional login page.",
+          statusCode: 403,
+          accountType: "professional",
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      if (!requestedClinic && userIsClinic) {
+        console.warn(`[login] Portal mismatch: clinic user tried professional login. Email: ${email}`);
+        return json(403, {
+          error: "Forbidden",
+          message: "This is a clinic account. Please use the Clinic login page.",
+          statusCode: 403,
+          accountType: "clinic",
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
 
     const associatedClinics: Array<{ clinicId: string; name: string; address: string }> = [];
 
