@@ -157,9 +157,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         await dynamo.send(new UpdateItemCommand(updateCommandInput));
 
-        // --- Step 6: Emit EventBridge Event ---
+        // --- Step 6: Emit EventBridge Event (triggers inbox conversation) ---
         const clinicIdFromClaims = getClinicIdFromEvent(event);
         const clinicId = clinicIdFromClaims || body.clinicId || matchingItem.clinicId?.S || null;
+
+        let inboxMessageSent = false;
 
         if (clinicId) {
             const shiftDetails = {
@@ -180,12 +182,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     })
                 }]
             }));
+            inboxMessageSent = true;
+        } else {
+            console.error("WARNING: clinicId is missing — inbox conversation will NOT be created.", {
+                jobId,
+                professionalUserSub,
+                clinicIdFromClaims,
+                bodyClinicId: body.clinicId,
+                itemClinicId: matchingItem.clinicId?.S,
+            });
         }
 
         return json(200, {
             message: "Professional accepted and status updated to scheduled",
             jobId,
-            professionalUserSub
+            professionalUserSub,
+            inboxMessageSent,
+            ...(inboxMessageSent ? {} : { warning: "clinicId not found — inbox conversation was not created. Provide clinicId in the request body or ensure it exists in the job application." }),
         });
 
     } catch (error: any) {

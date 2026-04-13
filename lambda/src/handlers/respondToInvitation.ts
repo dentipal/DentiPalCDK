@@ -8,6 +8,11 @@ import {
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+
 // Imports for AWS Lambda types
 import {
   APIGatewayProxyEventV2,
@@ -57,6 +62,7 @@ const JOB_APPLICATIONS_TABLE: string = process.env.JOB_APPLICATIONS_TABLE!;
 const JOB_NEGOTIATIONS_TABLE: string = process.env.JOB_NEGOTIATIONS_TABLE!;
 
 const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
+const eb = new EventBridgeClient({ region: REGION });
 
 import { CORS_HEADERS } from "./corsHeaders";
 
@@ -293,6 +299,31 @@ export const handler = async (
         } catch (updateError: any) {
           console.error("   -> FAILED to update job posting status:", updateError);
         }
+      }
+
+      // --- Publish EventBridge event to trigger inbox conversation ---
+      try {
+        const shiftDetails = {
+          date: job.date?.S || job.shiftDate?.S || "TBD",
+          role: job.role?.S || job.professionalRole?.S || job.jobTitle?.S || "Professional",
+          rate: job.hourlyRate?.N ? Number(job.hourlyRate.N) : (job.proposedRate?.N ? Number(job.proposedRate.N) : 0),
+        };
+
+        await eb.send(new PutEventsCommand({
+          Entries: [{
+            Source: "denti-pal.api",
+            DetailType: "ShiftEvent",
+            Detail: JSON.stringify({
+              eventType: "invite-accepted",
+              clinicId,
+              professionalSub: userSub,
+              shiftDetails,
+            }),
+          }],
+        }));
+        console.log("   -> EventBridge ShiftEvent (invite-accepted) published for inbox conversation.");
+      } catch (ebError: any) {
+        console.error("   -> FAILED to publish EventBridge event (inbox conversation not created):", ebError.message);
       }
     } else if (responseData.response === "negotiating") {
       // B. Negotiating Logic

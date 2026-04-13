@@ -3,6 +3,8 @@ import {
   PutItemCommand,
   UpdateItemCommand,
   QueryCommand,
+  GetItemCommand,
+  DeleteItemCommand,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 
@@ -11,13 +13,22 @@ import {
   PostToConnectionCommand,
 } from "@aws-sdk/client-apigatewaymanagementapi";
 
+import {
+  CognitoIdentityProviderClient,
+  AdminGetUserCommand,
+  AttributeType,
+} from "@aws-sdk/client-cognito-identity-provider";
+
 // --- Configuration ---
 const REGION = process.env.AWS_REGION || "us-east-1";
 const ddb = new DynamoDBClient({ region: REGION });
+const cognitoIdp = new CognitoIdentityProviderClient({ region: REGION });
 
 const MESSAGES_TABLE = process.env.MESSAGES_TABLE || "DentiPal-Messages";
 const CONVOS_TABLE = process.env.CONVOS_TABLE || "DentiPal-Conversations";
 const CONNS_TABLE = process.env.CONNS_TABLE || "DentiPal-Connections";
+const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
+const USER_POOL_ID = process.env.USER_POOL_ID!;
 const WS_ENDPOINT = process.env.WS_ENDPOINT; // https://...execute-api.../prod
 
 // --- Utility Functions ---
@@ -30,6 +41,85 @@ function makeConversationId(clinicId: string | number, professionalSub: string):
   return [a, b].sort().join("|");
 }
 
+// --- Name Resolution Helpers ---
+
+function pickAttr(attrs: AttributeType[] | undefined, name: string): string {
+  const a = (attrs || []).find((x) => x.Name === name);
+  return a ? a.Value || "" : "";
+}
+
+/** Look up professional display name from Cognito by sub */
+async function getProfessionalName(sub: string): Promise<string> {
+  try {
+    const out = await cognitoIdp.send(
+      new AdminGetUserCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: sub,
+      })
+    );
+    const given = pickAttr(out.UserAttributes, "given_name");
+    const fullname = pickAttr(out.UserAttributes, "name");
+    const family = pickAttr(out.UserAttributes, "family_name");
+    const email = pickAttr(out.UserAttributes, "email");
+
+    return (
+      given?.trim() ||
+      fullname?.trim() ||
+      [given, family].filter(Boolean).join(" ").trim() ||
+      (email && email.split("@")[0]) ||
+      `User ${String(sub).slice(0, 6)}`
+    );
+  } catch (e) {
+    console.error("getProfessionalName failed:", { sub, error: (e as Error).message });
+    return `User ${String(sub).slice(0, 6)}`;
+  }
+}
+
+/** Look up clinic display name from DentiPal-Clinics table, fallback to Connections table */
+async function getClinicName(clinicId: string): Promise<string> {
+  // Try Clinics table first (most reliable)
+  try {
+    const result = await ddb.send(
+      new GetItemCommand({
+        TableName: CLINICS_TABLE,
+        Key: { clinicId: { S: clinicId } },
+      })
+    );
+    const name =
+      result.Item?.clinicName?.S ||
+      result.Item?.name?.S ||
+      result.Item?.businessName?.S;
+    if (name?.trim()) return name.trim();
+  } catch (e) {
+    console.warn("Clinics table lookup failed:", { clinicId, error: (e as Error).message });
+  }
+
+  // Fallback: check active connections for display name
+  try {
+    const q = await ddb.send(
+      new QueryCommand({
+        TableName: CONNS_TABLE,
+        KeyConditionExpression: "userKey = :uk",
+        ExpressionAttributeValues: { ":uk": { S: `clinic#${clinicId}` } },
+      })
+    );
+    const items = q.Items || [];
+    if (items.length) {
+      const best = items.reduce((a, b) => {
+        const an = Number(a.connectedAt?.N || 0);
+        const bn = Number(b.connectedAt?.N || 0);
+        return an >= bn ? a : b;
+      });
+      const display = best.display?.S?.trim();
+      if (display) return display;
+    }
+  } catch (e) {
+    console.warn("Connections lookup failed:", { clinicId, error: (e as Error).message });
+  }
+
+  return `Clinic ${clinicId.slice(0, 6)}`;
+}
+
 async function getConnections(userKey: string): Promise<string[]> {
   const out = await ddb.send(
     new QueryCommand({
@@ -38,7 +128,6 @@ async function getConnections(userKey: string): Promise<string[]> {
       ExpressionAttributeValues: { ":uk": { S: userKey } },
     })
   );
-  // Type guard assertion for safety in mapping
   return (out.Items || [])
     .map((i) => i.connectionId?.S)
     .filter((cid): cid is string => !!cid);
@@ -56,12 +145,14 @@ interface WsPayload {
   messageType: "system";
   clinicId: string | number;
   professionalSub: string;
-  message: Omit<WsPayload, 'type' | 'message'>; // Nested structure defined in JS source
+  message: Omit<WsPayload, 'type' | 'message'>;
 }
 
 async function sendToConnections(conns: string[], payload: WsPayload): Promise<void> {
-  if (!conns.length || !WS_ENDPOINT) return;
-  // The client needs the specific endpoint configuration
+  if (!conns.length || !WS_ENDPOINT) {
+    if (!WS_ENDPOINT) console.error("[event-to-message] WS_ENDPOINT is not set — cannot push real-time notifications");
+    return;
+  }
   const client = new ApiGatewayManagementApiClient({ endpoint: WS_ENDPOINT });
   const dataToSend = Buffer.from(JSON.stringify(payload));
 
@@ -75,9 +166,33 @@ async function sendToConnections(conns: string[], payload: WsPayload): Promise<v
           })
         );
       } catch (err) {
-        // Use 'instanceof Error' for type safety in TS
         if (err instanceof Error && err.name === "GoneException") {
-          console.log(`Gone: ${cid}`);
+          console.log(`Gone connection: ${cid}, cleaning up`);
+          // Clean up stale connection
+          try {
+            // Find userKey for this connection to delete it
+            const q = await ddb.send(
+              new QueryCommand({
+                TableName: CONNS_TABLE,
+                IndexName: "connectionId-index",
+                KeyConditionExpression: "connectionId = :cid",
+                ExpressionAttributeValues: { ":cid": { S: cid } },
+              })
+            );
+            for (const item of q.Items || []) {
+              await ddb.send(
+                new DeleteItemCommand({
+                  TableName: CONNS_TABLE,
+                  Key: {
+                    userKey: { S: item.userKey.S! },
+                    connectionId: { S: cid },
+                  },
+                })
+              );
+            }
+          } catch (cleanupErr) {
+            console.warn(`Failed to clean up gone connection ${cid}:`, (cleanupErr as Error).message);
+          }
         } else if (err instanceof Error) {
           console.error(`Send failed ${cid}:`, err.message);
         } else {
@@ -119,19 +234,23 @@ export const handler = async (event: EventBridgeEvent): Promise<{ statusCode: nu
 
     const { detail } = event;
     const { clinicId, professionalSub, shiftDetails = {} } = detail;
-    const eventType = detail.eventType as EventDetail['eventType']; // Cast to the known literal types
+    const eventType = detail.eventType as EventDetail['eventType'];
 
     if (!clinicId || !professionalSub) {
-      // Throwing an Error here satisfies the implicit return type of the handler if it fails early
       throw new Error("Missing clinicId or professionalSub in event detail");
     }
 
     const conversationId = makeConversationId(clinicId, professionalSub);
-    // Use crypto for better randomness in TS environments like Node 14+ if available, otherwise stick with Math.random()
     const messageId = `${nowMs()}-system-${Math.random()
       .toString(36)
       .slice(2, 7)}`;
     const timestamp = isoNow();
+
+    // --- Resolve real display names from Cognito / Clinics table ---
+    const [profName, clinicName] = await Promise.all([
+      getProfessionalName(professionalSub),
+      getClinicName(clinicId),
+    ]);
 
     // --- Decide who this message is FROM ---
     let content = "";
@@ -141,41 +260,39 @@ export const handler = async (event: EventBridgeEvent): Promise<{ statusCode: nu
 
     const role = shiftDetails.role || "Professional";
     const date = shiftDetails.date || "TBD";
-    // Use optional chaining and template literals safely for rate display
     const rate = shiftDetails.rate ? `$${shiftDetails.rate}/hr` : "";
     const extras = rate ? ` at ${rate}` : "";
 
     switch (eventType) {
       case "shift-applied":
         senderKey = `prof#${professionalSub}`;
-        senderName = "Professional";
+        senderName = profName;
         fromClinic = false;
         content = `Shift applied: ${role} on ${date}${extras}. Confirm?`;
         break;
 
       case "invite-accepted":
         senderKey = `prof#${professionalSub}`;
-        senderName = "Professional";
+        senderName = profName;
         fromClinic = false;
         content = `Invite accepted: ${role} on ${date}${extras}.`;
         break;
 
       case "shift-cancelled":
         senderKey = `clinic#${clinicId}`;
-        senderName = "Clinic";
+        senderName = clinicName;
         fromClinic = true;
         content = `Shift cancelled: ${role} on ${date}.`;
         break;
 
       case "shift-scheduled":
         senderKey = `clinic#${clinicId}`;
-        senderName = "Clinic";
+        senderName = clinicName;
         fromClinic = true;
         content = `Shift scheduled: ${role} on ${date}${extras}. Questions? Reply here!`;
         break;
 
       default:
-        // Ensures exhaustiveness check if needed, but the cast above handles this
         throw new Error(`Unknown eventType: ${eventType}`);
     }
 
@@ -198,13 +315,13 @@ export const handler = async (event: EventBridgeEvent): Promise<{ statusCode: nu
     const unreadAttr = fromClinic ? "profUnread" : "clinicUnread";
     const otherUnreadAttr = fromClinic ? "clinicUnread" : "profUnread";
 
-    // DynamoDB SDK v3 UpdateItem requires ExpressionAttributeNames for reserved words like 'lastMessageAt' if used in Expression
     await ddb.send(
       new UpdateItemCommand({
         TableName: CONVOS_TABLE,
         Key: { conversationId: { S: conversationId } },
         UpdateExpression:
           "SET clinicKey = :ck, profKey = :pk, " +
+          "clinicName = :cname, profName = :pname, " +
           "lastMessageAt = :lma, lastPreview = :lp, " +
           "#unread = if_not_exists(#unread, :zero) + :inc, " +
           "#otherUnread = :zero",
@@ -215,11 +332,13 @@ export const handler = async (event: EventBridgeEvent): Promise<{ statusCode: nu
         ExpressionAttributeValues: {
           ":ck": { S: `clinic#${clinicId}` },
           ":pk": { S: `prof#${professionalSub}` },
+          ":cname": { S: clinicName },
+          ":pname": { S: profName },
           ":lma": { N: String(nowMs()) },
           ":lp": { S: content.slice(0, 100) },
           ":zero": { N: "0" },
           ":inc": { N: "1" },
-        } as Record<string, AttributeValue>, // Explicitly type the values object
+        } as Record<string, AttributeValue>,
       })
     );
 
@@ -242,7 +361,6 @@ export const handler = async (event: EventBridgeEvent): Promise<{ statusCode: nu
       messageType: "system",
       clinicId,
       professionalSub,
-      // Mirroring the nested 'message' object structure from the original JS code
       message: {
         conversationId,
         messageId,
@@ -259,11 +377,10 @@ export const handler = async (event: EventBridgeEvent): Promise<{ statusCode: nu
     const allConns = Array.from(new Set([...profConns, ...clinicConns]));
     await sendToConnections(allConns, payload);
 
-    console.log(`System message sent for ${eventType} in ${conversationId}`);
+    console.log(`System message sent for ${eventType} in ${conversationId} (clinic: ${clinicName}, prof: ${profName})`);
     return { statusCode: 200 };
   } catch (err) {
     console.error("Error in system-message lambda:", err);
-    // Re-throw the error so AWS Lambda marks the invocation as a failure
     throw err;
   }
 };
