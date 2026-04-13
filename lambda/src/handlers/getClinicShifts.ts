@@ -206,9 +206,13 @@ export const handler = async (
       const job = jobMap.get(jobId) || {};
       const status = normalizeStatus(it.applicationStatus);
 
+      // Use accepted/negotiated rate if available, otherwise fall back to original job rate
+      const acceptedRate = n(it.acceptedHourlyRate) ?? n(it.acceptedRate) ?? n(it.accepted_hourly_rate) ?? n(it.accepted_rate);
+      const finalRate = acceptedRate ?? job.hourlyRate ?? null;
+
       return {
         ...job, // Bring in all job properties
-        
+
         applicationId: s(it.applicationId),
         clinicId: s(it.clinicId),
         jobId,
@@ -218,9 +222,10 @@ export const handler = async (
         appliedAt: s(it.appliedAt),
         proposedRate: n(it.proposedRate) ?? n(it.proposed_rate),
         negotiationId: s(it.negotiationId),
+        acceptedHourlyRate: acceptedRate,
 
         jobTitle: job.jobTitle || "No Title",
-        hourlyRate: job.hourlyRate || null,
+        hourlyRate: finalRate,
       };
     });
 
