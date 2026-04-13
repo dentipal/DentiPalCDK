@@ -297,17 +297,10 @@ User ID: ${userSub || "anonymous"}
     const replyTo: string[] = [];
     if (effectiveEmail) replyTo.push(effectiveEmail);
 
-    // Source: verified SES_FROM with reporter's name as display name
-    // e.g. "john@example.com (Professional) via DentiPal" <verified@dentipal.com>
-    const sourceDisplay = effectiveEmail
-      ? `${effectiveEmail} (${userType}) via DentiPal`
-      : `DentiPal Feedback (${userType})`;
-    const source = `"${sourceDisplay}" <${SES_FROM}>`;
-
     let emailSent = false;
     try {
       const sesResp = await ses.send(new SendEmailCommand({
-        Source: source,
+        Source: SES_FROM as string,
         Destination: { ToAddresses: toAddresses },
         ReplyToAddresses: replyTo.length ? replyTo : undefined,
         Message: { Subject: { Data: subject }, Body: { Html: { Data: htmlBody }, Text: { Data: textBody } } }
