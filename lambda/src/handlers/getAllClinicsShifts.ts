@@ -59,6 +59,11 @@ const n = (attr?: AttributeValue): number | null => {
   return Number.isFinite(v) ? v : null;
 };
 
+const b = (attr?: AttributeValue): boolean => {
+  if (!attr || !("BOOL" in attr)) return false;
+  return Boolean(attr.BOOL);
+};
+
 function toStrArr(attr: any): string[] {
   if (!attr) return [];
   if (Array.isArray(attr) && typeof attr[0] === "string") return attr;
@@ -168,6 +173,7 @@ export const handler = async (
       jobId: s(it.jobId),
       jobTitle: s(it.professional_role) || s(it.jobTitle),
       professionalRole: s(it.professional_role),
+      professionalRoles: toStrArr(it.professional_roles),
       jobType: s(it.job_type),
       date: s(it.date),
       start_date: s(it.start_date),
@@ -178,12 +184,23 @@ export const handler = async (
       hourlyRate: n(it.hourly_rate),
       salaryMin: n(it.salary_min),
       salaryMax: n(it.salary_max),
+      payType: s(it.pay_type),
+      ratePerTransaction: n(it.rate_per_transaction),
+      revenuePercentage: n(it.revenue_percentage),
+      workLocationType: s(it.work_location_type),
       location: s(it.location) || s(it.addressLine1),
       fullAddress: s(it.fullAddress) || s(it.addressLine1),
       city: s(it.city),
       state: s(it.state),
       shiftDetails: s(it.shiftDetails),
       status: s(it.status) || "unknown",
+      clinicSoftware: toStrArr(it.clinicSoftware),
+      freeParkingAvailable: b(it.freeParkingAvailable),
+      parkingType: s(it.parkingType),
+      shiftSpeciality: s(it.shift_speciality),
+      jobDescription: s(it.job_description),
+      mealBreak: s(it.meal_break),
+      requirements: toStrArr(it.requirements),
       createdAt: s(it.createdAt),
       createdBy: s(it.createdBy) || s(it.created_by),
       creatorName: s(it.creatorName) || s(it.createdBy),

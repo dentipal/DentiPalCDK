@@ -723,6 +723,16 @@ export class DentiPalCDKStack extends cdk.Stack {
             'DentalHygienist',
             'FrontDesk',
             'Dentist',
+            'Hygienist',
+            'DHComboRole',
+            'BillingCoordinator',
+            'InsuranceVerification',
+            'PaymentPosting',
+            'ClaimsSending',
+            'ClaimsResolution',
+            'HIPAATrainee',
+            'OSHATrainee',
+            'Accounting',
         ];
 
         cognitoGroups.forEach(group => {

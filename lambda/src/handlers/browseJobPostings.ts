@@ -11,6 +11,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS } from "./corsHeaders";
+import { VALID_ROLE_VALUES } from "./professionalRoles";
 
 // --- Initialization ---
 
@@ -124,10 +125,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const limit: number = queryParams.limit ? parseInt(queryParams.limit) : 50;
 
         // Validate professional role if provided
-        const VALID_ROLES = ['dentist', 'hygienist', 'assistant'];
-        if (professionalRole && !VALID_ROLES.includes(professionalRole)) {
+        if (professionalRole && !VALID_ROLE_VALUES.includes(professionalRole)) {
             return json(400, {
-                error: `Invalid professional role. Valid options: ${VALID_ROLES.join(', ')}`
+                error: `Invalid professional role. Valid options: ${VALID_ROLE_VALUES.join(', ')}`
             });
         }
 

@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dyn
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, hasClinicAccess, isRoot } from "./utils"; 
-import { VALID_ROLE_VALUES } from "./professionalRoles"; 
+import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Configuration ---
@@ -22,24 +22,29 @@ interface JobData {
     clinicIds: string[];
     job_type: "temporary" | "multi_day_consulting" | "permanent";
     professional_role: string;
+    professional_roles?: string[];
     shift_speciality: string;
-    
+
     // Optional common fields
     job_title?: string;
     job_description?: string;
     requirements?: string[];
-    
+    work_location_type?: string;
+    pay_type?: string;
+    rate_per_transaction?: number;
+    revenue_percentage?: number;
+
     // Temporary job fields
     date?: string;
     hours?: number;
     hourly_rate?: number;
-    
+
     // Multi-day consulting fields
     dates?: string[];
     total_days?: number;
     hours_per_day?: number;
     project_duration?: string;
-    
+
     // Permanent job fields
     employment_type?: "full_time" | "part_time";
     salary_min?: number;
@@ -104,8 +109,10 @@ const validateTemporaryJob = (jobData: JobData): string | null => {
     if (jobData.hours < 1 || jobData.hours > 12) {
         return "Hours must be between 1 and 12";
     }
-    if (jobData.hourly_rate < 10 || jobData.hourly_rate > 200) {
-        return "Hourly rate must be between $10 and $200";
+    if (!jobData.pay_type || jobData.pay_type === "per_hour") {
+        if (jobData.hourly_rate < 10 || jobData.hourly_rate > 200) {
+            return "Hourly rate must be between $10 and $200";
+        }
     }
     return null;
 };
@@ -132,7 +139,7 @@ const validateMultiDayConsulting = (jobData: JobData): string | null => {
     if (jobData.hours_per_day && (jobData.hours_per_day < 1 || jobData.hours_per_day > 12)) {
         return "Hours per day must be between 1 and 12";
     }
-    if (jobData.hourly_rate && (jobData.hourly_rate < 10 || jobData.hourly_rate > 300)) {
+    if ((!jobData.pay_type || jobData.pay_type === "per_hour") && jobData.hourly_rate && (jobData.hourly_rate < 10 || jobData.hourly_rate > 300)) {
         return "Hourly rate must be between $10 and $300";
     }
     return null;
@@ -263,15 +270,53 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        // 6. Validate Professional Role
-        if (!VALID_ROLE_VALUES.includes(jobData.professional_role)) {
+        // 6. Support multi-role: accept professional_roles (array) or professional_role (string)
+        const professionalRoles: string[] = Array.isArray(jobData.professional_roles)
+            ? jobData.professional_roles
+            : jobData.professional_role ? [jobData.professional_role] : [];
+
+        if (professionalRoles.length === 0) {
             return json(400, {
                 error: "Bad Request",
-                message: "Invalid professional role",
-                details: { 
-                    validRoles: VALID_ROLE_VALUES, 
-                    providedRole: jobData.professional_role 
-                }
+                message: "At least one professional role is required",
+                details: { validRoles: VALID_ROLE_VALUES }
+            });
+        }
+
+        const invalidRoles = professionalRoles.filter(r => !VALID_ROLE_VALUES.includes(r));
+        if (invalidRoles.length > 0) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid professional role(s)",
+                details: { validRoles: VALID_ROLE_VALUES, invalidRoles }
+            });
+        }
+
+        // Validate work location type if provided
+        const VALID_WORK_LOCATIONS = ['onsite', 'us_remote', 'global_remote'];
+        if (jobData.work_location_type && !VALID_WORK_LOCATIONS.includes(jobData.work_location_type)) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid work location type",
+                details: { validOptions: VALID_WORK_LOCATIONS, provided: jobData.work_location_type }
+            });
+        }
+
+        // Validate pay type if provided
+        const VALID_PAY_TYPES = ['per_hour', 'per_transaction', 'percentage_of_revenue'];
+        if (jobData.pay_type && !VALID_PAY_TYPES.includes(jobData.pay_type)) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid pay type",
+                details: { validOptions: VALID_PAY_TYPES, provided: jobData.pay_type }
+            });
+        }
+
+        // per_transaction is not allowed for doctor roles
+        if (jobData.pay_type === 'per_transaction' && professionalRoles.some(r => isDoctorRole(r))) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Per-transaction pay type is not available for doctor roles",
             });
         }
 
@@ -373,7 +418,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     clinicUserSub: userSub,
                     jobId: jobId,
                     job_type: jobData.job_type,
-                    professional_role: jobData.professional_role,
+                    professional_role: professionalRoles[0],
+                    professional_roles: professionalRoles,
                     shift_speciality: jobData.shift_speciality,
                     status: "active",
                     createdAt: timestamp,
@@ -393,7 +439,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     freeParkingAvailable: profileData.freeParkingAvailable,
                     parkingType: profileData.parkingType,
                     practiceType: profileData.practiceType,
-                    primaryPracticeArea: profileData.primaryPracticeArea
+                    primaryPracticeArea: profileData.primaryPracticeArea,
+                    // Work location & pay
+                    ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
+                    ...(jobData.pay_type && { pay_type: jobData.pay_type }),
+                    ...(jobData.rate_per_transaction !== undefined && { rate_per_transaction: jobData.rate_per_transaction }),
+                    ...(jobData.revenue_percentage !== undefined && { revenue_percentage: jobData.revenue_percentage }),
                 };
 
                 // Optional common fields

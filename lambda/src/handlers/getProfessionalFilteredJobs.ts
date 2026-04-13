@@ -10,11 +10,7 @@ import { CORS_HEADERS } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
-const PROFESSIONAL_PROFILES_TABLE = process.env.PROFESSIONAL_PROFILES_TABLE || "DentiPal-ProfessionalProfiles";
-
-// *** IMPORTANT: If userSub is NOT the main Partition Key, set your Index Name here ***
-// Example: "userSub-index" or "UserSubGSI"
-const USER_SUB_INDEX_NAME = process.env.USER_SUB_INDEX_NAME || undefined; 
+const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-V5-JobApplications";
 
 const ddb = new DynamoDBClient({ region: REGION });
 
@@ -42,41 +38,37 @@ function itemToObject(item: Record<string, AttributeValue>): any {
   return result;
 }
 
-async function getProfessionalRole(userSub: string): Promise<string | null> {
-  // Debug Log: Check exactly what is being sent to DB
-  console.log(`[DEBUG] Querying Table: ${PROFESSIONAL_PROFILES_TABLE}, Index: ${USER_SUB_INDEX_NAME}, userSub: ${userSub}`);
+/**
+ * Get all jobIds the professional has already applied to,
+ * using the professionalUserSub-index GSI.
+ */
+async function getAppliedJobIds(userSub: string): Promise<Set<string>> {
+  const jobIds = new Set<string>();
+  let lastKey: Record<string, AttributeValue> | undefined;
 
-  try {
+  do {
     const resp = await ddb.send(
       new QueryCommand({
-        TableName: PROFESSIONAL_PROFILES_TABLE,
-        // If userSub is a GSI, this is REQUIRED. If userSub is the PK, this should be undefined.
-        IndexName: USER_SUB_INDEX_NAME, 
-        KeyConditionExpression: "userSub = :userSub",
+        TableName: JOB_APPLICATIONS_TABLE,
+        IndexName: "professionalUserSub-index",
+        KeyConditionExpression: "professionalUserSub = :userSub",
         ExpressionAttributeValues: { ":userSub": { S: userSub } },
-        Limit: 1,
+        ProjectionExpression: "jobId",
+        ExclusiveStartKey: lastKey,
       })
     );
 
-    // Debug Log: Check if items were actually returned
-    console.log(`[DEBUG] DB Response Items:`, JSON.stringify(resp.Items));
+    resp.Items?.forEach((item) => {
+      const id = str(item.jobId);
+      if (id) jobIds.add(id);
+    });
 
-    const profile = resp.Items?.[0];
-    if (!profile) return null;
-    return str(profile.role);
-  } catch (err: any) {
-    // CRITICAL: Do not return null here. Throw the error so we can see it in the API response.
-    console.error(`[ERROR] DynamoDB Query Failed:`, err);
-    throw new Error(`DynamoDB Error: ${err.message}`);
-  }
+    lastKey = resp.LastEvaluatedKey;
+  } while (lastKey);
+
+  return jobIds;
 }
 
-function roleMatchesJob(jobRole: string, professionalRole: string): boolean {
-  if (jobRole === professionalRole) return true;
-  if (jobRole === "dual_role_front_da") return true;
-  if (professionalRole === "dual_role_front_da") return true;
-  return false;
-}
 
 export const handler = async (
   event: APIGatewayProxyEvent
@@ -100,22 +92,12 @@ export const handler = async (
   const limit = Math.min(Number(event.queryStringParameters?.limit || 50), 100);
 
   try {
-    // 1) Get professional role
-    const professionalRole = await getProfessionalRole(userSub);
+    // 1) Get jobIds the professional has already applied to
+    const appliedJobIds = await getAppliedJobIds(userSub);
 
-    // If null is returned, it means query worked but NO ITEM matches that sub
-    if (!professionalRole) {
-      console.warn(`[WARN] Profile not found for userSub: ${userSub}`);
-      return json(404, {
-        error: "Professional profile not found",
-        details: `No record found in ${PROFESSIONAL_PROFILES_TABLE} for userSub '${userSub}'`,
-        suggestion: "Check if the user has actually created a profile in the DB."
-      });
-    }
+    console.log(`Excluding ${appliedJobIds.size} applied jobs`);
 
-    console.log(`Fetching jobs for role: ${professionalRole}`);
-
-    // 2) Scan job postings
+    // 2) Scan all job postings (no role filter — fetch for all roles)
     let allJobs: Record<string, AttributeValue>[] = [];
     let lastEvaluatedKey: Record<string, AttributeValue> | undefined;
 
@@ -131,13 +113,13 @@ export const handler = async (
       lastEvaluatedKey = resp.LastEvaluatedKey;
     } while (lastEvaluatedKey && allJobs.length < 1000);
 
-    // 3) Filter by role
+    // 3) Exclude already-applied and already-invited jobs
     const filtered = allJobs.filter((job) => {
-      const jobRole = str(job.professional_role);
-      return roleMatchesJob(jobRole, professionalRole);
+      const jobId = str(job.jobId);
+      return !appliedJobIds.has(jobId);
     });
 
-    // 4) Sort & Slice
+    // 4) Sort by newest first & slice to limit
     const jobs = filtered
       .map(itemToObject)
       .sort((a, b) => {
@@ -148,18 +130,16 @@ export const handler = async (
       .slice(0, limit);
 
     return json(200, {
-      professionalRole,
       totalJobs: jobs.length,
       jobs,
     });
 
   } catch (err: any) {
-    // This catches the re-thrown DB error
     console.error("Handler Fatal Error:", err);
-    return json(500, { 
-      error: "Internal Server Error", 
-      details: err.message, // This will now show "DynamoDB Error: ValidationException..."
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined 
+    return json(500, {
+      error: "Internal Server Error",
+      details: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
     });
   }
 };
