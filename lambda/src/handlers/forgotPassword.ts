@@ -148,14 +148,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("[forgot] resolved username:", username);
         
         if (!username) {
-            // Return generic success to prevent email enumeration attack
             return {
-                statusCode: 200,
+                statusCode: 404,
                 headers: CORS_HEADERS,
                 body: JSON.stringify({
-                    status: "success",
-                    statusCode: 200,
-                    message: "If the email exists in our system, a password reset code has been sent.",
+                    error: "Not Found",
+                    statusCode: 404,
+                    message: "No account found with this email address. Please check and try again.",
                     timestamp: new Date().toISOString(),
                 }),
             };
