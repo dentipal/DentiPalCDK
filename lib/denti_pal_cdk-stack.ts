@@ -1276,7 +1276,10 @@ export class DentiPalCDKStack extends cdk.Stack {
                 MESSAGES_TABLE: messagesTable.tableName, // DentiPal-Messages
                 CONNS_TABLE: connectionsTable.tableName,   // DentiPal-Connections
                 CONVOS_TABLE: conversationsTable.tableName, // DentiPal-Conversations
-                CLINICS_TABLE: clinicsTable.tableName,     // DentiPal-Clinics (for clinic name lookup)
+                CLINICS_TABLE: clinicsTable.tableName,             // DentiPal-Clinics (for clinic name lookup)
+                PROFESSIONAL_PROFILES_TABLE: professionalProfilesTable.tableName, // for avatar lookup
+                CLINIC_PROFILES_TABLE: clinicProfilesTable.tableName,             // for avatar lookup
+                PROFILE_IMAGES_BUCKET: profileImagesBucket.bucketName,            // for presigned URLs
             },
             timeout: cdk.Duration.seconds(30),
             memorySize: 256,
@@ -1288,6 +1291,13 @@ export class DentiPalCDKStack extends cdk.Stack {
         chatTables.forEach(table => {
             table.grantReadWriteData(webSocketChatHandler);
         });
+
+        // 1b. Read access on profile tables (for avatar URLs in conversations response)
+        professionalProfilesTable.grantReadData(webSocketChatHandler);
+        clinicProfilesTable.grantReadData(webSocketChatHandler);
+
+        // 1c. S3 read access for presigning profile image URLs
+        profileImagesBucket.grantRead(webSocketChatHandler);
 
         // 2. Cognito Permissions (AdminGetUser for display name lookup)
         webSocketChatHandler.addToRolePolicy(new iam.PolicyStatement({
