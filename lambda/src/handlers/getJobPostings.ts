@@ -98,7 +98,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
               professionalRole: item.professional_role?.S || "",
               status: item.status?.S || "active",
               createdAt: item.createdAt?.S || "",
-              updatedAt: item.updatedAt?.S || ""
+              updatedAt: item.updatedAt?.S || "",
+              created_by: item.created_by?.S || ""
             };
 
             // Optional fields

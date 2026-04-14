@@ -95,6 +95,8 @@ const makeJobDetailsFetcher = () => {
         dates: toStrArr(item.dates),
 
         dateRange: item.date_range?.S || item.dateRange?.S || null,
+        createdBy: item.created_by?.S || "",
+        
       };
 
       cache.set(jobId, details);

@@ -161,6 +161,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             status: job.status?.S || "active",
             createdAt: job.createdAt?.S || "",
             updatedAt: job.updatedAt?.S || "",
+            created_by: job.created_by?.S || "",
             applicationCount,
             applicationsEnabled: job.status?.S === "active",
 

@@ -125,6 +125,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
         const userInfo = extractUserFromBearerToken(authHeader);
         const userSub = userInfo.sub;
+        const userEmail = userInfo.email || "";
         const groups = userInfo.groups || [];
 
         // 3. Group Authorization
@@ -342,6 +343,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 status: "active",
                 createdAt: timestamp,
                 updatedAt: timestamp,
+                created_by: userEmail || userSub,
                 // Address
                 addressLine1: clinicAddress.addressLine1,
                 addressLine2: clinicAddress.addressLine2,

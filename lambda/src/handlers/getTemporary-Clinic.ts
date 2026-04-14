@@ -156,7 +156,8 @@ export const handler = async (
       state: job.state || "",
       pincode: job.pincode || "",
       createdAt: job.createdAt || "",
-      updatedAt: job.updatedAt || ""
+      updatedAt: job.updatedAt || "",
+      created_by: job.created_by || ""
     }));
 
     return {

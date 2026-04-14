@@ -180,7 +180,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
         const userInfo = extractUserFromBearerToken(authHeader);
         const userSub = userInfo.sub;
-        
+        const userEmail = userInfo.email || "";
+
         // 3. Parse Body
         const jobData: JobData = JSON.parse(event.body || '{}');
 
@@ -316,6 +317,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             status: jobData.status || 'active',
             createdAt: timestamp,
             updatedAt: timestamp,
+            created_by: userEmail || userSub,
             // Address details
             addressLine1: clinicAddress.addressLine1,
             addressLine2: clinicAddress.addressLine2,
