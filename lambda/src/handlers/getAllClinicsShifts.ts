@@ -181,7 +181,12 @@ export const handler = async (
       end_time: s(it.end_time),
       dates: toStrArr(it.dates),
       dateRange: s(it.date_range) || s(it.dateRange),
-      rate: it.rate ?? (it.pay_type === "per_transaction" ? it.rate_per_transaction : it.pay_type === "percentage_of_revenue" ? it.revenue_percentage : it.hourly_rate) ?? 0,
+      rate: (() => {
+        const pt = s(it.pay_type);
+        if (pt === "per_transaction") return n(it.rate_per_transaction) ?? n(it.rate) ?? 0;
+        if (pt === "percentage_of_revenue") return n(it.revenue_percentage) ?? n(it.rate) ?? 0;
+        return n(it.rate) ?? n(it.hourly_rate) ?? 0;
+      })(),
       payType: s(it.pay_type) || "per_hour",
       salaryMin: n(it.salary_min),
       salaryMax: n(it.salary_max),
@@ -241,9 +246,13 @@ export const handler = async (
       const job = jobMap.get(jobId) || {};
       const status = normalizeStatus(it.applicationStatus);
 
+      // Use accepted/negotiated rate if available, otherwise fall back to original job rate
+      const acceptedRate = n(it.acceptedHourlyRate) ?? n(it.acceptedRate) ?? n(it.accepted_hourly_rate) ?? n(it.accepted_rate);
+      const finalRate = acceptedRate ?? job.rate ?? null;
+
       return {
         ...job, // Bring in all job properties
-        
+
         // Application Details OVERRIDING
         applicationId: s(it.applicationId),
         clinicId: s(it.clinicId),
@@ -254,10 +263,11 @@ export const handler = async (
         appliedAt: s(it.appliedAt),
         proposedRate: n(it.proposedRate) ?? n(it.proposed_rate),
         negotiationId: s(it.negotiationId),
+        acceptedHourlyRate: acceptedRate,
 
         // Enriched Job Details
         jobTitle: job.jobTitle || "No Title",
-        rate: job.rate || null,
+        rate: finalRate,
         payType: job.payType || "per_hour",
       };
     });

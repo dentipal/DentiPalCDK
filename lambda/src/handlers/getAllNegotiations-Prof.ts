@@ -48,6 +48,7 @@ interface EnrichedNegotiation {
     clinicCounterHourlyRate: number | null;
     professionalCounterHourlyRate: number | null;
     agreedHourlyRate: number | null;
+    payType?: string;
     message: string;
     createdAt: string;
     updatedAt: string;
@@ -185,6 +186,7 @@ async function enrichWithClinicAndJob(neg: DynamoDBNegotiationItem): Promise<Enr
         message: neg.message?.S || "",
         createdAt: neg.createdAt?.S || "",
         updatedAt: neg.updatedAt?.S || "",
+        payType: neg.payType?.S || undefined,
     };
 
     // --- Clinic info (GetItem by clinicId) ---

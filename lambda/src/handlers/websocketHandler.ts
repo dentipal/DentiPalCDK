@@ -611,7 +611,7 @@ async function presignS3Key(key: string): Promise<string> {
  */
 async function getProfessionalAvatarUrl(profSub: string): Promise<string> {
     if (!profSub) return "";
-    const cacheKey = ;
+    const cacheKey = `prof:${profSub}`;
     if (avatarCache.has(cacheKey)) return avatarCache.get(cacheKey)!;
 
     try {
@@ -638,7 +638,7 @@ async function getProfessionalAvatarUrl(profSub: string): Promise<string> {
  */
 async function getClinicAvatarUrl(clinicId: string): Promise<string> {
     if (!clinicId) return "";
-    const cacheKey = ;
+    const cacheKey = `clinic:${clinicId}`;
     if (avatarCache.has(cacheKey)) return avatarCache.get(cacheKey)!;
 
     try {

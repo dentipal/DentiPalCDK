@@ -4,9 +4,8 @@ import {
   AdminCreateUserCommand,
   AdminSetUserPasswordCommand,
   AdminAddUserToGroupCommand,
-  AdminUpdateUserAttributesCommand,
   AdminInitiateAuthCommand,
-  AuthFlowType,
+  AdminListGroupsForUserCommand,
   ListUsersCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient, ScanCommand, ScanCommandInput } from "@aws-sdk/client-dynamodb";
@@ -38,21 +37,63 @@ function formatAddressFromItem(item: any): string {
 }
 
 /**
- * Verify a Google ID token by calling Google's tokeninfo endpoint.
- * Returns the decoded payload if valid.
+ * Exchange a Google authorization code for tokens and return user info.
+ * Also accepts a raw ID token (JWT) as a fallback.
  */
-async function verifyGoogleToken(idToken: string): Promise<any> {
-  const res = await fetch(
-    `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`
-  );
-  if (!res.ok) {
-    throw new Error("Invalid Google token");
+async function verifyGoogleToken(codeOrToken: string): Promise<Record<string, any>> {
+  // If it looks like a JWT (3 dot-separated parts), treat as ID token
+  if (codeOrToken.split(".").length === 3) {
+    const res = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(codeOrToken)}`
+    );
+    if (!res.ok) {
+      throw new Error("Invalid Google token");
+    }
+    const payload = await res.json() as Record<string, any>;
+    const expectedClientId = process.env.GOOGLE_CLIENT_ID;
+    if (expectedClientId && payload.aud !== expectedClientId) {
+      throw new Error("Google token audience mismatch");
+    }
+    return payload;
   }
-  const payload = await res.json() as Record<string, any>;
 
-  // Verify the token was issued for our app
-  const expectedClientId = process.env.GOOGLE_CLIENT_ID;
-  if (expectedClientId && payload.aud !== expectedClientId) {
+  // Otherwise treat as authorization code — exchange it for tokens
+  const clientId = process.env.GOOGLE_CLIENT_ID!;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET!;
+  const redirectUri = process.env.GOOGLE_REDIRECT_URI || "http://localhost:5173/callback";
+
+  const body = new URLSearchParams({
+    code: codeOrToken,
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+    grant_type: "authorization_code",
+  });
+
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  if (!tokenRes.ok) {
+    const errText = await tokenRes.text();
+    console.error("[googleLogin] Token exchange failed:", errText);
+    throw new Error("Failed to exchange Google authorization code");
+  }
+
+  const tokenData = await tokenRes.json() as Record<string, any>;
+  const idToken = tokenData.id_token as string | undefined;
+
+  if (!idToken) {
+    throw new Error("No ID token in Google token response");
+  }
+
+  // Decode the ID token payload (base64url)
+  const payloadBase64 = idToken.split(".")[1];
+  const payload = JSON.parse(Buffer.from(payloadBase64, "base64url").toString("utf-8"));
+
+  if (payload.aud !== clientId) {
     throw new Error("Google token audience mismatch");
   }
 
@@ -72,6 +113,13 @@ async function findUserByEmail(email: string): Promise<string | null> {
     return res.Users[0].Username || null;
   }
   return null;
+}
+
+/**
+ * Generate a deterministic but secure password for Google-authenticated users.
+ */
+function googlePassword(userSub: string): string {
+  return `G00gle!${userSub.slice(0, 8)}#Auth`;
 }
 
 export const handler = async (
@@ -104,30 +152,32 @@ export const handler = async (
       });
     }
 
-    // 1. Verify the Google token
+    // 1. Verify the Google token / exchange auth code
+    console.log("[googleLogin] Verifying Google token...");
     const googlePayload = await verifyGoogleToken(googleToken);
     const email = (googlePayload.email as string).toLowerCase();
-    const givenName = googlePayload.given_name || "User";
-    const familyName = googlePayload.family_name || "";
+    const givenName = (googlePayload.given_name as string) || "User";
+    const familyName = (googlePayload.family_name as string) || "";
 
     console.log("[googleLogin] Verified Google token for:", email);
 
-    // 2. Check if user already exists
+    // 2. Check if user already exists in Cognito
     let username = await findUserByEmail(email);
     let isNewUser = false;
+    let userSub = "";
 
     if (!username) {
-      // 3. Create user in Cognito with all required attributes
+      // 3. Create new user in Cognito with all required attributes
       isNewUser = true;
       console.log("[googleLogin] Creating new user:", email);
 
-      const tempPassword = `Temp!${Date.now()}#Gx`;
       const group = userType === "clinic" ? "Root" : "AssociateDentist";
+      const tempPassword = `Temp!${Date.now()}#Gx`;
 
       await cognito.send(new AdminCreateUserCommand({
         UserPoolId: process.env.USER_POOL_ID!,
         Username: email,
-        MessageAction: "SUPPRESS", // Don't send welcome email
+        MessageAction: "SUPPRESS",
         UserAttributes: [
           { Name: "email", Value: email },
           { Name: "email_verified", Value: "true" },
@@ -139,12 +189,19 @@ export const handler = async (
         TemporaryPassword: tempPassword,
       }));
 
-      // Set a permanent password so the user doesn't need to change it
-      const permanentPassword = `Google!${Date.now()}#${Math.random().toString(36).slice(2, 10)}`;
+      // Get the sub for password generation
+      const newUserInfo = await cognito.send(new AdminGetUserCommand({
+        UserPoolId: process.env.USER_POOL_ID!,
+        Username: email,
+      }));
+      userSub = newUserInfo.UserAttributes?.find(a => a.Name === "sub")?.Value || "";
+
+      // Set permanent password
+      const pwd = googlePassword(userSub);
       await cognito.send(new AdminSetUserPasswordCommand({
         UserPoolId: process.env.USER_POOL_ID!,
         Username: email,
-        Password: permanentPassword,
+        Password: pwd,
         Permanent: true,
       }));
 
@@ -159,25 +216,23 @@ export const handler = async (
       console.log("[googleLogin] User created and added to group:", group);
     } else {
       console.log("[googleLogin] Existing user found:", username);
+
+      // Get user sub
+      const existingUserInfo = await cognito.send(new AdminGetUserCommand({
+        UserPoolId: process.env.USER_POOL_ID!,
+        Username: username,
+      }));
+      userSub = existingUserInfo.UserAttributes?.find(a => a.Name === "sub")?.Value || "";
     }
 
-    // 4. Get user info to validate portal access
-    const userInfo = await cognito.send(new AdminGetUserCommand({
-      UserPoolId: process.env.USER_POOL_ID!,
-      Username: username!,
-    }));
-
-    const userSub = userInfo.UserAttributes?.find(a => a.Name === "sub")?.Value || "";
-
-    // 5. Get user groups
-    const { AdminListGroupsForUserCommand } = await import("@aws-sdk/client-cognito-identity-provider");
+    // 4. Get user groups
     const groupsRes = await cognito.send(new AdminListGroupsForUserCommand({
       UserPoolId: process.env.USER_POOL_ID!,
       Username: username!,
     }));
     const userGroups = (groupsRes.Groups || []).map(g => g.GroupName || "");
 
-    // 6. Validate portal access (only for existing users)
+    // 5. Validate portal access (only for existing users)
     if (!isNewUser) {
       const userIsClinic = isClinicRole(userGroups);
       if (userType === "clinic" && !userIsClinic) {
@@ -196,82 +251,38 @@ export const handler = async (
       }
     }
 
-    // 7. Generate Cognito tokens using ADMIN_USER_PASSWORD_AUTH
-    // We need to get the user's password to generate tokens, but we can use admin auth
+    // 6. Set a known password and authenticate to get Cognito tokens
+    const pwd = googlePassword(userSub);
+    await cognito.send(new AdminSetUserPasswordCommand({
+      UserPoolId: process.env.USER_POOL_ID!,
+      Username: username!,
+      Password: pwd,
+      Permanent: true,
+    }));
+
     const authRes = await cognito.send(new AdminInitiateAuthCommand({
       UserPoolId: process.env.USER_POOL_ID!,
       ClientId: process.env.CLIENT_ID!,
       AuthFlow: "ADMIN_USER_PASSWORD_AUTH" as any,
       AuthParameters: {
         USERNAME: username!,
-        // For admin auth we need a way to authenticate - use custom auth or generate tokens differently
+        PASSWORD: pwd,
       },
-    })).catch(() => null);
+    }));
 
-    // If ADMIN_USER_PASSWORD_AUTH fails (we don't know the password for existing users),
-    // we'll use a different approach - get tokens from a custom flow
-    // For now, we'll create a temporary auth session
-
-    // Alternative: For Google users, we set a known password pattern
-    // and use it for authentication
-    if (!authRes?.AuthenticationResult) {
-      // Set a new password for the user and auth with it
-      const googlePassword = `G00gle!${userSub.slice(0, 8)}#Auth`;
-      await cognito.send(new AdminSetUserPasswordCommand({
-        UserPoolId: process.env.USER_POOL_ID!,
-        Username: username!,
-        Password: googlePassword,
-        Permanent: true,
-      }));
-
-      const retryAuth = await cognito.send(new AdminInitiateAuthCommand({
-        UserPoolId: process.env.USER_POOL_ID!,
-        ClientId: process.env.CLIENT_ID!,
-        AuthFlow: "ADMIN_USER_PASSWORD_AUTH" as any,
-        AuthParameters: {
-          USERNAME: username!,
-          PASSWORD: googlePassword,
-        },
-      }));
-
-      const tokens = retryAuth.AuthenticationResult;
-      if (!tokens) {
-        return json(500, {
-          error: "Internal Server Error",
-          message: "Failed to generate authentication tokens",
-          statusCode: 500,
-        });
-      }
-
-      // Fetch associated clinics for clinic users
-      const associatedClinics = await fetchAssociatedClinics(userSub, userGroups);
-
-      return json(200, {
-        status: "success",
-        statusCode: 200,
-        message: isNewUser ? "Account created and logged in with Google" : "Login successful",
-        data: {
-          tokens: {
-            accessToken: tokens.AccessToken,
-            idToken: tokens.IdToken,
-            refreshToken: tokens.RefreshToken,
-            expiresIn: tokens.ExpiresIn,
-            tokenType: tokens.TokenType || "Bearer",
-          },
-          user: {
-            email,
-            sub: userSub,
-            groups: userGroups,
-            associatedClinics,
-          },
-          isNewUser,
-          loginAt: new Date().toISOString(),
-        },
+    const tokens = authRes.AuthenticationResult;
+    if (!tokens) {
+      return json(500, {
+        error: "Internal Server Error",
+        message: "Failed to generate authentication tokens",
+        statusCode: 500,
       });
     }
 
-    const tokens = authRes.AuthenticationResult;
+    // 7. Fetch associated clinics for clinic users
     const associatedClinics = await fetchAssociatedClinics(userSub, userGroups);
+
+    console.log("[googleLogin] Login successful for:", email, "isNewUser:", isNewUser);
 
     return json(200, {
       status: "success",
@@ -279,11 +290,11 @@ export const handler = async (
       message: isNewUser ? "Account created and logged in with Google" : "Login successful",
       data: {
         tokens: {
-          accessToken: tokens!.AccessToken,
-          idToken: tokens!.IdToken,
-          refreshToken: tokens!.RefreshToken,
-          expiresIn: tokens!.ExpiresIn,
-          tokenType: tokens!.TokenType || "Bearer",
+          accessToken: tokens.AccessToken,
+          idToken: tokens.IdToken,
+          refreshToken: tokens.RefreshToken,
+          expiresIn: tokens.ExpiresIn,
+          tokenType: tokens.TokenType || "Bearer",
         },
         user: {
           email,

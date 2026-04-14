@@ -1114,7 +1114,9 @@ export class DentiPalCDKStack extends cdk.Stack {
                 SES_TO: 'shashitest2004@gmail.com',     // Updated per your env variables
                 SMS_TOPIC_ARN: `arn:aws:sns:${this.region}:${this.account}:DentiPal-SMS-Notifications`, // Dynamic construction
                 FRONTEND_ORIGIN: 'http://localhost:5173',
-                GOOGLE_CLIENT_ID: '186785894030-o8s1bte9egg9s6a4n61a3jrm6039sep1.apps.googleusercontent.com',
+                GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || '',
+                GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || '',
+                GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI || 'http://localhost:5173/callback',
 
                 // Table Name Mappings
                 CLINIC_PROFILES_TABLE: clinicProfilesTable.tableName,
