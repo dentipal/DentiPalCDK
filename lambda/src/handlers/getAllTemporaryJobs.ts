@@ -215,6 +215,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 status: str(job.status) || "active",
                 createdAt: strOr(job.created_at, job.createdAt),
                 updatedAt: strOr(job.updated_at, job.updatedAt),
+                created_by: strOr(job.created_by, job.createdBy),
             };
         });
 

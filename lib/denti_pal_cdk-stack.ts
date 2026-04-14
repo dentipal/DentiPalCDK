@@ -694,8 +694,20 @@ export class DentiPalCDKStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY, // Change to RETAIN for prod
         });
 
+        // Pre sign-up Lambda trigger – auto-fills address & phone_number for Google sign-ups
+        const preSignUpFn = new lambda.Function(this, 'PreSignUpTrigger', {
+            functionName: 'DentiPal-PreSignUp',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/preSignUp.handler',
+            code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
+            timeout: cdk.Duration.seconds(10),
+            memorySize: 128,
+        });
+
+        userPool.addTrigger(cognito.UserPoolOperation.PRE_SIGN_UP, preSignUpFn);
+
         const client = userPool.addClient('ClinicAppClientV5', {
-            authFlows: { userPassword: true, userSrp: true },
+            authFlows: { userPassword: true, userSrp: true, adminUserPassword: true },
             preventUserExistenceErrors: true,
         });
 
@@ -1102,6 +1114,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 SES_TO: 'shashitest2004@gmail.com',     // Updated per your env variables
                 SMS_TOPIC_ARN: `arn:aws:sns:${this.region}:${this.account}:DentiPal-SMS-Notifications`, // Dynamic construction
                 FRONTEND_ORIGIN: 'http://localhost:5173',
+                GOOGLE_CLIENT_ID: '186785894030-o8s1bte9egg9s6a4n61a3jrm6039sep1.apps.googleusercontent.com',
 
                 // Table Name Mappings
                 CLINIC_PROFILES_TABLE: clinicProfilesTable.tableName,

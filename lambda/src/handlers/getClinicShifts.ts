@@ -181,8 +181,7 @@ export const handler = async (
       mealBreak: s(it.meal_break),
       requirements: toStrArr(it.requirements),
       createdAt: s(it.createdAt),
-      createdBy: s(it.createdBy) || s(it.created_by),
-      creatorName: s(it.creatorName) || s(it.createdBy),
+      created_by: s(it.created_by) || s(it.createdBy),
     }));
 
     const jobMap = new Map<string, any>();

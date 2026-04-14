@@ -101,6 +101,7 @@ import { handler as refreshTokenHandler } from "./handlers/refreshToken";
 import { handler as forgotPasswordHandler } from "./handlers/forgotPassword";
 import { handler as checkEmailHandler } from "./handlers/checkEmail";
 import { handler as confirmPasswordHandler } from "./handlers/confirmPassword";
+import { handler as googleLoginHandler } from "./handlers/googleLogin";
 
 import { handler as sendReferralInviteHandler } from "./handlers/sendReferralInvite";
 
@@ -294,6 +295,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "POST:/auth/forgot": forgotPasswordHandler,
         "POST:/auth/check-email": checkEmailHandler,
         "POST:/auth/confirm-forgot-password": confirmPasswordHandler,
+        "POST:/auth/google-login": googleLoginHandler,
 
         // OTP verification and user registration
         "POST:/auth/initiate-registration": initiateUserRegistrationHandler,

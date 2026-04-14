@@ -6,7 +6,9 @@ import { CORS_HEADERS } from "./corsHeaders";
 const REGION = process.env.REGION || "us-east-1";
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-JobApplications";
 const JOB_NEGOTIATIONS_TABLE = process.env.JOB_NEGOTIATIONS_TABLE || "DentiPal-JobNegotiations";
+const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
 const CLINIC_ID_INDEX = process.env.CLINIC_ID_INDEX || "clinicId-index";
+const JOB_POSTINGS_CLINIC_INDEX = "ClinicIdIndex";
 
 const DEFAULT_ACTION_NEEDED_STATUSES =
   (process.env.ACTION_NEEDED_STATUSES || "pending,negotiate").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
@@ -18,6 +20,36 @@ const json = (statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
   headers: CORS_HEADERS,
   body: JSON.stringify(bodyObj),
 });
+
+async function fetchCreatedByMapForClinic(clinicId: string): Promise<Record<string, string>> {
+  const map: Record<string, string> = {};
+  try {
+    let lastKey: any = undefined;
+    do {
+      const resp: any = await ddb.send(
+        new QueryCommand({
+          TableName: JOB_POSTINGS_TABLE,
+          IndexName: JOB_POSTINGS_CLINIC_INDEX,
+          KeyConditionExpression: "clinicId = :clinicId",
+          ExpressionAttributeValues: { ":clinicId": { S: clinicId } },
+          ProjectionExpression: "jobId, created_by",
+          ExclusiveStartKey: lastKey,
+        })
+      );
+      for (const item of (resp.Items || [])) {
+        const jobId = str(item.jobId);
+        const createdBy = str(item.created_by);
+        if (jobId && createdBy) {
+          map[jobId] = createdBy;
+        }
+      }
+      lastKey = resp.LastEvaluatedKey;
+    } while (lastKey);
+  } catch (err) {
+    console.warn(`Failed to fetch job postings for createdBy (clinicId=${clinicId}):`, err);
+  }
+  return map;
+}
 
 async function fetchNegotiationsForApplication(applicationId: string): Promise<any[]> {
   try {
@@ -158,12 +190,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
+    // Fetch created_by for each job posting in this clinic
+    const createdByMap = clinicId ? await fetchCreatedByMapForClinic(clinicId) : {};
+
     const applicationsWithNegotiations = await Promise.all(
       filtered.map(async (app) => {
         const appObj = itemToObject(app);
         const appId = str(app.applicationId);
         const negotiations = await fetchNegotiationsForApplication(appId);
         appObj.negotiations = negotiations.map(itemToObject);
+        // Enrich with created_by from job posting
+        const jobId = str(app.jobId);
+        if (jobId && createdByMap[jobId]) {
+          appObj.created_by = createdByMap[jobId];
+        }
         return appObj;
       })
     );

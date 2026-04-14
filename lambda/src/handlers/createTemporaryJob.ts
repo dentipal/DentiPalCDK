@@ -96,13 +96,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     try {
         // 1. Authentication (Access Token)
         let userSub: string;
+        let userEmail: string = "";
         let userGroups: string[] = [];
-        
+
         try {
             const authHeader = event.headers?.Authorization || event.headers?.authorization;
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
             userGroups = userInfo.groups || [];
+            userEmail = userInfo.email || "";
         } catch (authError: any) {
             console.error("Auth Error:", authError.message);
             return json(401, { error: authError.message || "Invalid access token" });
@@ -344,6 +346,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 status: "active",
                 createdAt: timestamp,
                 updatedAt: timestamp,
+                created_by: userEmail || userSub,
             };
 
             // Optional fields
