@@ -694,6 +694,18 @@ export class DentiPalCDKStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY, // Change to RETAIN for prod
         });
 
+        // Pre sign-up Lambda trigger – auto-fills address & phone_number for Google sign-ups
+        const preSignUpFn = new lambda.Function(this, 'PreSignUpTrigger', {
+            functionName: 'DentiPal-PreSignUp',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/preSignUp.handler',
+            code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
+            timeout: cdk.Duration.seconds(10),
+            memorySize: 128,
+        });
+
+        userPool.addTrigger(cognito.UserPoolOperation.PRE_SIGN_UP, preSignUpFn);
+
         const client = userPool.addClient('ClinicAppClientV5', {
             authFlows: { userPassword: true, userSrp: true },
             preventUserExistenceErrors: true,
