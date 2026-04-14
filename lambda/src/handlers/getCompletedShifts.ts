@@ -64,7 +64,8 @@ function mapPostingItem(item: Record<string, AttributeValue>) {
     date: (item.date as any)?.S || null,
     start_date: (item.start_date as any)?.S || null,
 
-    hourlyRate: (item.hourly_rate as any)?.N ? parseFloat((item.hourly_rate as any).N) : null,
+    rate: (item.rate as any)?.N ? parseFloat((item.rate as any).N) : ((item.pay_type as any)?.S === "per_transaction" ? ((item.rate_per_transaction as any)?.N ? parseFloat((item.rate_per_transaction as any).N) : null) : (item.pay_type as any)?.S === "percentage_of_revenue" ? ((item.revenue_percentage as any)?.N ? parseFloat((item.revenue_percentage as any).N) : null) : ((item.hourly_rate as any)?.N ? parseFloat((item.hourly_rate as any).N) : null)),
+    payType: (item.pay_type as any)?.S || "per_hour",
     salaryMin: (item.salary_min as any)?.N ? parseFloat((item.salary_min as any).N) : null,
     salaryMax: (item.salary_max as any)?.N ? parseFloat((item.salary_max as any).N) : null,
 

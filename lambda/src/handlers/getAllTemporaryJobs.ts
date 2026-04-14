@@ -39,7 +39,8 @@ interface JobResponseItem {
     description: string;
     startTime: string;
     endTime: string;
-    hourlyRate: number | undefined;
+    rate: number | undefined;
+    payType: string;
     mealBreak: string | boolean | null;
     freeParkingAvailable: boolean;
     parkingType: string;
@@ -190,7 +191,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 description: str(job.job_description),
                 startTime: str(job.start_time),
                 endTime: str(job.end_time),
-                hourlyRate: num(job.hourly_rate) ?? 0, // Using ?? 0 to match original output structure if undefined
+                rate: job.rate?.N ? parseFloat(job.rate.N) : (job.pay_type?.S === "per_transaction" ? (job.rate_per_transaction?.N ? parseFloat(job.rate_per_transaction.N) : 0) : job.pay_type?.S === "percentage_of_revenue" ? (job.revenue_percentage?.N ? parseFloat(job.revenue_percentage.N) : 0) : (num(job.hourly_rate) ?? 0)),
+                payType: str(job.pay_type) || "per_hour",
                 mealBreak: mealBreakValue,
                 freeParkingAvailable: bool(job.freeParkingAvailable) ?? false, // Using ?? false
                 parkingType: str(job.parkingType),

@@ -87,7 +87,8 @@ const makeJobDetailsFetcher = () => {
         date: item.date?.S,
         clinicId: item.clinicId?.S,
 
-        hourlyRate: item.hourly_rate?.N ? parseFloat(item.hourly_rate.N) : null,
+        rate: item.rate?.N ? parseFloat(item.rate.N) : (item.pay_type?.S === "per_transaction" ? (item.rate_per_transaction?.N ? parseFloat(item.rate_per_transaction.N) : null) : item.pay_type?.S === "percentage_of_revenue" ? (item.revenue_percentage?.N ? parseFloat(item.revenue_percentage.N) : null) : (item.hourly_rate?.N ? parseFloat(item.hourly_rate.N) : null)),
+        payType: item.pay_type?.S || "per_hour",
         salaryMin: item.salary_min?.N ? parseFloat(item.salary_min.N) : null,
         salaryMax: item.salary_max?.N ? parseFloat(item.salary_max.N) : null,
 
@@ -187,7 +188,8 @@ export const handler = async (
         date: d.date || null,
         start_date: d.start_date || null,
 
-        hourlyRate: d.hourlyRate || null,
+        rate: d.rate || null,
+        payType: d.payType || "per_hour",
         salaryMin: d.salaryMin || null,
         salaryMax: d.salaryMax || null,
 

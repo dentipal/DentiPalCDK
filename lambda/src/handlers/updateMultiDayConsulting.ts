@@ -31,7 +31,8 @@ interface UpdateMultiDayConsultingBody {
     startTime?: string; // Maps to start_time
     endTime?: string; // Maps to end_time
     mealBreak?: boolean; // Maps to BOOL
-    hourlyRate?: number; // Maps to N
+    rate?: number; // Maps to N (unified: hourly rate, per-transaction rate, or revenue %)
+    payType?: string; // Maps to S
     totalDays?: number; // Maps to N
 }
 
@@ -157,7 +158,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         addUpdateField('startTime', 'start_time', 'S');
         addUpdateField('endTime', 'end_time', 'S');
         addUpdateField('mealBreak', 'meal_break', 'BOOL');
-        addUpdateField('hourlyRate', 'hourly_rate', 'N');
+        addUpdateField('rate', 'rate', 'N');
+        addUpdateField('payType', 'pay_type', 'S');
         addUpdateField('totalDays', 'total_days', 'N');
 
         // Check if any fields were provided other than the mandatory timestamp
@@ -209,7 +211,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     startTime: updatedJob?.start_time?.S || '',
                     endTime: updatedJob?.end_time?.S || '',
                     // Safely parse number types for the response payload
-                    hourlyRate: updatedJob?.hourly_rate?.N ? parseFloat(updatedJob.hourly_rate.N) : 0,
+                    rate: updatedJob?.rate?.N ? parseFloat(updatedJob.rate.N) : 0,
+                    payType: updatedJob?.pay_type?.S || 'per_hour',
                     totalDays: updatedJob?.total_days?.N ? parseInt(updatedJob.total_days.N, 10) : 0,
                     mealBreak: updatedJob?.meal_break?.BOOL || false,
                     status: updatedJob?.status?.S || 'active',

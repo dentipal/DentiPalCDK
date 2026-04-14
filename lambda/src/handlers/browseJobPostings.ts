@@ -42,7 +42,8 @@ interface JobPosting {
     updatedAt: string;
     jobTitle: string;
     jobDescription: string;
-    hourlyRate: number;
+    rate: number;
+    payType: string;
     salaryMin: number;
     salaryMax: number;
     date: string;
@@ -190,7 +191,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     updatedAt: item.updatedAt?.S || '',
                     jobTitle: item.job_title?.S || '',
                     jobDescription: item.job_description?.S || '',
-                    hourlyRate: item.hourly_rate?.N ? parseFloat(item.hourly_rate.N) : 0,
+                    rate: item.rate?.N ? parseFloat(item.rate.N) : (item.pay_type?.S === "per_transaction" ? (item.rate_per_transaction?.N ? parseFloat(item.rate_per_transaction.N) : 0) : item.pay_type?.S === "percentage_of_revenue" ? (item.revenue_percentage?.N ? parseFloat(item.revenue_percentage.N) : 0) : (item.hourly_rate?.N ? parseFloat(item.hourly_rate.N) : 0)),
+                    payType: item.pay_type?.S || "per_hour",
                     salaryMin: item.salary_min?.N ? parseFloat(item.salary_min.N) : 0,
                     salaryMax: item.salary_max?.N ? parseFloat(item.salary_max.N) : 0,
                     date: item.date?.S || '',

@@ -77,7 +77,7 @@ interface JobData {
     dates: string[];
     shift_speciality: string;
     hours_per_day: number;
-    hourly_rate: number;
+    rate?: number;
     total_days: number;
     start_time: string;
     end_time: string;
@@ -88,8 +88,6 @@ interface JobData {
     requirements?: string[];
     work_location_type?: string;
     pay_type?: string;
-    rate_per_transaction?: number;
-    revenue_percentage?: number;
 }
 
 interface ClinicAddress {
@@ -247,23 +245,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Numeric and range validation
         const hoursPerDay = Number(jobData.hours_per_day);
-        const hourlyRate = Number(jobData.hourly_rate || 0);
 
         if (!Number.isFinite(hoursPerDay) || hoursPerDay < 1 || hoursPerDay > 12) {
             return json(400, { error: "Bad Request", message: "Invalid hours per day (1-12)" });
         }
         // Validate compensation based on pay type
         const payType = jobData.pay_type || "per_hour";
+        if (jobData.rate === undefined || jobData.rate === null) {
+            return json(400, { error: "Bad Request", message: "Rate is required" });
+        }
+        const rate = Number(jobData.rate);
         if (payType === "per_hour") {
-            if (!Number.isFinite(hourlyRate) || hourlyRate < 10 || hourlyRate > 300) {
-                return json(400, { error: "Bad Request", message: "Invalid hourly rate ($10-$300)" });
+            if (!Number.isFinite(rate) || rate < 10 || rate > 300) {
+                return json(400, { error: "Bad Request", message: "Hourly rate must be between $10 and $300" });
             }
         } else if (payType === "per_transaction") {
-            if (jobData.rate_per_transaction === undefined || jobData.rate_per_transaction <= 0) {
-                return json(400, { error: "Bad Request", message: "Rate per transaction is required and must be positive" });
+            if (rate <= 0) {
+                return json(400, { error: "Bad Request", message: "Rate per transaction must be positive" });
             }
         } else if (payType === "percentage_of_revenue") {
-            if (jobData.revenue_percentage === undefined || jobData.revenue_percentage <= 0 || jobData.revenue_percentage > 100) {
+            if (rate <= 0 || rate > 100) {
                 return json(400, { error: "Bad Request", message: "Revenue percentage must be between 0 and 100" });
             }
         }
@@ -334,7 +335,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 shift_speciality: jobData.shift_speciality,
                 hours_per_day: hoursPerDay,
                 total_days: jobData.total_days,
-                hourly_rate: hourlyRate,
+                rate: rate,
+                pay_type: payType,
                 start_time: jobData.start_time,
                 end_time: jobData.end_time,
                 status: "active",
@@ -355,11 +357,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 clinicSoftware: profileData.clinicSoftware,
                 freeParkingAvailable: profileData.freeParkingAvailable,
                 parkingType: profileData.parkingType,
-                // Work location & pay
+                // Work location
                 ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
-                ...(jobData.pay_type && { pay_type: jobData.pay_type }),
-                ...(jobData.rate_per_transaction !== undefined && { rate_per_transaction: jobData.rate_per_transaction }),
-                ...(jobData.revenue_percentage !== undefined && { revenue_percentage: jobData.revenue_percentage }),
             };
 
             // Optional fields
@@ -386,10 +385,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Wait for all jobs
         await Promise.all(postJobsPromises);
 
-        // Calculate totals
-        const totalHours = Number(jobData.total_days) * hoursPerDay;
-        const totalPay = totalHours * hourlyRate;
-
         // 7. Response
         return json(201, {
             status: "success",
@@ -401,11 +396,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 dates: sortedDates,
                 totalDays: jobData.total_days,
                 hoursPerDay: hoursPerDay,
-                hourlyRate: hourlyRate,
+                payType: payType,
+                rate: rate,
                 mealBreak: mealBreakRaw || null,
                 mealBreakMinutes: mealBreakMinutes,
-                totalHours: totalHours,
-                totalCompensation: `$${totalPay.toLocaleString()}`,
+                totalHours: Number(jobData.total_days) * hoursPerDay,
                 startDate: sortedDates[0],
                 endDate: sortedDates[sortedDates.length - 1]
             },

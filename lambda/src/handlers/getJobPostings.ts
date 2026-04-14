@@ -105,7 +105,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (item.job_title?.S) job.jobTitle = item.job_title.S;
             if (item.job_description?.S) job.jobDescription = item.job_description.S;
 
-            if (item.hourly_rate?.N) job.hourlyRate = parseFloat(item.hourly_rate.N);
+            job.rate = item.rate?.N ? parseFloat(item.rate.N) : (item.pay_type?.S === "per_transaction" ? (item.rate_per_transaction?.N ? parseFloat(item.rate_per_transaction.N) : null) : item.pay_type?.S === "percentage_of_revenue" ? (item.revenue_percentage?.N ? parseFloat(item.revenue_percentage.N) : null) : (item.hourly_rate?.N ? parseFloat(item.hourly_rate.N) : null));
+            job.payType = item.pay_type?.S || "per_hour";
             if (item.salary_min?.N) job.salaryMin = parseFloat(item.salary_min.N);
             if (item.salary_max?.N) job.salaryMax = parseFloat(item.salary_max.N);
 

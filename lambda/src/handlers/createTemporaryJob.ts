@@ -25,7 +25,7 @@ interface MultiJobData {
     date: string; // ISO date string
     shift_speciality: string;
     hours: number;
-    hourly_rate: number;
+    rate?: number;
     start_time: string;
     end_time: string;
     meal_break?: string;
@@ -35,8 +35,6 @@ interface MultiJobData {
     assisted_hygiene?: boolean;
     work_location_type?: string;
     pay_type?: string;
-    rate_per_transaction?: number;
-    revenue_percentage?: number;
 }
 
 interface ClinicAddress {
@@ -230,23 +228,29 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
         // Validate compensation based on pay type
         const payType = jobData.pay_type || "per_hour";
+        if (jobData.rate === undefined || jobData.rate === null) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Rate is required",
+            });
+        }
         if (payType === "per_hour") {
-            if (jobData.hourly_rate === undefined || jobData.hourly_rate < 10 || jobData.hourly_rate > 200) {
+            if (jobData.rate < 10 || jobData.rate > 200) {
                 return json(400, {
                     error: "Bad Request",
-                    message: "Invalid hourly rate",
-                    details: { providedRate: `$${jobData.hourly_rate}`, validRange: "$10-$200" }
+                    message: "Hourly rate must be between $10 and $200",
+                    details: { providedRate: `$${jobData.rate}`, validRange: "$10-$200" }
                 });
             }
         } else if (payType === "per_transaction") {
-            if (jobData.rate_per_transaction === undefined || jobData.rate_per_transaction <= 0) {
+            if (jobData.rate <= 0) {
                 return json(400, {
                     error: "Bad Request",
-                    message: "Rate per transaction is required and must be positive",
+                    message: "Rate per transaction must be positive",
                 });
             }
         } else if (payType === "percentage_of_revenue") {
-            if (jobData.revenue_percentage === undefined || jobData.revenue_percentage <= 0 || jobData.revenue_percentage > 100) {
+            if (jobData.rate <= 0 || jobData.rate > 100) {
                 return json(400, {
                     error: "Bad Request",
                     message: "Revenue percentage must be between 0 and 100",
@@ -310,7 +314,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 date: jobData.date,
                 shift_speciality: jobData.shift_speciality,
                 hours: jobData.hours,
-                hourly_rate: jobData.hourly_rate,
+                rate: jobData.rate,
+                pay_type: payType,
                 start_time: jobData.start_time,
                 end_time: jobData.end_time,
                 meal_break: jobData.meal_break || "",
@@ -332,11 +337,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 practiceType: profileData.practiceType,
                 primaryPracticeArea: profileData.primaryPracticeArea,
                 
-                // Work location & pay
+                // Work location
                 ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
-                ...(jobData.pay_type && { pay_type: jobData.pay_type }),
-                ...(jobData.rate_per_transaction !== undefined && { rate_per_transaction: jobData.rate_per_transaction }),
-                ...(jobData.revenue_percentage !== undefined && { revenue_percentage: jobData.revenue_percentage }),
 
                 // Metadata
                 status: "active",
@@ -363,8 +365,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         await Promise.all(postJobsPromises);
 
-        const totalPay = jobData.hours * jobData.hourly_rate;
-
         // 6. Response
         return json(201, {
             status: "success",
@@ -375,8 +375,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 professionalRole: jobData.professional_role,
                 date: jobData.date,
                 hours: jobData.hours,
-                hourlyRate: jobData.hourly_rate,
-                totalPay: `$${totalPay.toFixed(2)}`
+                payType: payType,
+                rate: jobData.rate,
             },
             timestamp: timestamp
         });

@@ -31,13 +31,11 @@ interface JobData {
     requirements?: string[];
     work_location_type?: string;
     pay_type?: string;
-    rate_per_transaction?: number;
-    revenue_percentage?: number;
+    rate?: number;
 
     // Temporary job fields
     date?: string;
     hours?: number;
-    hourly_rate?: number;
 
     // Multi-day consulting fields
     dates?: string[];
@@ -95,8 +93,11 @@ async function getClinicProfileByUser(clinicId: string, userSub: string): Promis
 // --- Validation Functions ---
 
 const validateTemporaryJob = (jobData: JobData): string | null => {
-    if (!jobData.date || !jobData.hours || !jobData.hourly_rate) {
-        return "Temporary job requires: date, hours, hourly_rate";
+    if (!jobData.date || !jobData.hours) {
+        return "Temporary job requires: date, hours";
+    }
+    if (jobData.rate === undefined || jobData.rate === null) {
+        return "Rate is required";
     }
     const jobDate = new Date(jobData.date);
     if (isNaN(jobDate.getTime())) {
@@ -109,10 +110,15 @@ const validateTemporaryJob = (jobData: JobData): string | null => {
     if (jobData.hours < 1 || jobData.hours > 12) {
         return "Hours must be between 1 and 12";
     }
-    if (!jobData.pay_type || jobData.pay_type === "per_hour") {
-        if (jobData.hourly_rate < 10 || jobData.hourly_rate > 200) {
-            return "Hourly rate must be between $10 and $200";
-        }
+    const pt = jobData.pay_type || "per_hour";
+    if (pt === "per_hour" && (jobData.rate < 10 || jobData.rate > 200)) {
+        return "Hourly rate must be between $10 and $200";
+    }
+    if (pt === "per_transaction" && jobData.rate <= 0) {
+        return "Rate per transaction must be positive";
+    }
+    if (pt === "percentage_of_revenue" && (jobData.rate <= 0 || jobData.rate > 100)) {
+        return "Revenue percentage must be between 0 and 100";
     }
     return null;
 };
@@ -124,6 +130,9 @@ const validateMultiDayConsulting = (jobData: JobData): string | null => {
     }
     if (jobData.dates.length > 30) {
         return "Cannot schedule more than 30 days";
+    }
+    if (jobData.rate === undefined || jobData.rate === null) {
+        return "Rate is required";
     }
     // Validate all dates are in the future
     const now = new Date();
@@ -139,8 +148,15 @@ const validateMultiDayConsulting = (jobData: JobData): string | null => {
     if (jobData.hours_per_day && (jobData.hours_per_day < 1 || jobData.hours_per_day > 12)) {
         return "Hours per day must be between 1 and 12";
     }
-    if ((!jobData.pay_type || jobData.pay_type === "per_hour") && jobData.hourly_rate && (jobData.hourly_rate < 10 || jobData.hourly_rate > 300)) {
+    const pt = jobData.pay_type || "per_hour";
+    if (pt === "per_hour" && (jobData.rate < 10 || jobData.rate > 300)) {
         return "Hourly rate must be between $10 and $300";
+    }
+    if (pt === "per_transaction" && jobData.rate <= 0) {
+        return "Rate per transaction must be positive";
+    }
+    if (pt === "percentage_of_revenue" && (jobData.rate <= 0 || jobData.rate > 100)) {
+        return "Revenue percentage must be between 0 and 100";
     }
     return null;
 };
@@ -150,22 +166,12 @@ const validatePermanentJob = (jobData: JobData): string | null => {
     if (!jobData.employment_type) {
         return "Permanent job requires: employment_type";
     }
-    if (typeof jobData.salary_min !== 'number' || typeof jobData.salary_max !== 'number') {
-        return "Permanent job requires: salary_min and salary_max (numbers)";
+    // salary_min/salary_max are only required for hourly pay type
+    if (typeof jobData.salary_min === 'number' && typeof jobData.salary_max === 'number' && jobData.salary_max <= jobData.salary_min) {
+        return "Maximum salary must be greater than minimum salary";
     }
     if (!Array.isArray(jobData.benefits)) {
         return "Benefits must be an array";
-    }
-    
-    // ✅ FIX: Add salary range validation
-    if (jobData.salary_min < 20000 || jobData.salary_min > 500000) {
-        return "Minimum salary must be between $20,000 and $500,000";
-    }
-    if (jobData.salary_max < 20000 || jobData.salary_max > 500000) {
-        return "Maximum salary must be between $20,000 and $500,000";
-    }
-    if (jobData.salary_max <= jobData.salary_min) {
-        return "Maximum salary must be greater than minimum salary";
     }
     
     const validEmploymentTypes: string[] = ["full_time", "part_time"];
@@ -443,8 +449,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     // Work location & pay
                     ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
                     ...(jobData.pay_type && { pay_type: jobData.pay_type }),
-                    ...(jobData.rate_per_transaction !== undefined && { rate_per_transaction: jobData.rate_per_transaction }),
-                    ...(jobData.revenue_percentage !== undefined && { revenue_percentage: jobData.revenue_percentage }),
+                    ...(jobData.rate !== undefined && { rate: jobData.rate }),
                 };
 
                 // Optional common fields
@@ -458,7 +463,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 if (jobData.job_type === "temporary") {
                     if (jobData.date) item.date = jobData.date;
                     if (jobData.hours) item.hours = jobData.hours;
-                    if (jobData.hourly_rate) item.hourly_rate = jobData.hourly_rate;
                 }
 
                 if (jobData.job_type === "multi_day_consulting") {
@@ -467,7 +471,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                         item.total_days = jobData.dates.length;
                     }
                     if (jobData.hours_per_day) item.hours_per_day = jobData.hours_per_day;
-                    if (jobData.hourly_rate) item.hourly_rate = jobData.hourly_rate;
                     if (jobData.project_duration) item.project_duration = jobData.project_duration;
                 }
 

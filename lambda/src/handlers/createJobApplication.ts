@@ -224,7 +224,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             title: jobItem.job_title || `${jobItem.professional_role || 'Professional'} Position`,
             type: jobItem.job_type || 'unknown',
             role: jobItem.professional_role || '',
-            hourlyRate: jobItem.hourly_rate ? Number(jobItem.hourly_rate) : undefined,
+            rate: jobItem.rate ?? (jobItem.pay_type === "per_transaction" ? jobItem.rate_per_transaction : jobItem.pay_type === "percentage_of_revenue" ? jobItem.revenue_percentage : jobItem.hourly_rate) ?? 0,
+            payType: jobItem.pay_type || "per_hour",
             date: jobItem.date,
             dates: jobItem.dates
         };

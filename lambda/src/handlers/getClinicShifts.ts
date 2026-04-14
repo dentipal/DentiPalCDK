@@ -157,12 +157,10 @@ export const handler = async (
       end_time: s(it.end_time),
       dates: toStrArr(it.dates),
       dateRange: s(it.date_range) || s(it.dateRange),
-      hourlyRate: n(it.hourly_rate),
+      rate: it.rate ?? (it.pay_type === "per_transaction" ? it.rate_per_transaction : it.pay_type === "percentage_of_revenue" ? it.revenue_percentage : it.hourly_rate) ?? 0,
+      payType: s(it.pay_type) || "per_hour",
       salaryMin: n(it.salary_min),
       salaryMax: n(it.salary_max),
-      payType: s(it.pay_type),
-      ratePerTransaction: n(it.rate_per_transaction),
-      revenuePercentage: n(it.revenue_percentage),
       workLocationType: s(it.work_location_type),
       location: s(it.location) || s(it.addressLine1),
       fullAddress: s(it.fullAddress) || s(it.addressLine1),
@@ -208,7 +206,7 @@ export const handler = async (
 
       // Use accepted/negotiated rate if available, otherwise fall back to original job rate
       const acceptedRate = n(it.acceptedHourlyRate) ?? n(it.acceptedRate) ?? n(it.accepted_hourly_rate) ?? n(it.accepted_rate);
-      const finalRate = acceptedRate ?? job.hourlyRate ?? null;
+      const finalRate = acceptedRate ?? job.rate ?? null;
 
       return {
         ...job, // Bring in all job properties
@@ -225,7 +223,8 @@ export const handler = async (
         acceptedHourlyRate: acceptedRate,
 
         jobTitle: job.jobTitle || "No Title",
-        hourlyRate: finalRate,
+        rate: finalRate,
+        payType: job.payType || "per_hour",
       };
     });
 
@@ -427,11 +426,12 @@ export const handler = async (
             rateOffered: n(item.rateOffered),
             
             jobTitle: job.jobTitle || "No Title",
-            hourlyRate: job.hourlyRate || null,
+            rate: job.rate || null,
+            payType: job.payType || "per_hour",
           };
         });
       } else {
-        responseData = []; 
+        responseData = [];
       }
     }
 

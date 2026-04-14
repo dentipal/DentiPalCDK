@@ -52,7 +52,8 @@ interface InvitationItem {
   jobType?: string;
   jobLocation?: any;
   jobDescription?: string;
-  jobHourlyRate?: number | null;
+  jobRate?: number | null;
+  payType?: string;
   jobSalaryMin?: number | null;
   jobSalaryMax?: number | null;
   dates?: string[];
@@ -225,7 +226,8 @@ export const handler = async (
             invitation.jobType = job.job_type?.S || "Unknown";
             invitation.jobLocation = job.job_location?.S || "Unknown Location";
             invitation.jobDescription = job.job_description?.S || "No description available";
-            invitation.jobHourlyRate = job.hourly_rate?.N ? parseFloat(job.hourly_rate.N) : null;
+            invitation.jobRate = job.rate?.N ? parseFloat(job.rate.N) : (job.pay_type?.S === "per_transaction" ? (job.rate_per_transaction?.N ? parseFloat(job.rate_per_transaction.N) : null) : job.pay_type?.S === "percentage_of_revenue" ? (job.revenue_percentage?.N ? parseFloat(job.revenue_percentage.N) : null) : (job.hourly_rate?.N ? parseFloat(job.hourly_rate.N) : null));
+            invitation.payType = job.pay_type?.S || "per_hour";
             invitation.jobSalaryMin = job.salary_min?.N ? parseFloat(job.salary_min.N) : null;
             invitation.jobSalaryMax = job.salary_max?.N ? parseFloat(job.salary_max.N) : null;
             invitation.dates = job.dates?.SS || [];

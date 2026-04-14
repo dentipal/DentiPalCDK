@@ -39,8 +39,7 @@ interface BaseJobData {
     requirements?: string[];
     work_location_type?: string;
     pay_type?: string;
-    rate_per_transaction?: number;
-    revenue_percentage?: number;
+    rate?: number;
 }
 
 // 2. Specific Job Interfaces
@@ -48,7 +47,6 @@ interface TemporaryJobData extends BaseJobData {
     job_type: 'temporary';
     date: string; // ISO date string
     hours: number;
-    hourly_rate: number;
     meal_break?: boolean;
     start_time?: string;
     end_time?: string;
@@ -58,7 +56,6 @@ interface MultiDayConsultingJobData extends BaseJobData {
     job_type: 'multi_day_consulting';
     dates: string[]; // Array of ISO date strings
     hours_per_day: number;
-    hourly_rate: number;
     total_days: number;
     meal_break?: boolean;
     start_time?: string;
@@ -104,6 +101,9 @@ const validateTemporaryJob = (jobData: TemporaryJobData): string | null => {
     if (!jobData.date || !jobData.hours) {
         return "Temporary job requires: date, hours";
     }
+    if (jobData.rate === undefined || jobData.rate === null) {
+        return "Rate is required";
+    }
     const jobDate = new Date(jobData.date);
     if (isNaN(jobDate.getTime())) {
         return "Invalid date format. Use ISO date string.";
@@ -111,9 +111,15 @@ const validateTemporaryJob = (jobData: TemporaryJobData): string | null => {
     if (jobData.hours < 1 || jobData.hours > 12) {
         return "Hours must be between 1 and 12";
     }
-    const pt = (jobData as any).pay_type || "per_hour";
-    if (pt === "per_hour" && (jobData.hourly_rate < 10 || jobData.hourly_rate > 200)) {
+    const pt = jobData.pay_type || "per_hour";
+    if (pt === "per_hour" && (jobData.rate < 10 || jobData.rate > 200)) {
         return "Hourly rate must be between $10 and $200";
+    }
+    if (pt === "per_transaction" && jobData.rate <= 0) {
+        return "Rate per transaction must be positive";
+    }
+    if (pt === "percentage_of_revenue" && (jobData.rate <= 0 || jobData.rate > 100)) {
+        return "Revenue percentage must be between 0 and 100";
     }
     return null;
 };
@@ -142,13 +148,11 @@ const validateMultiDayConsulting = (jobData: MultiDayConsultingJobData): string 
 };
 
 const validatePermanentJob = (jobData: PermanentJobData): string | null => {
-    if (!jobData.employment_type || !jobData.salary_min || !jobData.salary_max || !jobData.benefits) {
-        return "Permanent job requires: employment_type, salary_min, salary_max, benefits";
+    if (!jobData.employment_type || !jobData.benefits) {
+        return "Permanent job requires: employment_type, benefits";
     }
-    if (jobData.salary_min < 20000 || jobData.salary_min > 500000) {
-        return "Minimum salary must be between $20,000 and $500,000";
-    }
-    if (jobData.salary_max < jobData.salary_min) {
+    const hasSalary = jobData.salary_min && jobData.salary_max;
+    if (hasSalary && jobData.salary_max < jobData.salary_min) {
         return "Maximum salary must be greater than minimum salary";
     }
     if (!Array.isArray(jobData.benefits)) {
@@ -330,8 +334,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             // Work location & pay
             ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
             ...(jobData.pay_type && { pay_type: jobData.pay_type }),
-            ...(jobData.rate_per_transaction !== undefined && { rate_per_transaction: jobData.rate_per_transaction }),
-            ...(jobData.revenue_percentage !== undefined && { revenue_percentage: jobData.revenue_percentage }),
+            ...(jobData.rate !== undefined && { rate: jobData.rate }),
         };
 
         // 9. Add job type specific fields
@@ -348,7 +351,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 item.date = tempJob.date;
                 item.hours = tempJob.hours;
                 item.meal_break = tempJob.meal_break ?? false;
-                item.hourly_rate = tempJob.hourly_rate;
                 if (tempJob.start_time) item.start_time = tempJob.start_time;
                 if (tempJob.end_time) item.end_time = tempJob.end_time;
                 if (tempJob.job_title) item.job_title = tempJob.job_title;
@@ -360,7 +362,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     ...responseData,
                     date: tempJob.date,
                     hours: tempJob.hours,
-                    hourly_rate: tempJob.hourly_rate
+                    rate: tempJob.rate
                 };
                 break;
 
@@ -370,7 +372,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 item.hours_per_day = consultingJob.hours_per_day;
                 item.total_days = consultingJob.total_days;
                 item.meal_break = consultingJob.meal_break ?? false;
-                item.hourly_rate = consultingJob.hourly_rate;
                 if (consultingJob.start_time) item.start_time = consultingJob.start_time;
                 if (consultingJob.end_time) item.end_time = consultingJob.end_time;
                 if (consultingJob.project_duration) item.project_duration = consultingJob.project_duration;
@@ -383,7 +384,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     ...responseData,
                     dates: consultingJob.dates,
                     total_days: consultingJob.total_days,
-                    hourly_rate: consultingJob.hourly_rate
+                    rate: consultingJob.rate
                 };
                 break;
 

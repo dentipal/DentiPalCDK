@@ -172,7 +172,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             jobResponse.date = job.date?.S || "";
             jobResponse.startTime = job.start_time?.S || "";
             jobResponse.endTime = job.end_time?.S || "";
-            jobResponse.hourlyRate = job.hourly_rate?.N ? parseFloat(job.hourly_rate.N) : 0;
+            jobResponse.rate = job.rate?.N ? parseFloat(job.rate.N) : (job.pay_type?.S === "per_transaction" ? (job.rate_per_transaction?.N ? parseFloat(job.rate_per_transaction.N) : 0) : job.pay_type?.S === "percentage_of_revenue" ? (job.revenue_percentage?.N ? parseFloat(job.revenue_percentage.N) : 0) : (job.hourly_rate?.N ? parseFloat(job.hourly_rate.N) : 0));
+            jobResponse.payType = job.pay_type?.S || "per_hour";
             jobResponse.mealBreak = job.meal_break?.BOOL || false;
             jobResponse.city = job.city?.S || "";
             jobResponse.state = job.state?.S || "";
@@ -182,7 +183,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             jobResponse.dates = job.dates?.SS || [];
             jobResponse.startTime = job.start_time?.S || "";
             jobResponse.endTime = job.end_time?.S || "";
-            jobResponse.hourlyRate = job.hourly_rate?.N ? parseFloat(job.hourly_rate.N) : 0;
+            jobResponse.rate = job.rate?.N ? parseFloat(job.rate.N) : (job.pay_type?.S === "per_transaction" ? (job.rate_per_transaction?.N ? parseFloat(job.rate_per_transaction.N) : 0) : job.pay_type?.S === "percentage_of_revenue" ? (job.revenue_percentage?.N ? parseFloat(job.revenue_percentage.N) : 0) : (job.hourly_rate?.N ? parseFloat(job.hourly_rate.N) : 0));
+            jobResponse.payType = job.pay_type?.S || "per_hour";
 
             // FIX: normalize before getting length so TypeScript cannot complain
             jobResponse.totalDays = (job.dates?.SS ?? []).length;

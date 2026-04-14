@@ -61,12 +61,13 @@ export const handler: APIGatewayProxyHandler = async (event): Promise<APIGateway
         TableName: process.env.JOB_INVITATIONS_TABLE!,
         IndexName: "ProfessionalIndex",
         KeyConditionExpression: "professionalUserSub = :userSub",
-        FilterExpression: "invitationStatus IN (:sent, :declined, :pending)",
+        // Show invitations that are still actionable (sent, pending, negotiating)
+        // Exclude accepted (those become applications) and declined (no longer actionable)
+        FilterExpression: "attribute_not_exists(invitationStatus) OR (invitationStatus <> :accepted AND invitationStatus <> :declined)",
         ExpressionAttributeValues: {
           ":userSub": { S: professionalUserSub },
-          ":sent": { S: "sent" },
+          ":accepted": { S: "accepted" },
           ":declined": { S: "declined" },
-          ":pending": { S: "pending" },
         },
         ExclusiveStartKey: lastKey,
       };
@@ -112,7 +113,7 @@ export const handler: APIGatewayProxyHandler = async (event): Promise<APIGateway
           invitation.jobTitle = job.job_title?.S || "Unknown Job Title";
           invitation.jobType = job.job_type?.S || "Unknown";
           invitation.jobDescription = job.job_description?.S || "No description available";
-          invitation.jobHourlyRate = job.hourly_rate?.N ? parseFloat(job.hourly_rate.N) : null;
+          invitation.jobRate = job.rate?.N ? parseFloat(job.rate.N) : (job.pay_type?.S === "per_transaction" ? (job.rate_per_transaction?.N ? parseFloat(job.rate_per_transaction.N) : null) : job.pay_type?.S === "percentage_of_revenue" ? (job.revenue_percentage?.N ? parseFloat(job.revenue_percentage.N) : null) : (job.hourly_rate?.N ? parseFloat(job.hourly_rate.N) : null));
           invitation.jobSalaryMin = job.salary_min?.N ? parseFloat(job.salary_min.N) : null;
           invitation.jobSalaryMax = job.salary_max?.N ? parseFloat(job.salary_max.N) : null;
           invitation.jobHours = job.hours?.N ? parseFloat(job.hours.N) : null;
@@ -150,9 +151,7 @@ export const handler: APIGatewayProxyHandler = async (event): Promise<APIGateway
           invitation.professionalRole = job.professional_role?.S || "Unknown Role";
           invitation.professionalRoles = toStrArr(job.professional_roles);
           invitation.workLocationType = job.work_location_type?.S || "";
-          invitation.payType = job.pay_type?.S || invitation.payType || "";
-          invitation.ratePerTransaction = job.rate_per_transaction?.N ? parseFloat(job.rate_per_transaction.N) : null;
-          invitation.revenuePercentage = job.revenue_percentage?.N ? parseFloat(job.revenue_percentage.N) : null;
+          invitation.payType = job.pay_type?.S || "per_hour";
           invitation.clinicSoftware = toStrArr(job.clinicSoftware);
           invitation.jobDescription = job.job_description?.S || invitation.jobDescription;
         }

@@ -171,7 +171,8 @@ export const handler = async (event: any) => {
             application.dates = toDates(job.dates);
             application.startTime = str(job.start_time);
             application.endTime = str(job.end_time);
-            application.hourlyRate = num(job.hourly_rate) ?? 0;
+            application.rate = job.rate?.N ? parseFloat(job.rate.N) : (job.pay_type?.S === "per_transaction" ? (job.rate_per_transaction?.N ? parseFloat(job.rate_per_transaction.N) : 0) : job.pay_type?.S === "percentage_of_revenue" ? (job.revenue_percentage?.N ? parseFloat(job.revenue_percentage.N) : 0) : (num(job.hourly_rate) ?? 0));
+            application.payType = str(job.pay_type) || "per_hour";
             application.mealBreak =
               str(job.meal_break) || (bool(job.meal_break) ?? null);
             application.freeParkingAvailable =
@@ -183,7 +184,6 @@ export const handler = async (event: any) => {
             application.hours = num(job.hours) ?? 0;
             application.jobBenefits = job.benefits?.SS || [];
             application.jobSalaryMin = num(job.salary_min) ?? null;
-            application.payType = str(job.work_schedule);
             application.jobSalaryMax = num(job.salary_max) ?? null;
 
             application.location = {
