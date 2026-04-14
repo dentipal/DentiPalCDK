@@ -32,9 +32,11 @@ interface NegotiationResponsePayload {
   // Permanent job counter offer fields
   counterSalaryMin?: number;
   counterSalaryMax?: number;
-  // Hourly job counter offer fields
+  // Temporary job counter offer fields (used for all pay types: per_hour, per_transaction, percentage_of_revenue)
   clinicCounterHourlyRate?: number;
   professionalCounterHourlyRate?: number;
+  // Pay type for temporary jobs (per_hour, per_transaction, percentage_of_revenue)
+  payType?: string;
 }
 
 // Define the expected Actor types
@@ -223,11 +225,19 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         if (body.counterSalaryMax < body.counterSalaryMin) {
           return json(400, { error: "counterSalaryMax must be greater than counterSalaryMin" });
         }
-      } else { // Hourly/Temporary jobs
+      } else { // Temporary jobs (per_hour, per_transaction, percentage_of_revenue)
         if (typeof body.clinicCounterHourlyRate !== "number" && typeof body.professionalCounterHourlyRate !== "number") {
           return json(400, {
-            error: "clinicCounterHourlyRate or professionalCounterHourlyRate is required for hourly job counter offers",
+            error: "clinicCounterHourlyRate or professionalCounterHourlyRate is required for temporary job counter offers",
           });
+        }
+        // Validate percentage_of_revenue is within 0-100
+        const effectivePayType = body.payType || strFrom(jobItem.pay_type) || strFrom(jobItem.payType) || "per_hour";
+        if (effectivePayType === "percentage_of_revenue") {
+          const counterRate = body.clinicCounterHourlyRate ?? body.professionalCounterHourlyRate;
+          if (counterRate != null && (counterRate <= 0 || counterRate > 100)) {
+            return json(400, { error: "Revenue percentage must be between 0 and 100" });
+          }
         }
       }
     }
@@ -263,7 +273,19 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     updateExpr +=
       ", #actorResponse = :actorResponse, #actorMessage = :actorMessage, #actorRespondedAt = :actorRespondedAt";
 
-    // Attach hourly counter rates to the negotiation item
+    // Attach payType to the negotiation item (from request body or job posting)
+    const payType: string | null =
+      body.payType ||
+      strFrom(jobItem.pay_type) || strFrom(jobItem.payType) ||
+      null;
+
+    if (payType) {
+      attrNames["#payType"] = "payType";
+      attrValues[":payType"] = { S: payType };
+      updateExpr += ", #payType = :payType";
+    }
+
+    // Attach counter rates to the negotiation item
     if (typeof body.clinicCounterHourlyRate === "number") {
       attrNames["#clinicCounterHourlyRate"] = "clinicCounterHourlyRate";
       attrValues[":clinicCounterHourlyRate"] = { N: String(body.clinicCounterHourlyRate) };
@@ -285,7 +307,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     }
 
 
-    // Determine final accepted hourly rate (for hourly jobs only)
+    // Determine final accepted rate (for temporary jobs - all pay types)
     let finalAcceptedHourlyRate: number | null = null;
 
     if (isAccepted && (jobType || "").toLowerCase() !== "permanent") {
@@ -295,7 +317,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
       if (actor === "professional") {
         // Professional accepts -> agree to clinic's counter (if present)
         if (clinicCounter == null) {
-          return json(400, { error: "Cannot accept: no clinicCounterHourlyRate to accept." });
+          return json(400, { error: "Cannot accept: no clinic counter rate to accept." });
         }
         finalAcceptedHourlyRate = clinicCounter;
       } else { // actor === "clinic"
@@ -313,11 +335,16 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         }
       }
 
-      // Write a canonical agreed rate to negotiation row
+      // Write a canonical agreed rate to negotiation row (keep agreedHourlyRate for backwards compatibility)
       if (finalAcceptedHourlyRate != null) {
         attrNames["#agreedHourlyRate"] = "agreedHourlyRate";
         attrValues[":agreedHourlyRate"] = { N: String(finalAcceptedHourlyRate) };
         updateExpr += ", #agreedHourlyRate = :agreedHourlyRate";
+
+        // Also store as agreedRate for pay-type-agnostic reads
+        attrNames["#agreedRate"] = "agreedRate";
+        attrValues[":agreedRate"] = { N: String(finalAcceptedHourlyRate) };
+        updateExpr += ", #agreedRate = :agreedRate";
       }
     }
 
@@ -419,6 +446,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
       actor,
       response: body.response,
       applicationStatus,
+      payType: payType ?? undefined,
       acceptedHourlyRate: finalAcceptedHourlyRate ?? undefined,
       respondedAt: timestamp,
       nextSteps: isAccepted

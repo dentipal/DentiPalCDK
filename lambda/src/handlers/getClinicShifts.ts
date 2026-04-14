@@ -157,7 +157,12 @@ export const handler = async (
       end_time: s(it.end_time),
       dates: toStrArr(it.dates),
       dateRange: s(it.date_range) || s(it.dateRange),
-      rate: it.rate ?? (it.pay_type === "per_transaction" ? it.rate_per_transaction : it.pay_type === "percentage_of_revenue" ? it.revenue_percentage : it.hourly_rate) ?? 0,
+      rate: (() => {
+        const pt = s(it.pay_type);
+        if (pt === "per_transaction") return n(it.rate_per_transaction) ?? n(it.rate) ?? 0;
+        if (pt === "percentage_of_revenue") return n(it.revenue_percentage) ?? n(it.rate) ?? 0;
+        return n(it.rate) ?? n(it.hourly_rate) ?? 0;
+      })(),
       payType: s(it.pay_type) || "per_hour",
       salaryMin: n(it.salary_min),
       salaryMax: n(it.salary_max),
