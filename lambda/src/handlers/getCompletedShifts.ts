@@ -75,6 +75,7 @@ function mapPostingItem(item: Record<string, AttributeValue>) {
     // Completion details (if available)
     completedAt: (item.completedAt as any)?.S || null,
     completionNotes: (item.completionNotes as any)?.S || null,
+    created_by: (item.created_by as any)?.S || "",
   };
 }
 

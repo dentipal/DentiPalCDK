@@ -272,6 +272,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 status: job.status?.S || 'active',
                 createdAt: job.created_at?.S || '',
                 updatedAt: job.updated_at?.S || '',
+                created_by: job.created_by?.S || '',
             };
         });
 

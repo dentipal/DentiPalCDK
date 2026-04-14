@@ -247,7 +247,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 
                 startDate, // ISO if parsable, else original string or ""
                 createdAt: job.createdAt || "",
-                updatedAt: job.updatedAt || ""
+                updatedAt: job.updatedAt || "",
+                created_by: job.created_by || ""
             };
 
             console.log(`🧩 Formatted job [${idx + 1}]:`, formatted);

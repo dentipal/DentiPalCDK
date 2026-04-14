@@ -304,6 +304,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 status: jobStatus,
                 createdAt: job.created_at?.S || '',
                 updatedAt: job.updated_at?.S || '',
+                created_by: job.created_by?.S || '',
                 applicationCount: 0, // Hardcoded as 0, matching the original logic
                 applicationsEnabled: jobStatus === 'active'
             };

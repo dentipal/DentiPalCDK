@@ -101,6 +101,7 @@ export const handler = async (
 
       createdAt: job.createdAt?.S || "",
       updatedAt: job.updatedAt?.S || "",
+      created_by: job.created_by?.S || "",
     };
 
     return json(200, {

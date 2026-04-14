@@ -216,6 +216,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         userSub = userInfo.sub;
         userGroups = userInfo.groups || [];
+        const userEmail = userInfo.email || "";
         console.log('Extracted userSub:', userSub);
         console.log('Extracted userGroups:', JSON.stringify(userGroups));
         
@@ -430,7 +431,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     status: "active",
                     createdAt: timestamp,
                     updatedAt: timestamp,
-                    
+                    created_by: userEmail || userSub,
+
                     // Address fields
                     addressLine1: addressLine1,
                     addressLine2: addressLine2,
