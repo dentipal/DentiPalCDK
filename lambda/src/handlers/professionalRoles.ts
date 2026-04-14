@@ -59,6 +59,83 @@ export const PROFESSIONAL_ROLES: ProfessionalRole[] = [
         dbValue: "treatment_coordinator_front",
         description: "Front desk professional focused on treatment coordination",
     },
+    {
+        id: 8,
+        name: "Dentist",
+        cognitoGroup: "Dentist",
+        dbValue: "dentist",
+        description: "Licensed dentist providing comprehensive dental care",
+    },
+    {
+        id: 9,
+        name: "Hygienist",
+        cognitoGroup: "Hygienist",
+        dbValue: "hygienist",
+        description: "Licensed hygienist providing preventive and periodontal care",
+    },
+    {
+        id: 10,
+        name: "DH + TC + PC",
+        cognitoGroup: "DHComboRole",
+        dbValue: "dh_tc_pc",
+        description: "Dental Hygienist combined with Treatment Coordinator and Patient Coordinator duties",
+    },
+    {
+        id: 11,
+        name: "Billing Coordinator",
+        cognitoGroup: "BillingCoordinator",
+        dbValue: "billing_coordinator",
+        description: "Professional managing dental billing and financial coordination",
+    },
+    {
+        id: 12,
+        name: "Insurance Verification",
+        cognitoGroup: "InsuranceVerification",
+        dbValue: "insurance_verification",
+        description: "Professional handling insurance eligibility and benefits verification",
+    },
+    {
+        id: 13,
+        name: "Payment Posting",
+        cognitoGroup: "PaymentPosting",
+        dbValue: "payment_posting",
+        description: "Professional responsible for posting payments and adjustments",
+    },
+    {
+        id: 14,
+        name: "Claims Sending",
+        cognitoGroup: "ClaimsSending",
+        dbValue: "claims_sending",
+        description: "Professional handling submission of insurance claims",
+    },
+    {
+        id: 15,
+        name: "Claims Resolution",
+        cognitoGroup: "ClaimsResolution",
+        dbValue: "claims_resolution",
+        description: "Professional managing denied or unpaid insurance claims",
+    },
+    {
+        id: 16,
+        name: "HIPAA Trainee",
+        cognitoGroup: "HIPAATrainee",
+        dbValue: "hipaa_trainee",
+        description: "Trainee undergoing HIPAA compliance certification",
+    },
+    {
+        id: 17,
+        name: "OSHA Trainee",
+        cognitoGroup: "OSHATrainee",
+        dbValue: "osha_trainee",
+        description: "Trainee undergoing OSHA safety compliance certification",
+    },
+    {
+        id: 18,
+        name: "Accounting",
+        cognitoGroup: "Accounting",
+        dbValue: "accounting",
+        description: "Professional managing financial accounting and bookkeeping",
+    },
 ];
 
 // Helper functions for role management
@@ -95,9 +172,18 @@ export const VALID_COGNITO_GROUPS: string[] = PROFESSIONAL_ROLES.map((role) => r
 
 // Role categories for grouping similar roles
 export const ROLE_CATEGORIES = {
-    CLINICAL: ['associate_dentist', 'dental_hygienist', 'dental_assistant', 'expanded_functions_da'] as string[],
+    DOCTOR: ['dentist', 'associate_dentist'] as string[],
+    CLINICAL: ['dental_hygienist', 'hygienist', 'dental_assistant', 'expanded_functions_da'] as string[],
     FRONT_OFFICE: ['patient_coordinator_front', 'treatment_coordinator_front'] as string[],
-    DUAL_ROLE: ['dual_role_front_da'] as string[],
+    DUAL_ROLE: ['dual_role_front_da', 'dh_tc_pc'] as string[],
+    BILLING: ['billing_coordinator', 'insurance_verification', 'payment_posting', 'claims_sending', 'claims_resolution'] as string[],
+    COMPLIANCE: ['hipaa_trainee', 'osha_trainee'] as string[],
+    ACCOUNTING: ['accounting'] as string[],
+};
+
+// Check if role is a doctor role (used for pay type validation)
+export const isDoctorRole = (roleDbValue: string): boolean => {
+    return ROLE_CATEGORIES.DOCTOR.includes(roleDbValue);
 };
 
 // Check if role is clinical (needs clinical certifications)
@@ -113,4 +199,14 @@ export const isFrontOfficeRole = (roleDbValue: string): boolean => {
 // Check if role is dual function
 export const isDualRole = (roleDbValue: string): boolean => {
     return ROLE_CATEGORIES.DUAL_ROLE.includes(roleDbValue);
+};
+
+// Check if role is billing/revenue cycle
+export const isBillingRole = (roleDbValue: string): boolean => {
+    return ROLE_CATEGORIES.BILLING.includes(roleDbValue);
+};
+
+// Check if role is compliance/trainee
+export const isComplianceRole = (roleDbValue: string): boolean => {
+    return ROLE_CATEGORIES.COMPLIANCE.includes(roleDbValue);
 };

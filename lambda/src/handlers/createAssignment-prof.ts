@@ -39,7 +39,8 @@ interface JobInfo {
     title: string;
     type: string;
     role: string;
-    hourlyRate: number | undefined;
+    rate: number | undefined;
+    payType: string;
     date?: string;
     dates?: string[];
 }
@@ -268,7 +269,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 title: jobDetails.job_title?.S || `${jobDetails.professional_role?.S || 'Professional'} Position`,
                 type: jobDetails.job_type?.S || 'unknown',
                 role: jobDetails.professional_role?.S || '',
-                hourlyRate: jobDetails.hourly_rate?.N ? parseFloat(jobDetails.hourly_rate.N) : undefined,
+                rate: jobDetails.rate?.N ? parseFloat(jobDetails.rate.N) : (jobDetails.pay_type?.S === "per_transaction" ? (jobDetails.rate_per_transaction?.N ? parseFloat(jobDetails.rate_per_transaction.N) : undefined) : jobDetails.pay_type?.S === "percentage_of_revenue" ? (jobDetails.revenue_percentage?.N ? parseFloat(jobDetails.revenue_percentage.N) : undefined) : (jobDetails.hourly_rate?.N ? parseFloat(jobDetails.hourly_rate.N) : undefined)),
+                payType: jobDetails.pay_type?.S || "per_hour",
                 date: jobDetails.date?.S,
                 dates: jobDetails.dates?.SS,
             };

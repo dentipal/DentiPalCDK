@@ -160,12 +160,12 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         };
 
         const professionalsResult = await dynamodb.send(new BatchGetItemCommand({ RequestItems: requestItems }));
-        
+
         const existingProfessionals: ProfessionalItem[] = (professionalsResult.Responses?.[PROFESSIONAL_PROFILES_TABLE] as ProfessionalItem[]) || [];
-        
+
         const existingUserSubs: string[] = existingProfessionals
             .map((p) => p.userSub?.S)
-            .filter((sub): sub is string => !!sub); 
+            .filter((sub): sub is string => !!sub);
 
         const invalidUserSubs: string[] = professionalUserSubs.filter((sub) => !existingUserSubs.includes(sub));
 
@@ -177,30 +177,40 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
             };
         }
 
-        // 6. Role Compatibility Check — skip incompatible, don't block the whole batch
-        const compatibleUserSubs = new Set(
-            existingProfessionals
-                .filter(
-                    (p) =>
-                        p.role?.S === jobRole ||
-                        jobRole === "dual_role_front_da" ||
-                        p.role?.S === "dual_role_front_da"
-                )
-                .map((p) => p.userSub?.S)
-                .filter((s): s is string => !!s)
+        // 6. Check for existing invitations to prevent duplicates
+        // DynamoDB table PK=jobId, SK=professionalUserSub — so we can use GetItem
+        const existingInvitationChecks = await Promise.all(
+            professionalUserSubs.map(async (sub) => {
+                try {
+                    const resp = await dynamodb.send(new QueryCommand({
+                        TableName: JOB_INVITATIONS_TABLE,
+                        KeyConditionExpression: "jobId = :jid AND professionalUserSub = :psub",
+                        ExpressionAttributeValues: {
+                            ":jid": { S: jobId },
+                            ":psub": { S: sub },
+                        },
+                        Limit: 1,
+                    }));
+                    return { sub, alreadyInvited: !!(resp.Items && resp.Items.length > 0) };
+                } catch {
+                    return { sub, alreadyInvited: false };
+                }
+            })
+        );
+        const alreadyInvitedSubs = new Set(
+            existingInvitationChecks.filter((c) => c.alreadyInvited).map((c) => c.sub)
         );
 
-        // 7. Send Invitations
+        // 7. Send Invitations (no role filtering — all roles are allowed)
         const timestamp: string = new Date().toISOString();
         const invitationResults: InvitationResult[] = [];
         const errors: InvitationError[] = [];
 
         for (const profSub of professionalUserSubs) {
-            if (!compatibleUserSubs.has(profSub)) {
-                const prof = existingProfessionals.find((p) => p.userSub?.S === profSub);
+            if (alreadyInvitedSubs.has(profSub)) {
                 errors.push({
                     professionalUserSub: profSub,
-                    error: `Role mismatch: professional role '${prof?.role?.S || "unknown"}' does not match job role '${jobRole}'`,
+                    error: "Professional has already been invited to this job",
                 });
                 continue;
             }

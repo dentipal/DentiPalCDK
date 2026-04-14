@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dyn
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, hasClinicAccess, isRoot } from "./utils"; 
-import { VALID_ROLE_VALUES } from "./professionalRoles"; 
+import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Configuration ---
@@ -22,24 +22,27 @@ interface JobData {
     clinicIds: string[];
     job_type: "temporary" | "multi_day_consulting" | "permanent";
     professional_role: string;
+    professional_roles?: string[];
     shift_speciality: string;
-    
+
     // Optional common fields
     job_title?: string;
     job_description?: string;
     requirements?: string[];
-    
+    work_location_type?: string;
+    pay_type?: string;
+    rate?: number;
+
     // Temporary job fields
     date?: string;
     hours?: number;
-    hourly_rate?: number;
-    
+
     // Multi-day consulting fields
     dates?: string[];
     total_days?: number;
     hours_per_day?: number;
     project_duration?: string;
-    
+
     // Permanent job fields
     employment_type?: "full_time" | "part_time";
     salary_min?: number;
@@ -90,8 +93,11 @@ async function getClinicProfileByUser(clinicId: string, userSub: string): Promis
 // --- Validation Functions ---
 
 const validateTemporaryJob = (jobData: JobData): string | null => {
-    if (!jobData.date || !jobData.hours || !jobData.hourly_rate) {
-        return "Temporary job requires: date, hours, hourly_rate";
+    if (!jobData.date || !jobData.hours) {
+        return "Temporary job requires: date, hours";
+    }
+    if (jobData.rate === undefined || jobData.rate === null) {
+        return "Rate is required";
     }
     const jobDate = new Date(jobData.date);
     if (isNaN(jobDate.getTime())) {
@@ -104,8 +110,15 @@ const validateTemporaryJob = (jobData: JobData): string | null => {
     if (jobData.hours < 1 || jobData.hours > 12) {
         return "Hours must be between 1 and 12";
     }
-    if (jobData.hourly_rate < 10 || jobData.hourly_rate > 200) {
+    const pt = jobData.pay_type || "per_hour";
+    if (pt === "per_hour" && (jobData.rate < 10 || jobData.rate > 200)) {
         return "Hourly rate must be between $10 and $200";
+    }
+    if (pt === "per_transaction" && jobData.rate <= 0) {
+        return "Rate per transaction must be positive";
+    }
+    if (pt === "percentage_of_revenue" && (jobData.rate <= 0 || jobData.rate > 100)) {
+        return "Revenue percentage must be between 0 and 100";
     }
     return null;
 };
@@ -117,6 +130,9 @@ const validateMultiDayConsulting = (jobData: JobData): string | null => {
     }
     if (jobData.dates.length > 30) {
         return "Cannot schedule more than 30 days";
+    }
+    if (jobData.rate === undefined || jobData.rate === null) {
+        return "Rate is required";
     }
     // Validate all dates are in the future
     const now = new Date();
@@ -132,8 +148,15 @@ const validateMultiDayConsulting = (jobData: JobData): string | null => {
     if (jobData.hours_per_day && (jobData.hours_per_day < 1 || jobData.hours_per_day > 12)) {
         return "Hours per day must be between 1 and 12";
     }
-    if (jobData.hourly_rate && (jobData.hourly_rate < 10 || jobData.hourly_rate > 300)) {
+    const pt = jobData.pay_type || "per_hour";
+    if (pt === "per_hour" && (jobData.rate < 10 || jobData.rate > 300)) {
         return "Hourly rate must be between $10 and $300";
+    }
+    if (pt === "per_transaction" && jobData.rate <= 0) {
+        return "Rate per transaction must be positive";
+    }
+    if (pt === "percentage_of_revenue" && (jobData.rate <= 0 || jobData.rate > 100)) {
+        return "Revenue percentage must be between 0 and 100";
     }
     return null;
 };
@@ -143,22 +166,12 @@ const validatePermanentJob = (jobData: JobData): string | null => {
     if (!jobData.employment_type) {
         return "Permanent job requires: employment_type";
     }
-    if (typeof jobData.salary_min !== 'number' || typeof jobData.salary_max !== 'number') {
-        return "Permanent job requires: salary_min and salary_max (numbers)";
+    // salary_min/salary_max are only required for hourly pay type
+    if (typeof jobData.salary_min === 'number' && typeof jobData.salary_max === 'number' && jobData.salary_max <= jobData.salary_min) {
+        return "Maximum salary must be greater than minimum salary";
     }
     if (!Array.isArray(jobData.benefits)) {
         return "Benefits must be an array";
-    }
-    
-    // ✅ FIX: Add salary range validation
-    if (jobData.salary_min < 20000 || jobData.salary_min > 500000) {
-        return "Minimum salary must be between $20,000 and $500,000";
-    }
-    if (jobData.salary_max < 20000 || jobData.salary_max > 500000) {
-        return "Maximum salary must be between $20,000 and $500,000";
-    }
-    if (jobData.salary_max <= jobData.salary_min) {
-        return "Maximum salary must be greater than minimum salary";
     }
     
     const validEmploymentTypes: string[] = ["full_time", "part_time"];
@@ -263,15 +276,53 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        // 6. Validate Professional Role
-        if (!VALID_ROLE_VALUES.includes(jobData.professional_role)) {
+        // 6. Support multi-role: accept professional_roles (array) or professional_role (string)
+        const professionalRoles: string[] = Array.isArray(jobData.professional_roles)
+            ? jobData.professional_roles
+            : jobData.professional_role ? [jobData.professional_role] : [];
+
+        if (professionalRoles.length === 0) {
             return json(400, {
                 error: "Bad Request",
-                message: "Invalid professional role",
-                details: { 
-                    validRoles: VALID_ROLE_VALUES, 
-                    providedRole: jobData.professional_role 
-                }
+                message: "At least one professional role is required",
+                details: { validRoles: VALID_ROLE_VALUES }
+            });
+        }
+
+        const invalidRoles = professionalRoles.filter(r => !VALID_ROLE_VALUES.includes(r));
+        if (invalidRoles.length > 0) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid professional role(s)",
+                details: { validRoles: VALID_ROLE_VALUES, invalidRoles }
+            });
+        }
+
+        // Validate work location type if provided
+        const VALID_WORK_LOCATIONS = ['onsite', 'us_remote', 'global_remote'];
+        if (jobData.work_location_type && !VALID_WORK_LOCATIONS.includes(jobData.work_location_type)) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid work location type",
+                details: { validOptions: VALID_WORK_LOCATIONS, provided: jobData.work_location_type }
+            });
+        }
+
+        // Validate pay type if provided
+        const VALID_PAY_TYPES = ['per_hour', 'per_transaction', 'percentage_of_revenue'];
+        if (jobData.pay_type && !VALID_PAY_TYPES.includes(jobData.pay_type)) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid pay type",
+                details: { validOptions: VALID_PAY_TYPES, provided: jobData.pay_type }
+            });
+        }
+
+        // per_transaction is not allowed for doctor roles
+        if (jobData.pay_type === 'per_transaction' && professionalRoles.some(r => isDoctorRole(r))) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Per-transaction pay type is not available for doctor roles",
             });
         }
 
@@ -373,7 +424,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     clinicUserSub: userSub,
                     jobId: jobId,
                     job_type: jobData.job_type,
-                    professional_role: jobData.professional_role,
+                    professional_role: professionalRoles[0],
+                    professional_roles: professionalRoles,
                     shift_speciality: jobData.shift_speciality,
                     status: "active",
                     createdAt: timestamp,
@@ -393,7 +445,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     freeParkingAvailable: profileData.freeParkingAvailable,
                     parkingType: profileData.parkingType,
                     practiceType: profileData.practiceType,
-                    primaryPracticeArea: profileData.primaryPracticeArea
+                    primaryPracticeArea: profileData.primaryPracticeArea,
+                    // Work location & pay
+                    ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
+                    ...(jobData.pay_type && { pay_type: jobData.pay_type }),
+                    ...(jobData.rate !== undefined && { rate: jobData.rate }),
                 };
 
                 // Optional common fields
@@ -407,7 +463,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 if (jobData.job_type === "temporary") {
                     if (jobData.date) item.date = jobData.date;
                     if (jobData.hours) item.hours = jobData.hours;
-                    if (jobData.hourly_rate) item.hourly_rate = jobData.hourly_rate;
                 }
 
                 if (jobData.job_type === "multi_day_consulting") {
@@ -416,7 +471,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                         item.total_days = jobData.dates.length;
                     }
                     if (jobData.hours_per_day) item.hours_per_day = jobData.hours_per_day;
-                    if (jobData.hourly_rate) item.hourly_rate = jobData.hourly_rate;
                     if (jobData.project_duration) item.project_duration = jobData.project_duration;
                 }
 

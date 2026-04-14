@@ -62,7 +62,8 @@ interface EnrichedNegotiation {
         jobTitle: string;
         jobType: string;
         professionalRole: string;
-        hourlyRate: number | null;
+        rate: number | null;
+        payType: string;
         hoursPerDay: number | null;
         location: {
             city: string;
@@ -224,7 +225,8 @@ async function enrichWithClinicAndJob(neg: DynamoDBNegotiationItem): Promise<Enr
                     jobTitle: job.job_title?.S || `${job.professional_role?.S || "Professional"} Position`,
                     jobType: job.job_type?.S || "",
                     professionalRole: job.professional_role?.S || "",
-                    hourlyRate: job.hourly_rate?.N ? parseFloat(job.hourly_rate.N) : null,
+                    rate: job.rate?.N ? parseFloat(job.rate.N) : (job.pay_type?.S === "per_transaction" ? (job.rate_per_transaction?.N ? parseFloat(job.rate_per_transaction.N) : null) : job.pay_type?.S === "percentage_of_revenue" ? (job.revenue_percentage?.N ? parseFloat(job.revenue_percentage.N) : null) : (job.hourly_rate?.N ? parseFloat(job.hourly_rate.N) : null)),
+                    payType: job.pay_type?.S || "per_hour",
                     hoursPerDay: job.hours_per_day?.N ? parseFloat(job.hours_per_day.N) : null,
                     location: {
                         city: job.city?.S || "",

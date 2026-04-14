@@ -80,7 +80,8 @@ interface JobResponseItem {
     startTime: string;
     endTime: string;
     SoftwareRequired: string;
-    hourlyRate: number;
+    rate: number;
+    payType: string;
     totalDays: number;
     mealBreak: string | boolean | null;
     shiftSpeciality: string;
@@ -244,7 +245,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 startTime: job.start_time?.S || '',
                 endTime: job.end_time?.S || '',
                 SoftwareRequired: job.clinicSoftware?.S || "",
-                hourlyRate: parseNum(job.hourly_rate),
+                rate: job.rate?.N ? parseFloat(job.rate.N) : (job.pay_type?.S === "per_transaction" ? (job.rate_per_transaction?.N ? parseFloat(job.rate_per_transaction.N) : 0) : job.pay_type?.S === "percentage_of_revenue" ? (job.revenue_percentage?.N ? parseFloat(job.revenue_percentage.N) : 0) : parseNum(job.hourly_rate)),
+                payType: job.pay_type?.S || "per_hour",
                 totalDays: toStrArr(job.dates).length,
                 mealBreak: mealBreakValue,
                 shiftSpeciality: job.shift_speciality?.S || "",

@@ -35,7 +35,8 @@ interface UpdateTemporaryJobBody {
     date?: string; // Maps to date
     startTime?: string; // Maps to start_time
     endTime?: string; // Maps to end_time
-    hourlyRate?: number; // Maps to N
+    rate?: number; // Maps to N (unified: hourly rate, per-transaction rate, or revenue %)
+    payType?: string; // Maps to S
     mealBreak?: boolean; // Maps to BOOL
     [key: string]: any; 
 }
@@ -184,7 +185,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         addUpdateField('date', 'date', 'S');
         addUpdateField('startTime', 'start_time', 'S');
         addUpdateField('endTime', 'end_time', 'S');
-        addUpdateField('hourlyRate', 'hourly_rate', 'N');
+        addUpdateField('rate', 'rate', 'N');
+        addUpdateField('payType', 'pay_type', 'S');
         addUpdateField('mealBreak', 'meal_break', 'BOOL');
 
         // Check if any fields were provided
@@ -230,7 +232,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 date: updatedJob?.date?.S || '',
                 startTime: updatedJob?.start_time?.S || '',
                 endTime: updatedJob?.end_time?.S || '',
-                hourlyRate: updatedJob?.hourly_rate?.N ? parseFloat(updatedJob.hourly_rate.N) : 0,
+                rate: updatedJob?.rate?.N ? parseFloat(updatedJob.rate.N) : 0,
+                payType: updatedJob?.pay_type?.S || 'per_hour',
                 mealBreak: updatedJob?.meal_break?.BOOL || false,
                 status: updatedJob?.status?.S || 'active',
                 updatedAt: updatedTimestamp

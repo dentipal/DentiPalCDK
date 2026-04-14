@@ -33,9 +33,10 @@ interface UpdateJobPostingBody {
     meal_break?: boolean;
     
     // Temporary/Multi-Day fields
-    date?: string; 
-    hours?: number; 
-    hourly_rate?: number; 
+    date?: string;
+    hours?: number;
+    rate?: number;
+    pay_type?: string;
     
     // Multi-Day fields
     dates?: string[];
@@ -209,8 +210,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (updateData.hours && (updateData.hours < 1 || updateData.hours > 12)) {
                 return json(400, { error: 'Hours must be between 1 and 12' });
             }
-            if (updateData.hourly_rate && (updateData.hourly_rate < 10 || updateData.hourly_rate > 200)) {
-                return json(400, { error: 'Hourly rate must be between $10 and $200' });
+            if (updateData.rate !== undefined) {
+                const pt = updateData.pay_type || existingItem.pay_type || 'per_hour';
+                if (pt === 'per_hour' && (updateData.rate < 10 || updateData.rate > 200)) {
+                    return json(400, { error: 'Hourly rate must be between $10 and $200' });
+                }
+                if (pt === 'per_transaction' && updateData.rate <= 0) {
+                    return json(400, { error: 'Rate per transaction must be positive' });
+                }
+                if (pt === 'percentage_of_revenue' && (updateData.rate <= 0 || updateData.rate > 100)) {
+                    return json(400, { error: 'Revenue percentage must be between 0 and 100' });
+                }
             }
         }
         else if (jobType === 'multi_day_consulting') {
@@ -229,13 +239,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (updateData.hours_per_day && (updateData.hours_per_day < 1 || updateData.hours_per_day > 12)) {
                 return json(400, { error: 'Hours per day must be between 1 and 12' });
             }
-            if (updateData.hourly_rate && (updateData.hourly_rate < 10 || updateData.hourly_rate > 300)) {
-                return json(400, { error: 'Hourly rate must be between $10 and $300' });
+            if (updateData.rate !== undefined) {
+                const pt = updateData.pay_type || existingItem.pay_type || 'per_hour';
+                if (pt === 'per_hour' && (updateData.rate < 10 || updateData.rate > 300)) {
+                    return json(400, { error: 'Hourly rate must be between $10 and $300' });
+                }
+                if (pt === 'per_transaction' && updateData.rate <= 0) {
+                    return json(400, { error: 'Rate per transaction must be positive' });
+                }
+                if (pt === 'percentage_of_revenue' && (updateData.rate <= 0 || updateData.rate > 100)) {
+                    return json(400, { error: 'Revenue percentage must be between 0 and 100' });
+                }
             }
         }
         else if (jobType === 'permanent') {
-            if (updateData.salary_min && (updateData.salary_min < 20000 || updateData.salary_min > 500000)) {
-                return json(400, { error: 'Minimum salary must be between $20,000 and $500,000' });
+            if (updateData.salary_min && updateData.salary_min < 0) {
+                return json(400, { error: 'Minimum salary must be a positive number' });
             }
             if (updateData.salary_max && updateData.salary_min && updateData.salary_max <= updateData.salary_min) {
                 return json(400, { error: 'Maximum salary must be greater than minimum salary' });
@@ -283,16 +302,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         addUpdateField('meal_break', 'meal_break', 'BOOL', 'mb');
 
         // Job type specific fields
+        // Pay fields (common to temporary & multi-day)
+        if (jobType === 'temporary' || jobType === 'multi_day_consulting') {
+            addUpdateField('rate', 'rate', 'N', 'r');
+            addUpdateField('pay_type', 'pay_type', 'S', 'pt');
+        }
+
         if (jobType === 'temporary') {
             addUpdateField('date', 'date', 'S', 'd');
             addUpdateField('hours', 'hours', 'N', 'h');
-            addUpdateField('hourly_rate', 'hourly_rate', 'N', 'hr');
         }
         else if (jobType === 'multi_day_consulting') {
-            addUpdateField('dates', 'dates', 'SS'); 
+            addUpdateField('dates', 'dates', 'SS');
             addUpdateField('total_days', 'total_days', 'N', 'td');
             addUpdateField('hours_per_day', 'hours_per_day', 'N', 'hpd');
-            addUpdateField('hourly_rate', 'hourly_rate', 'N', 'hr');
             addUpdateField('project_duration', 'project_duration', 'S', 'pd');
         }
         else if (jobType === 'permanent') {

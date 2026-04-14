@@ -59,6 +59,11 @@ const n = (attr?: AttributeValue): number | null => {
   return Number.isFinite(v) ? v : null;
 };
 
+const b = (attr?: AttributeValue): boolean => {
+  if (!attr || !("BOOL" in attr)) return false;
+  return Boolean(attr.BOOL);
+};
+
 function toStrArr(attr: any): string[] {
   if (!attr) return [];
   if (Array.isArray(attr) && typeof attr[0] === "string") return attr;
@@ -168,6 +173,7 @@ export const handler = async (
       jobId: s(it.jobId),
       jobTitle: s(it.professional_role) || s(it.jobTitle),
       professionalRole: s(it.professional_role),
+      professionalRoles: toStrArr(it.professional_roles),
       jobType: s(it.job_type),
       date: s(it.date),
       start_date: s(it.start_date),
@@ -175,15 +181,24 @@ export const handler = async (
       end_time: s(it.end_time),
       dates: toStrArr(it.dates),
       dateRange: s(it.date_range) || s(it.dateRange),
-      hourlyRate: n(it.hourly_rate),
+      rate: it.rate ?? (it.pay_type === "per_transaction" ? it.rate_per_transaction : it.pay_type === "percentage_of_revenue" ? it.revenue_percentage : it.hourly_rate) ?? 0,
+      payType: s(it.pay_type) || "per_hour",
       salaryMin: n(it.salary_min),
       salaryMax: n(it.salary_max),
+      workLocationType: s(it.work_location_type),
       location: s(it.location) || s(it.addressLine1),
       fullAddress: s(it.fullAddress) || s(it.addressLine1),
       city: s(it.city),
       state: s(it.state),
       shiftDetails: s(it.shiftDetails),
       status: s(it.status) || "unknown",
+      clinicSoftware: toStrArr(it.clinicSoftware),
+      freeParkingAvailable: b(it.freeParkingAvailable),
+      parkingType: s(it.parkingType),
+      shiftSpeciality: s(it.shift_speciality),
+      jobDescription: s(it.job_description),
+      mealBreak: s(it.meal_break),
+      requirements: toStrArr(it.requirements),
       createdAt: s(it.createdAt),
       createdBy: s(it.createdBy) || s(it.created_by),
       creatorName: s(it.creatorName) || s(it.createdBy),
@@ -242,7 +257,8 @@ export const handler = async (
 
         // Enriched Job Details
         jobTitle: job.jobTitle || "No Title",
-        hourlyRate: job.hourlyRate || null,
+        rate: job.rate || null,
+        payType: job.payType || "per_hour",
       };
     });
 
@@ -525,7 +541,8 @@ export const handler = async (
             rateOffered: n(item.rateOffered),
             
             jobTitle: job.jobTitle || "No Title",
-            hourlyRate: job.hourlyRate || null,
+            rate: job.rate || null,
+            payType: job.payType || "per_hour",
           };
           if (!groupedInvites[cid]) groupedInvites[cid] = [];
           groupedInvites[cid].push(enriched);

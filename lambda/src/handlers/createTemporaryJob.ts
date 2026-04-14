@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dyn
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken } from "./utils"; 
-import { VALID_ROLE_VALUES } from "./professionalRoles"; 
+import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS } from "./corsHeaders";
 
 // --- Configuration ---
@@ -21,17 +21,20 @@ const ddbDoc = DynamoDBDocumentClient.from(client);
 interface MultiJobData {
     clinicIds: string[]; // List of clinics to post to
     professional_role: string;
+    professional_roles?: string[];
     date: string; // ISO date string
     shift_speciality: string;
     hours: number;
-    hourly_rate: number;
+    rate?: number;
     start_time: string;
     end_time: string;
-    meal_break?: string; 
+    meal_break?: string;
     job_title?: string;
     job_description?: string;
     requirements?: string[]; // Array of strings
     assisted_hygiene?: boolean;
+    work_location_type?: string;
+    pay_type?: string;
 }
 
 interface ClinicAddress {
@@ -130,7 +133,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             !jobData.date ||
             !jobData.shift_speciality ||
             jobData.hours === undefined ||
-            jobData.hourly_rate === undefined ||
             !jobData.start_time ||
             !jobData.end_time
         ) {
@@ -138,19 +140,61 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Bad Request",
                 message: "Missing required fields",
                 details: {
-                    requiredFields: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "hourly_rate", "start_time", "end_time"]
+                    requiredFields: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "start_time", "end_time"]
                 }
             });
         }
 
         // 4. Validate Data Integrity
-        
-        // Validate professional role
-        if (!VALID_ROLE_VALUES.includes(jobData.professional_role)) {
+
+        // Support multi-role: accept professional_roles (array) or professional_role (string)
+        const professionalRoles: string[] = Array.isArray(jobData.professional_roles)
+            ? jobData.professional_roles
+            : jobData.professional_role ? [jobData.professional_role] : [];
+
+        if (professionalRoles.length === 0) {
             return json(400, {
                 error: "Bad Request",
-                message: "Invalid professional role",
-                details: { validRoles: VALID_ROLE_VALUES, providedRole: jobData.professional_role }
+                message: "At least one professional role is required",
+                details: { validRoles: VALID_ROLE_VALUES }
+            });
+        }
+
+        // Validate each professional role
+        const invalidRoles = professionalRoles.filter(r => !VALID_ROLE_VALUES.includes(r));
+        if (invalidRoles.length > 0) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid professional role(s)",
+                details: { validRoles: VALID_ROLE_VALUES, invalidRoles }
+            });
+        }
+
+        // Validate work location type if provided
+        const VALID_WORK_LOCATIONS = ['onsite', 'us_remote', 'global_remote'];
+        if (jobData.work_location_type && !VALID_WORK_LOCATIONS.includes(jobData.work_location_type)) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid work location type",
+                details: { validOptions: VALID_WORK_LOCATIONS, provided: jobData.work_location_type }
+            });
+        }
+
+        // Validate pay type if provided
+        const VALID_PAY_TYPES = ['per_hour', 'per_transaction', 'percentage_of_revenue'];
+        if (jobData.pay_type && !VALID_PAY_TYPES.includes(jobData.pay_type)) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Invalid pay type",
+                details: { validOptions: VALID_PAY_TYPES, provided: jobData.pay_type }
+            });
+        }
+
+        // per_transaction is not allowed for doctor roles
+        if (jobData.pay_type === 'per_transaction' && professionalRoles.some(r => isDoctorRole(r))) {
+            return json(400, {
+                error: "Bad Request",
+                message: "Per-transaction pay type is not available for doctor roles",
             });
         }
 
@@ -182,12 +226,36 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 details: { providedHours: jobData.hours, validRange: "1-12" }
             });
         }
-        if (jobData.hourly_rate < 10 || jobData.hourly_rate > 200) {
+        // Validate compensation based on pay type
+        const payType = jobData.pay_type || "per_hour";
+        if (jobData.rate === undefined || jobData.rate === null) {
             return json(400, {
                 error: "Bad Request",
-                message: "Invalid hourly rate",
-                details: { providedRate: `$${jobData.hourly_rate}`, validRange: "$10-$200" }
+                message: "Rate is required",
             });
+        }
+        if (payType === "per_hour") {
+            if (jobData.rate < 10 || jobData.rate > 200) {
+                return json(400, {
+                    error: "Bad Request",
+                    message: "Hourly rate must be between $10 and $200",
+                    details: { providedRate: `$${jobData.rate}`, validRange: "$10-$200" }
+                });
+            }
+        } else if (payType === "per_transaction") {
+            if (jobData.rate <= 0) {
+                return json(400, {
+                    error: "Bad Request",
+                    message: "Rate per transaction must be positive",
+                });
+            }
+        } else if (payType === "percentage_of_revenue") {
+            if (jobData.rate <= 0 || jobData.rate > 100) {
+                return json(400, {
+                    error: "Bad Request",
+                    message: "Revenue percentage must be between 0 and 100",
+                });
+            }
         }
 
         const timestamp = new Date().toISOString();
@@ -241,11 +309,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 clinicUserSub: userSub,
                 jobId: jobId,
                 job_type: "temporary",
-                professional_role: jobData.professional_role,
+                professional_role: professionalRoles[0],
+                professional_roles: professionalRoles,
                 date: jobData.date,
                 shift_speciality: jobData.shift_speciality,
                 hours: jobData.hours,
-                hourly_rate: jobData.hourly_rate,
+                rate: jobData.rate,
+                pay_type: payType,
                 start_time: jobData.start_time,
                 end_time: jobData.end_time,
                 meal_break: jobData.meal_break || "",
@@ -267,6 +337,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 practiceType: profileData.practiceType,
                 primaryPracticeArea: profileData.primaryPracticeArea,
                 
+                // Work location
+                ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
+
                 // Metadata
                 status: "active",
                 createdAt: timestamp,
@@ -292,8 +365,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         await Promise.all(postJobsPromises);
 
-        const totalPay = jobData.hours * jobData.hourly_rate;
-
         // 6. Response
         return json(201, {
             status: "success",
@@ -304,8 +375,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 professionalRole: jobData.professional_role,
                 date: jobData.date,
                 hours: jobData.hours,
-                hourlyRate: jobData.hourly_rate,
-                totalPay: `$${totalPay.toFixed(2)}`
+                payType: payType,
+                rate: jobData.rate,
             },
             timestamp: timestamp
         });

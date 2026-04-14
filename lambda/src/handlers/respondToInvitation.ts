@@ -306,7 +306,7 @@ export const handler = async (
         const shiftDetails = {
           date: job.date?.S || job.shiftDate?.S || "TBD",
           role: job.role?.S || job.professionalRole?.S || job.jobTitle?.S || "Professional",
-          rate: job.hourlyRate?.N ? Number(job.hourlyRate.N) : (job.proposedRate?.N ? Number(job.proposedRate.N) : 0),
+          rate: job.rate?.N ? Number(job.rate.N) : (job.hourlyRate?.N ? Number(job.hourlyRate.N) : (job.proposedRate?.N ? Number(job.proposedRate.N) : 0)),
         };
 
         await eb.send(new PutEventsCommand({
