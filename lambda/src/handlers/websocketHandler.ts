@@ -20,6 +20,9 @@ import {
     AttributeType, 
 } from "@aws-sdk/client-cognito-identity-provider";
 
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
 import { 
     APIGatewayProxyEventV2, 
     APIGatewayProxyResultV2, 
@@ -43,10 +46,14 @@ const MESSAGES_TABLE = process.env.MESSAGES_TABLE!;
 const CONNS_TABLE = process.env.CONNS_TABLE!;
 const CONVOS_TABLE = process.env.CONVOS_TABLE!;
 const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
-const USER_POOL_ID = process.env.USER_POOL_ID!; // Still needed for AdminGetUser
+const USER_POOL_ID = process.env.USER_POOL_ID!;
+const PROFESSIONAL_PROFILES_TABLE = process.env.PROFESSIONAL_PROFILES_TABLE || "DentiPal-V5-ProfessionalProfiles";
+const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-Clinic-Profiles";
+const PROFILE_IMAGES_BUCKET = process.env.PROFILE_IMAGES_BUCKET || "";
 
 const ddb = new DynamoDBClient({ region: REGION });
 const cognitoIdp = new CognitoIdentityProviderClient({ region: REGION });
+const s3 = new S3Client({ region: REGION });
 const MAX_LEN = 1000;
 
 // simple in-memory name cache (warm Lambda only)
@@ -566,6 +573,94 @@ async function onDisconnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
     return { statusCode: 200, body: "Disconnected" };
 }
 
+
+// ============== AVATAR / PROFILE IMAGE HELPERS ==============
+
+// In-memory cache for presigned URLs (warm Lambda only, ~1h TTL baked in)
+const avatarCache = new Map<string, string>();
+
+/**
+ * Generates a presigned S3 GET URL for a given object key.
+ * Returns empty string if the bucket is not configured or key is blank.
+ */
+async function presignS3Key(key: string): Promise<string> {
+    if (!PROFILE_IMAGES_BUCKET || !key) return "";
+    try {
+        // Strip any leading bucket prefix or full URL — keep only the object key
+        let objectKey = key;
+        if (objectKey.startsWith("http")) {
+            // e.g. https://s3.amazonaws.com/my-bucket/path/to/file.jpg
+            const u = new URL(objectKey);
+            const parts = u.pathname.split("/").filter(Boolean);
+            // If first segment is the bucket name, skip it
+            objectKey = parts[0] === PROFILE_IMAGES_BUCKET ? parts.slice(1).join("/") : parts.join("/");
+        }
+        if (!objectKey) return "";
+
+        const cmd = new GetObjectCommand({ Bucket: PROFILE_IMAGES_BUCKET, Key: objectKey });
+        return await getSignedUrl(s3, cmd, { expiresIn: 3600 });
+    } catch (e) {
+        console.warn("presignS3Key failed", key, (e as Error).message);
+        return "";
+    }
+}
+
+/**
+ * Looks up a professional's profile image key from DynamoDB and returns a presigned URL.
+ * Result is cached for the lifetime of the Lambda warm instance.
+ */
+async function getProfessionalAvatarUrl(profSub: string): Promise<string> {
+    if (!profSub) return "";
+    const cacheKey = `prof:${profSub}`;
+    if (avatarCache.has(cacheKey)) return avatarCache.get(cacheKey)!;
+
+    try {
+        const res = await ddb.send(new GetItemCommand({
+            TableName: PROFESSIONAL_PROFILES_TABLE,
+            Key: { userSub: { S: profSub } },
+            ProjectionExpression: "profileImageKey",
+        }));
+        const imageKey = res.Item?.profileImageKey?.S || "";
+        const url = imageKey ? await presignS3Key(imageKey) : "";
+        avatarCache.set(cacheKey, url);
+        return url;
+    } catch (e) {
+        console.warn("getProfessionalAvatarUrl failed", profSub, (e as Error).message);
+        avatarCache.set(cacheKey, "");
+        return "";
+    }
+}
+
+/**
+ * Looks up a clinic's office image key from DynamoDB and returns a presigned URL.
+ * Uses a Query because clinicId is the partition key but userSub is required as sort key.
+ * We query by partition key only and take the first item (typically one profile per clinic).
+ */
+async function getClinicAvatarUrl(clinicId: string): Promise<string> {
+    if (!clinicId) return "";
+    const cacheKey = `clinic:${clinicId}`;
+    if (avatarCache.has(cacheKey)) return avatarCache.get(cacheKey)!;
+
+    try {
+        const res = await ddb.send(new QueryCommand({
+            TableName: CLINIC_PROFILES_TABLE,
+            KeyConditionExpression: "clinicId = :cid",
+            ExpressionAttributeValues: { ":cid": { S: clinicId } },
+            ProjectionExpression: "office_image_key",
+            Limit: 1,
+        }));
+        const item = (res.Items || [])[0];
+        const imageKey = item?.office_image_key?.S || "";
+        const url = imageKey ? await presignS3Key(imageKey) : "";
+        avatarCache.set(cacheKey, url);
+        return url;
+    } catch (e) {
+        console.warn("getClinicAvatarUrl failed", clinicId, (e as Error).message);
+        avatarCache.set(cacheKey, "");
+        return "";
+    }
+}
+
 async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
     const claims = await validateToken(event);
     const connClient = wsClientFromEvent(event);
@@ -656,12 +751,25 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
 
                 const unreadCount = iAmClinic ? clinicUnread : profUnread;
 
+                // Fetch profile image — best-effort, never throws
+                let avatarUrl = "";
+                try {
+                    if (iAmClinic) {
+                        const profSub = (profKey || "").replace(/^prof#/, "");
+                        avatarUrl = await getProfessionalAvatarUrl(profSub);
+                    } else {
+                        const cid = (clinicKey || "").replace(/^clinic#/, "");
+                        avatarUrl = await getClinicAvatarUrl(cid);
+                    }
+                } catch { /* ignore */ }
+
                 return {
                     conversationId,
                     recipientName,
                     lastMessage: lastPreview,
                     lastMessageAt,
                     unreadCount,
+                    ...(avatarUrl ? { avatarUrl } : {}),
                 };
             })
         );

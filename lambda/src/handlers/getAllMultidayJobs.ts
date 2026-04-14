@@ -70,6 +70,7 @@ interface MultidayJobResponse {
     createdAt: string;
     updatedAt: string;
     dates: string[]; // SS mapped to string[]
+    created_by: string;
 }
 
 /**
