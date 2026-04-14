@@ -64,6 +64,7 @@ interface FormattedJobItem {
     startDate: string;
     createdAt: string;
     updatedAt: string;
+    created_by: string;
 }
 
 // --- helpers -------------------------------------------------
