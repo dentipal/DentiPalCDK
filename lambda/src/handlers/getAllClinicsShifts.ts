@@ -234,22 +234,8 @@ export const handler = async (
       requirements: toStrArr(it.requirements),
       createdAt: s(it.createdAt),
       createdBy: s(it.createdBy) || s(it.created_by),
-      creatorName: s(it.creatorName),
+      creatorName: s(it.creatorName) || s(it.createdBy) || s(it.created_by),
     }));
-
-    // For old records without creatorName, resolve from createdBy
-    const creatorCache = new Map<string, string>();
-    for (const shift of allShifts) {
-      if (shift.creatorName) continue;
-      if (!shift.createdBy || creatorCache.has(shift.createdBy)) continue;
-      const name = await resolveCreatorName(shift.createdBy, shift.clinicId);
-      creatorCache.set(shift.createdBy, name);
-    }
-    for (const shift of allShifts) {
-      if (!shift.creatorName) {
-        shift.creatorName = creatorCache.get(shift.createdBy) || shift.createdBy;
-      }
-    }
 
     // Build helper map for enriching applications later
     const jobMap = new Map<string, any>();
