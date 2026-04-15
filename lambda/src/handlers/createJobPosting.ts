@@ -318,6 +318,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             createdAt: timestamp,
             updatedAt: timestamp,
             created_by: userEmail || userSub,
+            creatorName: `${clinicProfile.primary_contact_first_name || ""} ${clinicProfile.primary_contact_last_name || ""}`.trim() || userEmail || userSub,
             // Address details
             addressLine1: clinicAddress.addressLine1,
             addressLine2: clinicAddress.addressLine2,

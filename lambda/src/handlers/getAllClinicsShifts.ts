@@ -3,6 +3,7 @@
 import {
   DynamoDBClient,
   QueryCommand,
+  GetItemCommand,
   QueryCommandInput,
   QueryCommandOutput,
   AttributeValue,
@@ -15,6 +16,7 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE;
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
+const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE;
 
 // Optional envs (defaults provided)
 const JOB_APPLICATIONS_CLINIC_GSI =
@@ -115,6 +117,32 @@ function normalizeStatus(raw: any): string {
   return (raw?.S || raw || "").toString().trim().toLowerCase();
 }
 
+/**
+ * Resolve created_by to a display name:
+ *  - If it's an email (contains @), extract the part before @
+ *  - If it's a userSub, look up clinic profiles table for first + last name
+ */
+async function resolveCreatorName(createdBy: string, clinicId: string): Promise<string> {
+  if (!createdBy) return "";
+  if (createdBy.includes("@")) {
+    return createdBy.split("@")[0];
+  }
+  if (!CLINIC_PROFILES_TABLE || !clinicId) return createdBy;
+  try {
+    const res = await dynamodb.send(new GetItemCommand({
+      TableName: CLINIC_PROFILES_TABLE,
+      Key: { clinicId: { S: clinicId }, userSub: { S: createdBy } },
+      ProjectionExpression: "primary_contact_first_name, primary_contact_last_name",
+    }));
+    const first = res.Item?.primary_contact_first_name?.S || "";
+    const last = res.Item?.primary_contact_last_name?.S || "";
+    const name = `${first} ${last}`.trim();
+    return name || createdBy;
+  } catch {
+    return createdBy;
+  }
+}
+
 /* ----------------------------- Main Handler ----------------------------- */
 
 export const handler = async (
@@ -206,8 +234,22 @@ export const handler = async (
       requirements: toStrArr(it.requirements),
       createdAt: s(it.createdAt),
       createdBy: s(it.createdBy) || s(it.created_by),
-      creatorName: s(it.creatorName) || s(it.createdBy),
+      creatorName: s(it.creatorName),
     }));
+
+    // For old records without creatorName, resolve from createdBy
+    const creatorCache = new Map<string, string>();
+    for (const shift of allShifts) {
+      if (shift.creatorName) continue;
+      if (!shift.createdBy || creatorCache.has(shift.createdBy)) continue;
+      const name = await resolveCreatorName(shift.createdBy, shift.clinicId);
+      creatorCache.set(shift.createdBy, name);
+    }
+    for (const shift of allShifts) {
+      if (!shift.creatorName) {
+        shift.creatorName = creatorCache.get(shift.createdBy) || shift.createdBy;
+      }
+    }
 
     // Build helper map for enriching applications later
     const jobMap = new Map<string, any>();
