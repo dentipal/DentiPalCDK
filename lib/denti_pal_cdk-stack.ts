@@ -1179,7 +1179,8 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'cognito-idp:DeleteUser',
                 'cognito-idp:AdminRemoveUserFromGroup',
                 'cognito-idp:ListUsers',
-                'cognito-idp:AdminListGroupsForUser'
+                'cognito-idp:AdminListGroupsForUser',
+                'cognito-idp:AdminInitiateAuth'
             ],
             resources: [userPool.userPoolArn],
         }));
