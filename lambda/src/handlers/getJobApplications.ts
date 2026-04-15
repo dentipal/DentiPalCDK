@@ -233,19 +233,27 @@ export const handler = async (event: any) => {
                   ":aid": { S: application.applicationId },
                 },
                 ProjectionExpression:
-                  "applicationId, negotiationId, clinicCounterHourlyRate, professionalCounterHourlyRate, negotiationStatus, updatedAt, createdAt",
+                  "applicationId, negotiationId, clinicCounterHourlyRate, professionalCounterHourlyRate, clinicCounterRate, professionalCounterRate, agreedHourlyRate, agreedRate, payType, negotiationStatus, updatedAt, createdAt",
               })
             );
 
             const latest = pickLatestNegotiation(negoResp.Items || []);
 
             if (latest) {
+              const clinicCounter = num(latest.clinicCounterRate) ?? num(latest.clinicCounterHourlyRate) ?? null;
+              const professionalCounter = num(latest.professionalCounterRate) ?? num(latest.professionalCounterHourlyRate) ?? null;
+              const agreed = num(latest.agreedRate) ?? num(latest.agreedHourlyRate) ?? null;
+
               application.negotiation = {
                 negotiationId: str(latest.negotiationId),
-                clinicCounterHourlyRate:
-                  num(latest.clinicCounterHourlyRate) ?? null,
-                professionalCounterHourlyRate:
-                  num(latest.professionalCounterHourlyRate) ?? null,
+                clinicCounterRate: clinicCounter,
+                professionalCounterRate: professionalCounter,
+                agreedRate: agreed,
+                // Legacy aliases
+                clinicCounterHourlyRate: clinicCounter,
+                professionalCounterHourlyRate: professionalCounter,
+                agreedHourlyRate: agreed,
+                payType: str(latest.payType) || undefined,
                 negotiationStatus: str(latest.negotiationStatus),
                 updatedAt: str(latest.updatedAt),
                 createdAt: str(latest.createdAt),

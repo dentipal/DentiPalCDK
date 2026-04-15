@@ -45,9 +45,13 @@ interface EnrichedNegotiation {
     negotiationStatus: string;
     clinicResponse: string;
     proposedHourlyRate: number | null;
+    proposedRate: number | null;
     clinicCounterHourlyRate: number | null;
+    clinicCounterRate: number | null;
     professionalCounterHourlyRate: number | null;
+    professionalCounterRate: number | null;
     agreedHourlyRate: number | null;
+    agreedRate: number | null;
     payType?: string;
     message: string;
     createdAt: string;
@@ -179,10 +183,14 @@ async function enrichWithClinicAndJob(neg: DynamoDBNegotiationItem): Promise<Enr
         professionalUserSub: neg.professionalUserSub?.S || "",
         negotiationStatus: neg.negotiationStatus?.S || "",
         clinicResponse: neg.clinicResponse?.S || "",
-        proposedHourlyRate: neg.proposedHourlyRate?.N ? parseFloat(neg.proposedHourlyRate.N) : null,
-        clinicCounterHourlyRate: neg.clinicCounterHourlyRate?.N ? parseFloat(neg.clinicCounterHourlyRate.N) : null,
-        professionalCounterHourlyRate: neg.professionalCounterHourlyRate?.N ? parseFloat(neg.professionalCounterHourlyRate.N) : null,
-        agreedHourlyRate: neg.agreedHourlyRate?.N ? parseFloat(neg.agreedHourlyRate.N) : null,
+        proposedHourlyRate: neg.proposedHourlyRate?.N ? parseFloat(neg.proposedHourlyRate.N) : (neg.proposedRate?.N ? parseFloat(neg.proposedRate.N) : null),
+        proposedRate: neg.proposedRate?.N ? parseFloat(neg.proposedRate.N) : (neg.proposedHourlyRate?.N ? parseFloat(neg.proposedHourlyRate.N) : null),
+        clinicCounterHourlyRate: neg.clinicCounterHourlyRate?.N ? parseFloat(neg.clinicCounterHourlyRate.N) : (neg.clinicCounterRate?.N ? parseFloat(neg.clinicCounterRate.N) : null),
+        clinicCounterRate: neg.clinicCounterRate?.N ? parseFloat(neg.clinicCounterRate.N) : (neg.clinicCounterHourlyRate?.N ? parseFloat(neg.clinicCounterHourlyRate.N) : null),
+        professionalCounterHourlyRate: neg.professionalCounterHourlyRate?.N ? parseFloat(neg.professionalCounterHourlyRate.N) : (neg.professionalCounterRate?.N ? parseFloat(neg.professionalCounterRate.N) : null),
+        professionalCounterRate: neg.professionalCounterRate?.N ? parseFloat(neg.professionalCounterRate.N) : (neg.professionalCounterHourlyRate?.N ? parseFloat(neg.professionalCounterHourlyRate.N) : null),
+        agreedHourlyRate: neg.agreedHourlyRate?.N ? parseFloat(neg.agreedHourlyRate.N) : (neg.agreedRate?.N ? parseFloat(neg.agreedRate.N) : null),
+        agreedRate: neg.agreedRate?.N ? parseFloat(neg.agreedRate.N) : (neg.agreedHourlyRate?.N ? parseFloat(neg.agreedHourlyRate.N) : null),
         message: neg.message?.S || "",
         createdAt: neg.createdAt?.S || "",
         updatedAt: neg.updatedAt?.S || "",

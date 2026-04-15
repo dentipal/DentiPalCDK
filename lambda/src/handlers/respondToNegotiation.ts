@@ -32,7 +32,11 @@ interface NegotiationResponsePayload {
   // Permanent job counter offer fields
   counterSalaryMin?: number;
   counterSalaryMax?: number;
-  // Temporary job counter offer fields (used for all pay types: per_hour, per_transaction, percentage_of_revenue)
+  // Temporary job counter offer fields — generic "rate" (works for per_hour, per_transaction, percentage_of_revenue)
+  // New generic names (preferred):
+  clinicCounterRate?: number;
+  professionalCounterRate?: number;
+  // Legacy aliases (kept for backwards compatibility):
   clinicCounterHourlyRate?: number;
   professionalCounterHourlyRate?: number;
   // Pay type for temporary jobs (per_hour, per_transaction, percentage_of_revenue)
@@ -110,7 +114,14 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     const userInfo = extractUserFromBearerToken(authHeader);
     const userSub = userInfo.sub;
 
-    const body: NegotiationResponsePayload = JSON.parse(event.body || "{}");
+    const rawBody: NegotiationResponsePayload = JSON.parse(event.body || "{}");
+
+    // Resolve generic rate field names — accept both "counterRate" and legacy "counterHourlyRate"
+    const body: NegotiationResponsePayload = {
+      ...rawBody,
+      clinicCounterHourlyRate: rawBody.clinicCounterRate ?? rawBody.clinicCounterHourlyRate,
+      professionalCounterHourlyRate: rawBody.professionalCounterRate ?? rawBody.professionalCounterHourlyRate,
+    };
 
     // 2. Path Parsing
     // FIX: Safely access path for V1 (event.path) or V2 (event.rawPath)
@@ -285,16 +296,24 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
       updateExpr += ", #payType = :payType";
     }
 
-    // Attach counter rates to the negotiation item
+    // Attach counter rates to the negotiation item (store both legacy and generic field names)
     if (typeof body.clinicCounterHourlyRate === "number") {
       attrNames["#clinicCounterHourlyRate"] = "clinicCounterHourlyRate";
       attrValues[":clinicCounterHourlyRate"] = { N: String(body.clinicCounterHourlyRate) };
       updateExpr += ", #clinicCounterHourlyRate = :clinicCounterHourlyRate";
+      // Also store as generic clinicCounterRate
+      attrNames["#clinicCounterRate"] = "clinicCounterRate";
+      attrValues[":clinicCounterRate"] = { N: String(body.clinicCounterHourlyRate) };
+      updateExpr += ", #clinicCounterRate = :clinicCounterRate";
     }
     if (typeof body.professionalCounterHourlyRate === "number") {
       attrNames["#professionalCounterHourlyRate"] = "professionalCounterHourlyRate";
       attrValues[":professionalCounterHourlyRate"] = { N: String(body.professionalCounterHourlyRate) };
       updateExpr += ", #professionalCounterHourlyRate = :professionalCounterHourlyRate";
+      // Also store as generic professionalCounterRate
+      attrNames["#professionalCounterRate"] = "professionalCounterRate";
+      attrValues[":professionalCounterRate"] = { N: String(body.professionalCounterHourlyRate) };
+      updateExpr += ", #professionalCounterRate = :professionalCounterRate";
     }
 
     // Attach salary counter rates to the negotiation item
