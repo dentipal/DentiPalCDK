@@ -1,6 +1,6 @@
 import {
     DynamoDBClient,
-    ScanCommand,
+    ScanCommand,  
     GetItemCommand,
     QueryCommand,
     AttributeValue,
