@@ -164,14 +164,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             negotiationId = uuidv4();
             applicationItem.negotiationId = negotiationId;
 
-            const negotiationItem = {
+            // Resolve the pay type from the job posting
+            const jobPayType = jobItem.pay_type || jobItem.payType || "per_hour";
+
+            const negotiationItem: Record<string, any> = {
                 negotiationId: negotiationId,
                 jobId: jobId,
                 applicationId: applicationId,
                 professionalUserSub: userSub,
                 clinicId: clinicIdFromJob,
                 negotiationStatus: 'pending',
+                // Generic rate field (primary) — works for all pay types
+                proposedRate: Number(applicationData.proposedRate),
+                // Legacy alias for backward compatibility
                 proposedHourlyRate: Number(applicationData.proposedRate),
+                payType: jobPayType,
                 createdAt: timestamp,
                 updatedAt: timestamp,
                 message: applicationData.message || 'Negotiation initiated by professional during application'
