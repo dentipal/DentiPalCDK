@@ -1,16 +1,20 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
-import { extractUserFromBearerToken } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS } from "./corsHeaders";
 
 // --- 1. Configuration ---
 const REGION = process.env.REGION || "us-east-1";
+const USER_POOL_ID = process.env.USER_POOL_ID || "";
 const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-ClinicProfiles";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
+
+const cognito = new CognitoIdentityProviderClient({ region: REGION });
 
 // Initialize V3 Client and Document Client (Abstracts Marshalling)
 const client = new DynamoDBClient({ region: REGION });
@@ -180,7 +184,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
         const userInfo = extractUserFromBearerToken(authHeader);
         const userSub = userInfo.sub;
-        const userEmail = userInfo.email || "";
+        let userEmail = userInfo.email || "";
+
+        // 2b. Fetch user's first/last name from Cognito using userSub
+        let cognitoFirstName = "";
+        let cognitoLastName = "";
+        if (USER_POOL_ID && userSub) {
+            try {
+                const cognitoUser = await cognito.send(new AdminGetUserCommand({
+                    UserPoolId: USER_POOL_ID,
+                    Username: userSub,
+                }));
+                const attrs = cognitoUser.UserAttributes || [];
+                cognitoFirstName = attrs.find(a => a.Name === "given_name")?.Value || attrs.find(a => a.Name === "custom:first_name")?.Value || "";
+                cognitoLastName = attrs.find(a => a.Name === "family_name")?.Value || attrs.find(a => a.Name === "custom:last_name")?.Value || "";
+                if (!userEmail) {
+                    userEmail = attrs.find(a => a.Name === "email")?.Value || "";
+                }
+            } catch {
+                // ignore — fallback handled below
+            }
+        }
 
         // 3. Parse Body
         const jobData: JobData = JSON.parse(event.body || '{}');
@@ -317,7 +341,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             status: jobData.status || 'active',
             createdAt: timestamp,
             updatedAt: timestamp,
-            created_by: userEmail || userSub,
+            created_by: `${cognitoFirstName} ${cognitoLastName}`.trim() || (userEmail && userEmail.includes("@") ? userEmail.split("@")[0] : userEmail) || "Unknown",
             creatorName: `${clinicProfile.primary_contact_first_name || ""} ${clinicProfile.primary_contact_last_name || ""}`.trim() || userEmail || userSub,
             // Address details
             addressLine1: clinicAddress.addressLine1,
