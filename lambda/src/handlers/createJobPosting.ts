@@ -189,6 +189,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 2b. Fetch user's first/last name from Cognito using userSub
         let cognitoFirstName = "";
         let cognitoLastName = "";
+        console.log("[createJobPosting] USER_POOL_ID:", USER_POOL_ID, "userSub:", userSub);
         if (USER_POOL_ID && userSub) {
             try {
                 const cognitoUser = await cognito.send(new AdminGetUserCommand({
@@ -196,14 +197,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     Username: userSub,
                 }));
                 const attrs = cognitoUser.UserAttributes || [];
+                console.log("[createJobPosting] Cognito attributes:", JSON.stringify(attrs));
                 cognitoFirstName = attrs.find(a => a.Name === "given_name")?.Value || attrs.find(a => a.Name === "custom:first_name")?.Value || "";
                 cognitoLastName = attrs.find(a => a.Name === "family_name")?.Value || attrs.find(a => a.Name === "custom:last_name")?.Value || "";
+                console.log("[createJobPosting] Resolved name:", cognitoFirstName, cognitoLastName);
                 if (!userEmail) {
                     userEmail = attrs.find(a => a.Name === "email")?.Value || "";
                 }
-            } catch {
-                // ignore — fallback handled below
+            } catch (err) {
+                console.error("[createJobPosting] Cognito AdminGetUser failed:", (err as Error).message);
             }
+        } else {
+            console.warn("[createJobPosting] Skipping Cognito lookup — USER_POOL_ID:", USER_POOL_ID, "userSub:", userSub);
         }
 
         // 3. Parse Body
