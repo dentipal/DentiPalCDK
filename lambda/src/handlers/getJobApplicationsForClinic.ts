@@ -309,18 +309,11 @@
                 negotiationStatus: rawNeg.negotiationStatus?.S || null,
                 clinicResponse: rawNeg.clinicResponse?.S || null,
                 professionalResponse: rawNeg.professionalResponse?.S || null,
-                clinicCounterHourlyRate: rawNeg.clinicCounterHourlyRate?.N
-                  ? parseFloat(rawNeg.clinicCounterHourlyRate.N)
-                  : null,
-                professionalCounterHourlyRate: rawNeg.professionalCounterHourlyRate?.N
-                  ? parseFloat(rawNeg.professionalCounterHourlyRate.N)
-                  : null,
-                proposedHourlyRate: rawNeg.proposedHourlyRate?.N
-                  ? parseFloat(rawNeg.proposedHourlyRate.N)
-                  : null,
-                agreedHourlyRate: rawNeg.agreedHourlyRate?.N
-                  ? parseFloat(rawNeg.agreedHourlyRate.N)
-                  : null,
+                clinicCounterRate: parseFloat((rawNeg.clinicCounterRate?.N ?? rawNeg.clinicCounterHourlyRate?.N) || "") || null,
+                professionalCounterRate: parseFloat((rawNeg.professionalCounterRate?.N ?? rawNeg.professionalCounterHourlyRate?.N) || "") || null,
+                proposedRate: parseFloat((rawNeg.proposedRate?.N ?? rawNeg.proposedHourlyRate?.N) || "") || null,
+                agreedRate: parseFloat((rawNeg.agreedRate?.N ?? rawNeg.agreedHourlyRate?.N) || "") || null,
+                payType: rawNeg.payType?.S || null,
                 counterSalaryMin: rawNeg.counterSalaryMin?.N
                   ? parseFloat(rawNeg.counterSalaryMin.N)
                   : null,
