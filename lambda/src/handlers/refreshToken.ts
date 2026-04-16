@@ -10,7 +10,7 @@ import {
   APIGatewayProxyResult
 } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Type Definitions for better safety ---
 
@@ -51,6 +51,7 @@ const cognito = new CognitoIdentityProviderClient({ region: REGION });
  * @returns A promise resolving to an API Gateway Proxy result (HandlerResponse).
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };

@@ -6,7 +6,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // ----------------------
@@ -86,6 +86,7 @@ const fetchApplicationCount = async (jobId: string): Promise<number> => {
 // Main handler
 // ----------------------
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // FIX: Handle HTTP API (v2) structure where method is in requestContext.http
     const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 

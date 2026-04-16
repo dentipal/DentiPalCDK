@@ -18,7 +18,7 @@ import {
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -99,6 +99,7 @@ const getAppProposedRate = (appItem: DynamoDBItem | undefined): number | null =>
 
 // --- Main Handler Function ---
 export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEvent): Promise<APIGatewayProxyStructuredResultV2> => {
+    setOriginFromEvent(event);
 
   // Handle CORS preflight
   // Safe access for HTTP Method across V1 and V2 events

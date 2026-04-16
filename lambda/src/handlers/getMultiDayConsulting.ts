@@ -8,7 +8,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
@@ -31,6 +31,7 @@ interface DynamoItem {
 // Handler
 // ---------------------------
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // FIX: Handle HTTP API (v2) structure where method is in requestContext.http
   const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 

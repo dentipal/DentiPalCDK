@@ -19,7 +19,7 @@ import {
 import { v4 as uuidv4 } from "uuid";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils"; 
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 // --- Type Definitions ---
 
 type DynamoDBItem = { [key: string]: AttributeValue | undefined };
@@ -176,6 +176,7 @@ function createReferralEmail(
 // --- Main Handler Function ---
 
 export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEvent): Promise<HandlerResponse> => {
+    setOriginFromEvent(event);
     
     // Use the defined CORS headers
     const headers = CORS_HEADERS;

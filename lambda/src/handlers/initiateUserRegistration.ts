@@ -18,7 +18,7 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { VALID_ROLE_VALUES, getRoleByDbValue } from "./professionalRoles";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -46,6 +46,7 @@ interface RegistrationData {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };

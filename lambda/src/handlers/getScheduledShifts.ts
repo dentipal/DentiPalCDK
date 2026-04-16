@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE;
@@ -116,6 +116,7 @@ const makeJobDetailsFetcher = () => {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   try {
     if (event.httpMethod === "OPTIONS") {
       return {

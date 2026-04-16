@@ -11,7 +11,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -38,6 +38,7 @@ interface UpdateAddressFields {
  * Updates a user's address in DynamoDB, identified by their userSub.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // ✅ ADDED PREFLIGHT CHECK
     const method = event.httpMethod || (event.requestContext as any)?.http?.method;
     if (method === "OPTIONS") {

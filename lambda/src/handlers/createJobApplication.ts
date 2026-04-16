@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, QueryCommand, PutCommand } from "@a
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- 1. Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -34,6 +34,7 @@ interface ApplyJobBody {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "POST";
 
     // 1. Handle CORS Preflight
@@ -164,14 +165,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             negotiationId = uuidv4();
             applicationItem.negotiationId = negotiationId;
 
-            const negotiationItem = {
+            // Resolve the pay type from the job posting
+            const jobPayType = jobItem.pay_type || jobItem.payType || "per_hour";
+
+            const negotiationItem: Record<string, any> = {
                 negotiationId: negotiationId,
                 jobId: jobId,
                 applicationId: applicationId,
                 professionalUserSub: userSub,
                 clinicId: clinicIdFromJob,
                 negotiationStatus: 'pending',
+                // Generic rate field (primary) — works for all pay types
+                proposedRate: Number(applicationData.proposedRate),
+                // Legacy alias for backward compatibility
                 proposedHourlyRate: Number(applicationData.proposedRate),
+                payType: jobPayType,
                 createdAt: timestamp,
                 updatedAt: timestamp,
                 message: applicationData.message || 'Negotiation initiated by professional during application'

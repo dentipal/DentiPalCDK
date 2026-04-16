@@ -8,7 +8,7 @@ import {
 import { extractUserFromBearerToken } from "./utils"; // Assumed dependency
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -38,6 +38,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
     const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 

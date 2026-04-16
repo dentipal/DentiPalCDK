@@ -3,18 +3,20 @@
 import {
   DynamoDBClient,
   QueryCommand,
+  GetItemCommand,
   QueryCommandInput,
   QueryCommandOutput,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE;
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
+const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE;
 
 // Optional envs (defaults provided)
 const JOB_APPLICATIONS_CLINIC_GSI =
@@ -90,11 +92,39 @@ function normalizeStatus(raw: any): string {
   return (raw?.S || raw || "").toString().trim().toLowerCase();
 }
 
+/**
+ * Resolve created_by to a display name:
+ *  - If it's an email (contains @), extract the part before @
+ *  - If it's a userSub, look up clinic profiles table for first + last name
+ */
+async function resolveCreatorName(createdBy: string, clinicId: string): Promise<string> {
+  if (!createdBy) return "";
+  if (createdBy.includes("@")) {
+    return createdBy.split("@")[0];
+  }
+  // It's a userSub — fetch from clinic profiles
+  if (!CLINIC_PROFILES_TABLE || !clinicId) return createdBy;
+  try {
+    const res = await dynamodb.send(new GetItemCommand({
+      TableName: CLINIC_PROFILES_TABLE,
+      Key: { clinicId: { S: clinicId }, userSub: { S: createdBy } },
+      ProjectionExpression: "primary_contact_first_name, primary_contact_last_name",
+    }));
+    const first = res.Item?.primary_contact_first_name?.S || "";
+    const last = res.Item?.primary_contact_last_name?.S || "";
+    const name = `${first} ${last}`.trim();
+    return name || createdBy;
+  } catch {
+    return createdBy;
+  }
+}
+
 /* ----------------------------- Main Handler ----------------------------- */
 
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   try {
     if (event.httpMethod === "OPTIONS") {
       return json(200, { message: "CORS preflight OK" });
@@ -182,6 +212,7 @@ export const handler = async (
       requirements: toStrArr(it.requirements),
       createdAt: s(it.createdAt),
       created_by: s(it.created_by) || s(it.createdBy),
+      creatorName: s(it.creatorName) || s(it.created_by) || s(it.createdBy),
     }));
 
     const jobMap = new Map<string, any>();

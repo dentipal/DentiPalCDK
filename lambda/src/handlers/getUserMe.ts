@@ -4,7 +4,7 @@ import {
     AttributeType,
 } from "@aws-sdk/client-cognito-identity-provider";
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
@@ -24,6 +24,7 @@ const getAttr = (attrs: AttributeType[], name: string): string =>
  * Reads: name, email, phone_number, given_name, family_name, sub.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     if (event.httpMethod === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }

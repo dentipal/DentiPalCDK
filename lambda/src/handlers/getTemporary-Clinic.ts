@@ -9,7 +9,7 @@ import {
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 
@@ -17,6 +17,7 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   console.log("📥 Incoming Event:", JSON.stringify(event, null, 2));
 
   try {

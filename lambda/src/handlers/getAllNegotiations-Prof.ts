@@ -1,6 +1,6 @@
 import {
     DynamoDBClient,
-    ScanCommand,
+    ScanCommand,  
     GetItemCommand,
     QueryCommand,
     AttributeValue,
@@ -11,7 +11,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Changed import to use the new token utility
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -260,6 +260,7 @@ async function enrichWithClinicAndJob(neg: DynamoDBNegotiationItem): Promise<Enr
 // ---------- Handler ----------
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     try {
         // Preflight
         if (event.httpMethod === "OPTIONS") {

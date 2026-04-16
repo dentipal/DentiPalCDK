@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, UpdateCommand, UpdateCommandInput } from "@aws-
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || "us-east-1";
@@ -114,6 +114,7 @@ export const updateVideoResume = async (event: APIGatewayProxyEvent) => updateFi
 
 // Keep default handler for backward compatibility
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // Try to infer file type from path and dispatch
     const path = event.path || (event as any).rawPath || "";
     if (path.includes("profile-image") || path.includes("profile-images")) return updateProfileImage(event);

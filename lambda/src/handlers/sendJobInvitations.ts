@@ -13,7 +13,7 @@ import {
 } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
 import { v4 as uuidv4 } from "uuid"; 
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -67,6 +67,7 @@ const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
 
 // --- Main Handler Function ---
 export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEvent): Promise<HandlerResponse> => {
+    setOriginFromEvent(event);
     try {
         const headers = CORS_HEADERS;
         

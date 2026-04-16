@@ -7,7 +7,7 @@ import {
   ScanCommandOutput
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
 
 // --- Interfaces ---
@@ -88,6 +88,7 @@ async function fetchClinicInfo(clinicUserSub: string): Promise<ClinicInfo | unde
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // Define CORS headers
  
 

@@ -14,7 +14,7 @@ import {
 // IMPORTANT: Use .js because Lambda runs JS, not TS
 import { extractUserFromBearerToken } from "./utils.js";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize DynamoDB
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -55,6 +55,7 @@ function extractClinicId(event: APIGatewayProxyEvent): string | null {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // REST API → httpMethod only
   const method = event.httpMethod || "";
 

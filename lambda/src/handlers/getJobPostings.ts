@@ -9,7 +9,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, isRoot } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
@@ -48,6 +48,7 @@ async function getAllClinicUserSubs(): Promise<string[]> {
 // Handler: Retrieve job postings (clinic or root)
 // -------------------------
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
   const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 

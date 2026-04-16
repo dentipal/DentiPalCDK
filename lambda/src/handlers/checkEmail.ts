@@ -3,7 +3,7 @@ import { CognitoIdentityProvider } from '@aws-sdk/client-cognito-identity-provid
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Initialization ---
 
@@ -113,6 +113,7 @@ function deriveUserTypeFromIdPayload(payload: JwtPayload | undefined): "professi
  * @returns An API Gateway proxy result.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   console.log("=== /auth/check-email REQUEST START ===");
   console.log("[req] Raw event.httpMethod:", event?.httpMethod);
   console.log("[req] Raw headers:", JSON.stringify(event?.headers || {}, null, 2));

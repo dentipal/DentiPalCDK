@@ -987,6 +987,14 @@ export class DentiPalCDKStack extends cdk.Stack {
             projectionType: dynamodb.ProjectionType.ALL,
         });
 
+        // GSI for querying open jobs sorted by creation date (used by professional filtered-jobs)
+        jobPostingsTable.addGlobalSecondaryIndex({
+            indexName: 'status-createdAt-index',
+            partitionKey: { name: 'status', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
         // 11. DentiPal-Messages (Used by WebSocket Handler)
         const messagesTable = new dynamodb.Table(this, 'MessagesTable', {
             tableName: 'DentiPal-V5-Messages',
@@ -1279,9 +1287,12 @@ export class DentiPalCDKStack extends cdk.Stack {
                 dataTraceEnabled: true, // Log full request/response data (optional, but helpful for debugging)
             },
             defaultCorsPreflightOptions: {
-                allowOrigins: apigateway.Cors.ALL_ORIGINS,
+                allowOrigins: [
+                    'http://localhost:5173',
+                    'https://main.d3agcvis750ojb.amplifyapp.com',
+                ],
                 allowMethods: apigateway.Cors.ALL_METHODS,
-                allowHeaders: ['Content-Type', 'Authorization', 'X-Amz-Date', 'X-Api-Key', 'X-Amz-Security-Token'],
+                allowHeaders: ['Content-Type', 'Authorization', 'X-Amz-Date', 'X-Api-Key', 'X-Amz-Security-Token', 'X-Requested-With'],
             },
             binaryMediaTypes: ['multipart/form-data'],
         });

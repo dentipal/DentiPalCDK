@@ -23,7 +23,7 @@ const dynamodb = new DynamoDBClient({ region: REGION });
 
 // ✅ ADDED: Import auth utility
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 async function batchGetAll(request: BatchGetItemCommandInput, maxRetries = 3) {
   let result: any = { Responses: {}, UnprocessedKeys: {} };
@@ -239,6 +239,7 @@ async function fetchNegotiationsForNegotiatingApps(applications: any[], concurre
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // ✅ PREFLIGHT CHECK
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };

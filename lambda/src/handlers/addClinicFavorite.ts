@@ -10,7 +10,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -24,6 +24,7 @@ interface FavoriteRequestBody {
 
 // Define the Lambda handler function with proper TypeScript types
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     /* Preflight */
     if (event && event.httpMethod === "OPTIONS") {
         return { statusCode: 204, headers: CORS_HEADERS, body: "" };
