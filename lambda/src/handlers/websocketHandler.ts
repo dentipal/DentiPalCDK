@@ -361,13 +361,14 @@ async function claimsFromConnection(event: WebSocketAPIGatewayEventV2): Promise<
     const userKey = item.userKey.S!;
     const display = (item.display && item.display.S) || "";
     const sub = (item.sub && item.sub.S) || "";
+    const email = (item.email && item.email.S) || "";
 
     if (userKey.startsWith("clinic#")) {
         return {
             userType: "Clinic",
             clinicId: userKey.slice(7),
             sub,
-            email: display, 
+            email,
             name: display,
         };
     }
@@ -376,7 +377,7 @@ async function claimsFromConnection(event: WebSocketAPIGatewayEventV2): Promise<
             userType: "Professional",
             clinicId: undefined,
             sub: userKey.slice(5),
-            email: display,
+            email,
             name: display,
         };
     }
@@ -486,7 +487,7 @@ async function validateToken(event: WebSocketAPIGatewayEventV2): Promise<UserCla
     }
 }
 
-async function putConnection(userKey: string, connectionId: string, userType: string, display: string, sub: string) {
+async function putConnection(userKey: string, connectionId: string, userType: string, display: string, sub: string, email: string = "") {
     const ttl = Math.floor(Date.now() / 1000) + 60 * 60 * 24; // 24h
     await ddb.send(
         new PutItemCommand({
@@ -497,8 +498,9 @@ async function putConnection(userKey: string, connectionId: string, userType: st
                 ttl: { N: String(ttl) },
                 connectedAt: { N: String(nowMs()) },
                 userType: { S: userType },
-                display: { S: display || "" }, 
-                sub: { S: sub || "" }, 
+                display: { S: display || "" },
+                sub: { S: sub || "" },
+                email: { S: email || "" },
             },
         })
     );
@@ -536,7 +538,8 @@ async function onConnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayP
         event.requestContext.connectionId,
         claims.userType,
         claims.name || claims.email || "",
-        claims.sub || ""
+        claims.sub || "",
+        claims.email || ""
     );
 
     return { statusCode: 200, body: "Connected" };
@@ -576,8 +579,9 @@ async function onDisconnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
 
 // ============== AVATAR / PROFILE IMAGE HELPERS ==============
 
-// In-memory cache for presigned URLs (warm Lambda only, ~1h TTL baked in)
-const avatarCache = new Map<string, string>();
+// In-memory cache for presigned URLs with TTL (URLs expire after 1h, cache for 50min to be safe)
+const AVATAR_CACHE_TTL_MS = 50 * 60 * 1000; // 50 minutes
+const avatarCache = new Map<string, { url: string; cachedAt: number }>();
 
 /**
  * Generates a presigned S3 GET URL for a given object key.
@@ -607,12 +611,13 @@ async function presignS3Key(key: string): Promise<string> {
 
 /**
  * Looks up a professional's profile image key from DynamoDB and returns a presigned URL.
- * Result is cached for the lifetime of the Lambda warm instance.
+ * Result is cached for 50 minutes (presigned URLs expire after 60 min).
  */
 async function getProfessionalAvatarUrl(profSub: string): Promise<string> {
     if (!profSub) return "";
     const cacheKey = `prof:${profSub}`;
-    if (avatarCache.has(cacheKey)) return avatarCache.get(cacheKey)!;
+    const cached = avatarCache.get(cacheKey);
+    if (cached && (Date.now() - cached.cachedAt) < AVATAR_CACHE_TTL_MS) return cached.url;
 
     try {
         const res = await ddb.send(new GetItemCommand({
@@ -622,11 +627,11 @@ async function getProfessionalAvatarUrl(profSub: string): Promise<string> {
         }));
         const imageKey = res.Item?.profileImageKey?.S || "";
         const url = imageKey ? await presignS3Key(imageKey) : "";
-        avatarCache.set(cacheKey, url);
+        avatarCache.set(cacheKey, { url, cachedAt: Date.now() });
         return url;
     } catch (e) {
         console.warn("getProfessionalAvatarUrl failed", profSub, (e as Error).message);
-        avatarCache.set(cacheKey, "");
+        avatarCache.set(cacheKey, { url: "", cachedAt: Date.now() });
         return "";
     }
 }
@@ -639,7 +644,8 @@ async function getProfessionalAvatarUrl(profSub: string): Promise<string> {
 async function getClinicAvatarUrl(clinicId: string): Promise<string> {
     if (!clinicId) return "";
     const cacheKey = `clinic:${clinicId}`;
-    if (avatarCache.has(cacheKey)) return avatarCache.get(cacheKey)!;
+    const cached = avatarCache.get(cacheKey);
+    if (cached && (Date.now() - cached.cachedAt) < AVATAR_CACHE_TTL_MS) return cached.url;
 
     try {
         const res = await ddb.send(new QueryCommand({
@@ -652,11 +658,11 @@ async function getClinicAvatarUrl(clinicId: string): Promise<string> {
         const item = (res.Items || [])[0];
         const imageKey = item?.office_image_key?.S || "";
         const url = imageKey ? await presignS3Key(imageKey) : "";
-        avatarCache.set(cacheKey, url);
+        avatarCache.set(cacheKey, { url, cachedAt: Date.now() });
         return url;
     } catch (e) {
         console.warn("getClinicAvatarUrl failed", clinicId, (e as Error).message);
-        avatarCache.set(cacheKey, "");
+        avatarCache.set(cacheKey, { url: "", cachedAt: Date.now() });
         return "";
     }
 }

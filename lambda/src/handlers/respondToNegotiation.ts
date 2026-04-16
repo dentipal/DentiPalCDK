@@ -162,6 +162,16 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     }
 
     const negotiationItem: DynamoDBItem = negotiationRes.Item;
+    const currentStatus: string | null = strFrom(negotiationItem.negotiationStatus);
+
+    // 3b. Validate state transition — terminal states cannot be changed
+    const TERMINAL_STATES = ["accepted", "declined"];
+    if (currentStatus && TERMINAL_STATES.includes(currentStatus)) {
+      return json(409, {
+        error: `Negotiation is already '${currentStatus}' and cannot be changed.`,
+      });
+    }
+
     const jobId: string | null = strFrom(negotiationItem.jobId);
 
     // 4. Load Job Item (to get job type and clinic owner)
