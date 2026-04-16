@@ -706,8 +706,42 @@ export class DentiPalCDKStack extends cdk.Stack {
 
         userPool.addTrigger(cognito.UserPoolOperation.PRE_SIGN_UP, preSignUpFn);
 
+        // Custom Auth Lambda triggers — for Google login without changing user passwords
+        const lambdaCode = lambda.Code.fromAsset(path.join(__dirname, '../lambda'));
+
+        const defineAuthChallengeFn = new lambda.Function(this, 'DefineAuthChallenge', {
+            functionName: 'DentiPal-DefineAuthChallenge',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/defineAuthChallenge.handler',
+            code: lambdaCode,
+            timeout: cdk.Duration.seconds(10),
+            memorySize: 128,
+        });
+
+        const createAuthChallengeFn = new lambda.Function(this, 'CreateAuthChallenge', {
+            functionName: 'DentiPal-CreateAuthChallenge',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/createAuthChallenge.handler',
+            code: lambdaCode,
+            timeout: cdk.Duration.seconds(10),
+            memorySize: 128,
+        });
+
+        const verifyAuthChallengeFn = new lambda.Function(this, 'VerifyAuthChallenge', {
+            functionName: 'DentiPal-VerifyAuthChallenge',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/verifyAuthChallenge.handler',
+            code: lambdaCode,
+            timeout: cdk.Duration.seconds(10),
+            memorySize: 128,
+        });
+
+        userPool.addTrigger(cognito.UserPoolOperation.DEFINE_AUTH_CHALLENGE, defineAuthChallengeFn);
+        userPool.addTrigger(cognito.UserPoolOperation.CREATE_AUTH_CHALLENGE, createAuthChallengeFn);
+        userPool.addTrigger(cognito.UserPoolOperation.VERIFY_AUTH_CHALLENGE_RESPONSE, verifyAuthChallengeFn);
+
         const client = userPool.addClient('ClinicAppClientV5', {
-            authFlows: { userPassword: true, userSrp: true, adminUserPassword: true },
+            authFlows: { userPassword: true, userSrp: true, adminUserPassword: true, custom: true },
             preventUserExistenceErrors: true,
         });
 
@@ -1188,7 +1222,8 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'cognito-idp:AdminRemoveUserFromGroup',
                 'cognito-idp:ListUsers',
                 'cognito-idp:AdminListGroupsForUser',
-                'cognito-idp:AdminInitiateAuth'
+                'cognito-idp:AdminInitiateAuth',
+                'cognito-idp:AdminRespondToAuthChallenge'
             ],
             resources: [userPool.userPoolArn],
         }));
