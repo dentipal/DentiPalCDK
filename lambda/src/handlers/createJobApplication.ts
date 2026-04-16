@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, QueryCommand, PutCommand } from "@a
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- 1. Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -34,6 +34,7 @@ interface ApplyJobBody {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "POST";
 
     // 1. Handle CORS Preflight

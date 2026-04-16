@@ -12,7 +12,7 @@ import {
     AttributeType
 } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 // ✅ ADDED: Import auth utility
 import { extractUserFromBearerToken } from "./utils";
 
@@ -59,6 +59,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // Handle OPTIONS preflight requests
     if (event.httpMethod === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };

@@ -64,7 +64,7 @@ const JOB_NEGOTIATIONS_TABLE: string = process.env.JOB_NEGOTIATIONS_TABLE!;
 const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
 const eb = new EventBridgeClient({ region: REGION });
 
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const VALID_RESPONSES: ReadonlyArray<InvitationResponseData['response']> = [
   "accepted",
@@ -76,6 +76,7 @@ const VALID_RESPONSES: ReadonlyArray<InvitationResponseData['response']> = [
 export const handler = async (
   event: APIGatewayProxyEventV2
 ): Promise<HandlerResponse> => {
+    setOriginFromEvent(event);
   
   // LOG: Entry
   console.log("--- HANDLER STARTED ---");

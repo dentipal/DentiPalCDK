@@ -1,7 +1,7 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { DynamoDBClient, QueryCommand, ScanCommand } from "@aws-sdk/client-dynamodb";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-JobApplications";
@@ -92,6 +92,7 @@ function itemToObject(item: Record<string, any>): any {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   const method = (event.requestContext as any).http?.method || event.httpMethod || "GET";
 
   if (method === "OPTIONS") return { statusCode: 204, headers: CORS_HEADERS, body: "" };

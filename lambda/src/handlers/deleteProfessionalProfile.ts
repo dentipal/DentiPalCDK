@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const client = new DynamoDBClient({ region: REGION });
@@ -15,6 +15,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {

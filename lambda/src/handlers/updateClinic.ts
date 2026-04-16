@@ -3,7 +3,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { hasClinicAccess, buildAddress, AccessLevel, extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -49,6 +49,7 @@ const ALLOWED_UPDATERS: ReadonlySet<string> = new Set(["root", "clinicadmin"]);
 /** ----------------------------------------------------------------------- */
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     const method = getMethod(event);
 
     // 1. CORS Preflight

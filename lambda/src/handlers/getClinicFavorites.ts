@@ -11,7 +11,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -86,6 +86,7 @@ interface ResponseBody {
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // Preflight
     if (event && event.httpMethod === "OPTIONS") {
         // ✅ Uses imported headers

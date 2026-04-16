@@ -11,7 +11,7 @@ import {
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Constants and Initialization ---
 
@@ -31,6 +31,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyStructuredRes
 
 // --- Main Handler Function ---
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> => {
+    setOriginFromEvent(event);
 
   // Check for Preflight OPTIONS request
   if (event.requestContext?.http?.method === "OPTIONS") {

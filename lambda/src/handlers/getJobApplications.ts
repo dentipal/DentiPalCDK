@@ -8,7 +8,7 @@ import {
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 export const dynamodb = new DynamoDBClient({
   region: process.env.REGION,
 });
@@ -77,6 +77,7 @@ const json = (statusCode: number, bodyObj: object): any => ({
 
 // ---- MAIN LAMBDA HANDLER ----
 export const handler = async (event: any) => {
+    setOriginFromEvent(event);
   try {
     // Handle OPTIONS
     if (event.httpMethod === "OPTIONS") {

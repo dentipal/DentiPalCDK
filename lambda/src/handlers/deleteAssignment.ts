@@ -3,7 +3,7 @@ import { DynamoDBClient, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
 import { isRoot, extractUserFromBearerToken } from './utils'; // Assumed dependency
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Initialization ---
 
@@ -18,6 +18,7 @@ interface DeleteAssignmentRequestBody {
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // ✅ ADDED PREFLIGHT CHECK
     if (event.httpMethod === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };

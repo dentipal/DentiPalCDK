@@ -16,12 +16,14 @@
     "@aws-sdk/lib-dynamodb": "^3.645.0",
     "@aws-sdk/s3-request-presigner": "^3.940.0",
     "aws-sdk": "^2.1692.0",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "zipcodes": "^8.0.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.161",
     "@types/node": "^20.12.7",
     "@types/uuid": "^9.0.8",
+    "@types/zipcodes": "^8.0.5",
     "typescript": "^5.4.5"
   }
 }

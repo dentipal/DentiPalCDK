@@ -8,7 +8,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
@@ -125,6 +125,7 @@ function getMethod(event: APIGatewayProxyEvent): string {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   try {
     // CORS preflight
     if (getMethod(event) === "OPTIONS") {

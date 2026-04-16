@@ -6,7 +6,7 @@ import {
 import { DynamoDBClient, ScanCommand, ScanCommandInput } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 const dynamo = new DynamoDBClient({ region: process.env.REGION });
@@ -50,6 +50,7 @@ function formatAddressFromItem(item: any): string {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };

@@ -8,7 +8,7 @@ import {
 // Updated imports to use the new token extraction utility
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -43,6 +43,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // --- CORS preflight ---
     const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 

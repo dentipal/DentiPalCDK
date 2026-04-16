@@ -6,7 +6,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyHandler, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
@@ -29,6 +29,7 @@ function toStrArr(attr: any): string[] {
 }
 
 export const handler: APIGatewayProxyHandler = async (event): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   try {
     if (event.httpMethod === "OPTIONS") {
       return { statusCode: 200, headers: CORS_HEADERS, body: "" };

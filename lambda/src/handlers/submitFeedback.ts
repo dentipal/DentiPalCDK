@@ -3,7 +3,7 @@ import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import * as crypto from "crypto";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers and utils
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 
 // --- Type Definitions ---
@@ -128,6 +128,7 @@ function deriveUserTypeFromClaims(claims: Claims | undefined): "Professional" | 
 
 // The main handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   const method = getMethod(event);
   
   // CORS Preflight

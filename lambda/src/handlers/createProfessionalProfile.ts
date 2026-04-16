@@ -6,7 +6,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { extractUserFromBearerToken } from "./utils";
 import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -41,6 +41,7 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 // Writes address → USER_ADDRESSES_TABLE  (if valid address fields are present)
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     const method = (event.requestContext as any).http?.method || event.httpMethod || "POST";
 
     // CORS preflight

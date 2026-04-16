@@ -3,7 +3,7 @@ import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
 // Updated imports to use the new token extraction utility
 import { isRoot, extractUserFromBearerToken } from './utils';
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Initialization ---
 
@@ -34,6 +34,7 @@ interface AssignClinicRequestBody {
  * This operation is restricted to users in the 'Root' Cognito group.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // --- CORS preflight ---
     const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 

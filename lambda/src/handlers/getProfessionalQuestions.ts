@@ -2,7 +2,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Helper to build JSON responses with shared CORS
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
@@ -459,6 +459,7 @@ const ROLE_QUESTIONS: RoleQuestionsMap = {
 export const handler = async (
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // CORS Preflight
     if (event.httpMethod === "OPTIONS") {
         return {

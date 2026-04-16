@@ -20,7 +20,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 
@@ -191,6 +191,7 @@ function extractUsername(event: APIGatewayProxyEvent, bodyEmail: string | undefi
 // --- 4. Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // --- CORS preflight ---
     // Check standard REST method or HTTP API v2 method
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";

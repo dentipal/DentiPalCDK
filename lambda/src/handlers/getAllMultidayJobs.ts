@@ -7,7 +7,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Changed import to use the new token utility
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -71,7 +71,6 @@ interface MultidayJobResponse {
     updatedAt: string;
     created_by: string;
     dates: string[]; // SS mapped to string[]
-    created_by: string;
 }
 
 /**
@@ -80,6 +79,7 @@ interface MultidayJobResponse {
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // ✅ ADDED PREFLIGHT CHECK
     if (event.httpMethod === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };

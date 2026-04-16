@@ -5,7 +5,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 
 const s3Client = new S3Client({ region: process.env.REGION });
@@ -22,6 +22,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
  * and returns a presigned URL for the latest image.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     if (event.httpMethod === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };
     }

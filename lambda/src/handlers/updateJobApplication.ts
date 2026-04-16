@@ -12,7 +12,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -54,6 +54,7 @@ interface ApplicationItem {
  * It verifies token, ownership, and application status before applying updates.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };

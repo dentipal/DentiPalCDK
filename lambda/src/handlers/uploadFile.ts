@@ -1,7 +1,7 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const s3Client = new S3Client({ region: process.env.REGION });
 
@@ -22,6 +22,7 @@ interface RequestBody {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "POST";
     if (method === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };

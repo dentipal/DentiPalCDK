@@ -4,7 +4,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, hasClinicAccess, isRoot } from "./utils"; 
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -190,6 +190,7 @@ const validatePermanentJob = (jobData: JobData): string | null => {
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     console.log('🚀 HANDLER STARTED - createPermanentJob.ts');
     console.log('HTTP Method:', event.httpMethod);
     console.log('Path:', event.path);

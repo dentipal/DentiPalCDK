@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, UpdateCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 
 const REGION: string = process.env.REGION || "us-east-1";
@@ -71,6 +71,7 @@ const transformBody = (body: any): any => {
 };
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     console.info("🔧 Starting updateClinicProfile handler");
 
     if (event.httpMethod === "OPTIONS") {

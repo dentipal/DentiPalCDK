@@ -10,7 +10,7 @@ import {
 } from "@aws-sdk/client-eventbridge";
 import { APIGatewayProxyResult, APIGatewayProxyEvent } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Initialization ---
 const REGION: string = process.env.AWS_REGION || process.env.REGION || "us-east-1";
@@ -41,6 +41,7 @@ interface RequestBody {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     try {
         // 🔍 DEBUG LOGS
         console.log("--- DEBUG START ---");

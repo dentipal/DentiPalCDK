@@ -13,7 +13,7 @@ import { v4 as uuid } from "uuid"; // Import v4 for UUID generation
 import { extractUserFromBearerToken } from "./utils"; // Import extractUserFromBearerToken function (assuming it's in utils.ts)
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -57,6 +57,7 @@ interface ClinicInfo {
 
 // Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // ✅ ADDED PREFLIGHT CHECK
     if (event.httpMethod === "OPTIONS") {
         return { statusCode: 200, headers: CORS_HEADERS, body: "" };

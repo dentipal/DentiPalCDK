@@ -11,7 +11,7 @@ import {
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import { APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- 1. Environment and Constants ---
 
@@ -109,6 +109,7 @@ const updateItemStatus = async (
 // --- 4. Handler Function ---
 
 export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // CORS Preflight (if invoked via API Gateway)
   if (event?.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };

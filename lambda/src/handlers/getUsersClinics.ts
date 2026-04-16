@@ -11,7 +11,7 @@ import {
 
 import { extractUserFromBearerToken, isRoot } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
 
@@ -25,6 +25,7 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };

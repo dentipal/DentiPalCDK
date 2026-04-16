@@ -11,7 +11,7 @@ import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, buildAddress, verifyToken } from "./utils";
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize the DynamoDB client
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
@@ -88,6 +88,7 @@ function canCreateClinic(groups: string[]): boolean {
 
 // Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // Handle CORS preflight
     if (event.httpMethod === "OPTIONS") {
         // ✅ Updated to use CORS_HEADERS

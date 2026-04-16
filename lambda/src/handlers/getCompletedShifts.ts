@@ -12,7 +12,7 @@ import {
 } from "aws-lambda";
 
 import { extractUserFromBearerToken } from "./utils.js";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -84,6 +84,7 @@ function mapPostingItem(item: Record<string, AttributeValue>) {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   try {
     // CORS Preflight
     if (event.httpMethod === "OPTIONS") {

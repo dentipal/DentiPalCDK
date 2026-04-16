@@ -5,7 +5,7 @@ import {
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 
 // --- AWS SDK Clients Initialization ---
@@ -28,6 +28,7 @@ interface UserClinicAssignmentItem {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {

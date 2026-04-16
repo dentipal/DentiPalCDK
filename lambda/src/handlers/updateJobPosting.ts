@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand, UpdateCommandInput } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
 import { extractUserFromBearerToken } from "./utils";
 
@@ -67,6 +67,7 @@ interface JobItem {
 // --- 4. Handler Function ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     // 1. Handle CORS Preflight

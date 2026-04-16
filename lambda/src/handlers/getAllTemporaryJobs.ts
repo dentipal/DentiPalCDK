@@ -11,7 +11,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -106,6 +106,7 @@ async function getAppliedJobIdsForUser(userSub: string): Promise<Set<string>> {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
     const method = (event.requestContext as any)?.http?.method || event.httpMethod || "GET";
     

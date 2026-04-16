@@ -7,7 +7,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Helper to build JSON responses with shared CORS
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
@@ -49,6 +49,7 @@ interface Profile {
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };

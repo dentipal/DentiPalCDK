@@ -9,7 +9,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize the Cognito client (AWS SDK v3)
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
@@ -102,6 +102,7 @@ function deriveUserTypeFromGroups(groups: string[]): 'clinic' | 'professional' |
 // --- handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     console.log("=== /auth/forgot START ===");
     
     // ✅ ADDED PREFLIGHT CHECK

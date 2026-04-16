@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize the Cognito Identity Provider Client
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
@@ -49,6 +49,7 @@ async function findUsernameByEmail(userPoolId: string, emailLower: string): Prom
 
 // Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     console.log("=== /auth/confirm-forgot-password START ===");
     console.log("[req] method:", event?.httpMethod);
     console.log("[req] headers:", JSON.stringify(event?.headers || {}));

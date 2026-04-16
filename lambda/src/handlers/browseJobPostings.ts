@@ -10,7 +10,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming extractUserFromBearerToken exists in a local utility file
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
 
 // --- Initialization ---
@@ -90,6 +90,7 @@ interface JobPosting {
 // Define the Lambda handler function
 // Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     try {
         // --- CORS preflight ---
         // FIX: Cast event to 'any' to access .http (HTTP API v2) property without TS error

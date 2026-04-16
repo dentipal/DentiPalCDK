@@ -6,7 +6,7 @@ import {
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS } from "./corsHeaders";
+import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 // ✅ UPDATE: Changed import to use the new token utility
 import { extractUserFromBearerToken } from "./utils";
 
@@ -146,6 +146,7 @@ const getPermanentStartDate = (job: UnmarshalledJobItem): PermanentStartDate => 
 // ------------------------------------------------------------
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+    setOriginFromEvent(event);
     console.log("📥 Incoming Event:", JSON.stringify(event, null, 2));
 
     // --- CORS preflight ---
