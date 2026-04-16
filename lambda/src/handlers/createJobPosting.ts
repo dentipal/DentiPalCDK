@@ -347,7 +347,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             status: jobData.status || 'active',
             createdAt: timestamp,
             updatedAt: timestamp,
-            created_by: `${cognitoFirstName} ${cognitoLastName}`.trim() || (userEmail && userEmail.includes("@") ? userEmail.split("@")[0] : userEmail) || "Unknown",
+            created_by: `${cognitoFirstName} ${cognitoLastName}`.trim() || (userEmail && userEmail.includes("@") ? userEmail.split("@")[0].toLowerCase() : userEmail.toLowerCase()) || "Unknown",
             creatorName: `${clinicProfile.primary_contact_first_name || ""} ${clinicProfile.primary_contact_last_name || ""}`.trim() || userEmail || userSub,
             // Address details
             addressLine1: clinicAddress.addressLine1,

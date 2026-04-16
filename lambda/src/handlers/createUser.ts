@@ -89,7 +89,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 2️⃣ Parse the body and validate
         const body: RequestBody = JSON.parse(event.body || "{}");
-        const { firstName, lastName, phoneNumber, email, password, verifyPassword, subgroup, clinicIds, sendWelcomeEmail } = body;
+        const { firstName, lastName, phoneNumber, email: rawEmail, password, verifyPassword, subgroup, clinicIds, sendWelcomeEmail } = body;
+        const email = rawEmail ? rawEmail.toLowerCase() : "";
 
         // Log fields for debugging (exclude password)
         console.log("Parsed body:", { ...body, password: "***", verifyPassword: "***" });

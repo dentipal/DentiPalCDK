@@ -360,7 +360,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 status: "active",
                 createdAt: timestamp,
                 updatedAt: timestamp,
-                created_by: `${cognitoFirstName} ${cognitoLastName}`.trim() || (userEmail && userEmail.includes("@") ? userEmail.split("@")[0] : userEmail) || "Unknown",
+                created_by: `${cognitoFirstName} ${cognitoLastName}`.trim() || (userEmail && userEmail.includes("@") ? userEmail.split("@")[0].toLowerCase() : userEmail.toLowerCase()) || "Unknown",
                 // Address
                 addressLine1: clinicAddress.addressLine1,
                 addressLine2: clinicAddress.addressLine2,

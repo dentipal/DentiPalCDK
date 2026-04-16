@@ -727,6 +727,9 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
             items = res.Items || [];
         }
 
+        const iAmClinic = claims.userType === "Clinic";
+
+        // PHASE 1: Build conversations with names only (fast — no avatar lookups)
         const conversations = await Promise.all(
             items.map(async (it) => {
                 const conversationId = it.conversationId?.S || "";
@@ -739,8 +742,6 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                 const clinicUnread = Number(it.clinicUnread?.N || 0);
                 const profUnread = Number(it.profUnread?.N || 0);
 
-                // Determine if I am the clinic side of this conversation
-                const iAmClinic = claims.userType === "Clinic";
                 let recipientName = "";
                 if (iAmClinic) {
                     const profSub = (profKey || "").replace(/^prof#/, "");
@@ -751,38 +752,52 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
 
                 const unreadCount = iAmClinic ? clinicUnread : profUnread;
 
-                // Fetch profile image — best-effort, never throws
-                let avatarUrl = "";
-                try {
-                    if (iAmClinic) {
-                        const profSub = (profKey || "").replace(/^prof#/, "");
-                        avatarUrl = await getProfessionalAvatarUrl(profSub);
-                    } else {
-                        const cid = (clinicKey || "").replace(/^clinic#/, "");
-                        avatarUrl = await getClinicAvatarUrl(cid);
-                    }
-                } catch { /* ignore */ }
-
                 return {
                     conversationId,
                     recipientName,
                     lastMessage: lastPreview,
                     lastMessageAt,
                     unreadCount,
-                    ...(avatarUrl ? { avatarUrl } : {}),
+                    clinicKey,
+                    profKey,
                 };
             })
         );
-        
-        // Sort in memory by lastMessageAt (most recent first) just in case GSI sort is slightly off 
-        // or if using the scan fallback.
+
         conversations.sort((a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime());
 
-
+        // Send conversations immediately — user sees the list fast
         await send(connClient, connectionId, {
             type: "conversationsResponse",
-            conversations,
+            conversations: conversations.map(({ clinicKey, profKey, ...rest }) => rest),
         });
+
+        // PHASE 2: Fetch avatars in background and send update
+        try {
+            const avatarMap: Record<string, string> = {};
+            await Promise.all(
+                conversations.map(async (c) => {
+                    try {
+                        let url = "";
+                        if (iAmClinic) {
+                            const profSub = (c.profKey || "").replace(/^prof#/, "");
+                            url = await getProfessionalAvatarUrl(profSub);
+                        } else {
+                            const cid = (c.clinicKey || "").replace(/^clinic#/, "");
+                            url = await getClinicAvatarUrl(cid);
+                        }
+                        if (url) avatarMap[c.conversationId] = url;
+                    } catch { /* ignore */ }
+                })
+            );
+
+            if (Object.keys(avatarMap).length > 0) {
+                await send(connClient, connectionId, {
+                    type: "avatarsUpdate",
+                    avatars: avatarMap,
+                });
+            }
+        } catch { /* avatar fetch is best-effort */ }
 
         return { statusCode: 200, body: "OK" };
     } catch (error) {

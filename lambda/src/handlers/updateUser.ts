@@ -231,155 +231,329 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        const body: RequestBody = JSON.parse(event.body || "{}");
-        const { firstName, lastName, phoneNumber, subgroup, clinicIds, email } = body;
-
-        const username: string | null = extractUsername(event, email);
-        
-        if (!username) {
+        // --- Parse body ---
+        let body: RequestBody;
+        try {
+            body = JSON.parse(event.body || "{}");
+        } catch {
             return json(400, {
-                error: "Bad Request",
-                statusCode: 400,
-                message: "Username or email is required",
-                details: { pathFormat: "PUT /users/{email}" },
+                error: "Invalid JSON",
+                message: "Request body is not valid JSON. Please send a properly formatted JSON object.",
                 timestamp: new Date().toISOString()
             });
         }
 
-        // Ensure user exists (throws if not found)
+        const { firstName, lastName, subgroup, clinicIds, email: rawEmail } = body;
+        const email = rawEmail ? rawEmail.toLowerCase() : undefined;
+
+        // --- Block fields that cannot be edited ---
+        if ((body as any).password || (body as any).newPassword) {
+            return json(400, {
+                error: "Not Editable",
+                message: "Password cannot be changed through this endpoint.",
+                timestamp: new Date().toISOString()
+            });
+        }
+        if ((body as any).phoneNumber || (body as any).phone_number) {
+            return json(400, {
+                error: "Not Editable",
+                message: "Phone number cannot be changed through this endpoint.",
+                timestamp: new Date().toISOString()
+            });
+        }
+        if ((body as any).username) {
+            return json(400, {
+                error: "Not Editable",
+                message: "Username cannot be changed.",
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        // --- Check at least one editable field is provided ---
+        const hasFirstName = firstName !== undefined && firstName !== null;
+        const hasLastName = lastName !== undefined && lastName !== null;
+        const hasSubgroup = subgroup !== undefined && subgroup !== null;
+        const hasClinicIds = clinicIds !== undefined && clinicIds !== null;
+
+        if (!hasFirstName && !hasLastName && !hasSubgroup && !hasClinicIds) {
+            return json(400, {
+                error: "Nothing to Update",
+                message: "Please provide at least one field to update.",
+                editableFields: ["firstName", "lastName", "subgroup", "clinicIds"],
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        // --- Validate firstName ---
+        if (hasFirstName) {
+            if (typeof firstName !== "string" || firstName.trim().length === 0) {
+                return json(400, {
+                    error: "Invalid First Name",
+                    message: "First name must be a non-empty string.",
+                    timestamp: new Date().toISOString()
+                });
+            }
+            if (firstName.trim().length < 2) {
+                return json(400, {
+                    error: "Invalid First Name",
+                    message: "First name must be at least 2 characters long.",
+                    timestamp: new Date().toISOString()
+                });
+            }
+            if (!/^[a-zA-Z\s'-]+$/.test(firstName.trim())) {
+                return json(400, {
+                    error: "Invalid First Name",
+                    message: "First name can only contain letters, spaces, hyphens, and apostrophes.",
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
+
+        // --- Validate lastName ---
+        if (hasLastName) {
+            if (typeof lastName !== "string" || lastName.trim().length === 0) {
+                return json(400, {
+                    error: "Invalid Last Name",
+                    message: "Last name must be a non-empty string.",
+                    timestamp: new Date().toISOString()
+                });
+            }
+            if (lastName.trim().length < 2) {
+                return json(400, {
+                    error: "Invalid Last Name",
+                    message: "Last name must be at least 2 characters long.",
+                    timestamp: new Date().toISOString()
+                });
+            }
+            if (!/^[a-zA-Z\s'-]+$/.test(lastName.trim())) {
+                return json(400, {
+                    error: "Invalid Last Name",
+                    message: "Last name can only contain letters, spaces, hyphens, and apostrophes.",
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
+
+        // --- Validate subgroup ---
+        if (hasSubgroup) {
+            if (typeof subgroup !== "string" || subgroup.trim().length === 0) {
+                return json(400, {
+                    error: "Invalid Subgroup",
+                    message: "Subgroup must be a non-empty string.",
+                    validOptions: ["ClinicAdmin", "ClinicManager", "ClinicViewer"],
+                    timestamp: new Date().toISOString()
+                });
+            }
+            if (!VALID_SUBGROUPS.includes(subgroup.toLowerCase())) {
+                return json(400, {
+                    error: "Invalid Subgroup",
+                    message: `"${subgroup}" is not a valid role. Choose one of: ClinicAdmin, ClinicManager, ClinicViewer.`,
+                    validOptions: ["ClinicAdmin", "ClinicManager", "ClinicViewer"],
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
+
+        // --- Validate clinicIds ---
+        if (hasClinicIds) {
+            if (!Array.isArray(clinicIds)) {
+                return json(400, {
+                    error: "Invalid Clinic IDs",
+                    message: "clinicIds must be an array of clinic ID strings.",
+                    example: { clinicIds: ["clinic-id-1", "clinic-id-2"] },
+                    timestamp: new Date().toISOString()
+                });
+            }
+            for (let i = 0; i < clinicIds.length; i++) {
+                if (typeof clinicIds[i] !== "string" || clinicIds[i].trim().length === 0) {
+                    return json(400, {
+                        error: "Invalid Clinic ID",
+                        message: `clinicIds[${i}] is invalid. Each clinic ID must be a non-empty string.`,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            }
+            // Check for duplicates
+            const uniqueIds = new Set(clinicIds);
+            if (uniqueIds.size !== clinicIds.length) {
+                return json(400, {
+                    error: "Duplicate Clinic IDs",
+                    message: "clinicIds contains duplicate values. Each clinic ID must be unique.",
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
+
+        // --- Resolve username ---
+        const username: string | null = extractUsername(event, email);
+
+        if (!username) {
+            return json(400, {
+                error: "Missing Username",
+                message: "Could not determine which user to update. Provide the user's email in the URL path (PUT /users/{email}) or in the request body.",
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        // --- Ensure user exists in Cognito ---
         try {
             await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
         } catch (e) {
             return json(404, {
-                error: "Not Found",
-                statusCode: 404,
-                message: "User does not exist",
-                details: { username: username },
+                error: "User Not Found",
+                message: `No user found with username "${username}" in the system. Please check the email/username and try again.`,
                 timestamp: new Date().toISOString()
             });
         }
 
-        // 1. Validate subgroup
-        if (subgroup && !VALID_SUBGROUPS.includes(subgroup.toLowerCase())) {
-            return json(400, {
-                error: "Bad Request",
-                statusCode: 400,
-                message: `Invalid subgroup: ${subgroup}`,
-                details: { validGroups: VALID_SUBGROUPS },
-                timestamp: new Date().toISOString()
-            });
-        }
-
-        // 2. Build user attributes array for Cognito update
+        // --- Update Cognito attributes (firstName, lastName) ---
         const attrs: AttributeType[] = [];
-        if (firstName) attrs.push({ Name: "given_name", Value: firstName });
-        if (lastName)  attrs.push({ Name: "family_name", Value: lastName });
-        
-        if (phoneNumber) {
-            const e164 = toE164(phoneNumber);
-            if (!e164) {
-                return json(400, {
-                    error: "Bad Request",
-                    statusCode: 400,
-                    message: "Invalid phone number format",
-                    details: { format: "E.164 format (e.g., +919876543210)", received: phoneNumber },
-                    timestamp: new Date().toISOString()
-                });
-            }
-            attrs.push({ Name: "phone_number", Value: e164 });
-        }
+        if (hasFirstName) attrs.push({ Name: "given_name", Value: firstName!.trim() });
+        if (hasLastName) attrs.push({ Name: "family_name", Value: lastName!.trim() });
 
-        // 3. Validate clinicIds if provided
-        if (clinicIds && !Array.isArray(clinicIds)) {
-            return json(400, {
-                error: "Bad Request",
-                statusCode: 400,
-                message: "clinicIds must be an array",
-                details: { expected: "Array of clinic IDs" },
-                timestamp: new Date().toISOString()
-            });
-        }
-        
-        // 4. Update Cognito attributes if any were collected
         if (attrs.length) {
-            await cognito.send(new AdminUpdateUserAttributesCommand({
-                UserPoolId: USER_POOL_ID,
-                Username: username,
-                UserAttributes: attrs
-            }));
-        }
-
-        // 5. Update Cognito group (if subgroup is provided)
-        if (subgroup) {
-            // Remove from all existing clinic groups first
-            await removeFromClinicSubgroups(username);
-            
-            // Add to the new subgroup
-            await cognito.send(new AdminAddUserToGroupCommand({
-                UserPoolId: USER_POOL_ID,
-                Username: username,
-                GroupName: subgroup
-            }));
-        }
-
-        // 6. Update DynamoDB to associate user with clinics (if clinicIds are provided)
-        if (Array.isArray(clinicIds) && clinicIds.length > 0) {
-            const userSub: string | null = await getUserSubByUsername(username);
-            
-            if (!userSub) {
-                return json(400, {
-                    error: "Bad Request",
-                    statusCode: 400,
-                    message: "Could not resolve user sub required for clinic association",
-                    details: { username: username },
+            try {
+                await cognito.send(new AdminUpdateUserAttributesCommand({
+                    UserPoolId: USER_POOL_ID,
+                    Username: username,
+                    UserAttributes: attrs
+                }));
+            } catch (err: any) {
+                return json(500, {
+                    error: "Failed to Update Name",
+                    message: `Could not update user attributes in Cognito: ${err.message}`,
                     timestamp: new Date().toISOString()
                 });
             }
-            
-            for (const cid of clinicIds) {
-                // Optionally verify clinic existence before upserting
-                const getParams: GetItemCommandInput = {
+        }
+
+        // --- Update Cognito group (subgroup) ---
+        if (hasSubgroup) {
+            try {
+                await removeFromClinicSubgroups(username);
+                await cognito.send(new AdminAddUserToGroupCommand({
+                    UserPoolId: USER_POOL_ID,
+                    Username: username,
+                    GroupName: subgroup!
+                }));
+            } catch (err: any) {
+                return json(500, {
+                    error: "Failed to Update Role",
+                    message: `Could not update user role to "${subgroup}": ${err.message}`,
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
+
+        // --- Update clinic assignments ---
+        const notFoundClinics: string[] = [];
+        const addedClinics: string[] = [];
+        const removedClinics: string[] = [];
+
+        if (hasClinicIds) {
+            const userSub: string | null = await getUserSubByUsername(username);
+
+            if (!userSub) {
+                return json(500, {
+                    error: "Internal Error",
+                    message: "Could not find the user's internal ID (sub). This user may have been created incorrectly in Cognito.",
+                    timestamp: new Date().toISOString()
+                });
+            }
+
+            // Find all clinics currently associated with this user
+            const { ScanCommand } = await import("@aws-sdk/client-dynamodb");
+            const scanRes = await dynamodb.send(new ScanCommand({
+                TableName: CLINICS_TABLE_NAME,
+                FilterExpression: "contains(AssociatedUsers, :sub)",
+                ExpressionAttributeValues: { ":sub": { S: userSub } },
+                ProjectionExpression: "clinicId, AssociatedUsers",
+            }));
+            const currentClinicIds = (scanRes.Items || []).map(item => item.clinicId?.S).filter(Boolean) as string[];
+
+            // Remove user from clinics no longer in the new list
+            const newSet = new Set(clinicIds!);
+            for (const oldCid of currentClinicIds) {
+                if (!newSet.has(oldCid)) {
+                    const oldItem = (scanRes.Items || []).find(item => item.clinicId?.S === oldCid);
+                    const assocList = oldItem?.AssociatedUsers?.L || [];
+                    const idx = assocList.findIndex(v => v.S === userSub);
+                    if (idx >= 0) {
+                        try {
+                            await dynamodb.send(new UpdateItemCommand({
+                                TableName: CLINICS_TABLE_NAME,
+                                Key: { clinicId: { S: oldCid } },
+                                UpdateExpression: `REMOVE AssociatedUsers[${idx}]`,
+                            }));
+                            removedClinics.push(oldCid);
+                        } catch (err) {
+                            console.warn(`Failed to remove user from clinic ${oldCid}:`, err);
+                        }
+                    }
+                }
+            }
+
+            // Add user to new clinics
+            for (const cid of clinicIds!) {
+                const getRes = await dynamodb.send(new GetItemCommand({
                     TableName: CLINICS_TABLE_NAME,
                     Key: { clinicId: { S: cid } }
-                };
-                const getRes = await dynamodb.send(new GetItemCommand(getParams));
+                }));
 
                 if (!getRes.Item) {
-                    console.warn(`Skipping association for clinicId: ${cid}. Clinic not found.`);
-                    continue; 
+                    notFoundClinics.push(cid);
+                    continue;
                 }
-                
+
                 await upsertUserIntoClinic(cid, userSub);
+                if (!currentClinicIds.includes(cid)) {
+                    addedClinics.push(cid);
+                }
             }
         }
 
-        return json(200, {
+        // --- Build success response ---
+        const updatedFields: string[] = [];
+        if (hasFirstName) updatedFields.push("firstName");
+        if (hasLastName) updatedFields.push("lastName");
+        if (hasSubgroup) updatedFields.push(`role → ${subgroup}`);
+        if (addedClinics.length) updatedFields.push(`added to clinics: ${addedClinics.join(", ")}`);
+        if (removedClinics.length) updatedFields.push(`removed from clinics: ${removedClinics.join(", ")}`);
+
+        const response: any = {
             status: "success",
-            statusCode: 200,
-            message: "User updated successfully",
+            message: "User updated successfully.",
+            updatedFields,
             data: { username },
             timestamp: new Date().toISOString()
-        });
+        };
+
+        if (notFoundClinics.length) {
+            response.warnings = [`The following clinic IDs were not found and were skipped: ${notFoundClinics.join(", ")}`];
+        }
+
+        return json(200, response);
+
     } catch (error: any) {
         console.error("Error updating user:", error);
 
-        // ✅ Check for Auth errors and return 401
-        if (error.message === "Authorization header missing" || 
+        if (error.message === "Authorization header missing" ||
             error.message?.startsWith("Invalid authorization header") ||
             error.message === "Invalid access token format" ||
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims") {
-            
+
             return json(401, {
                 error: "Unauthorized",
-                details: error.message
+                message: "Your session has expired or your token is invalid. Please log in again.",
+                details: error.message,
+                timestamp: new Date().toISOString()
             });
         }
 
         return json(500, {
             error: "Internal Server Error",
-            statusCode: 500,
-            message: "Failed to update user",
+            message: "Something went wrong while updating the user. Please try again later.",
             details: { reason: error.message },
             timestamp: new Date().toISOString()
         });
