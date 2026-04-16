@@ -224,7 +224,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
 
         // Job applications for clinics
         "GET:/clinics/{clinicId}/jobs": getJobApplicationsForClinicHandler,
-        "GET:/clinics/{clinicId}/applicants": getJobApplicantsOfAClinicHandler,
+        "GET:/{clinicId}/jobs": getJobApplicantsOfAClinicHandler,
 
         // Specific job type endpoints
         "POST:/jobs/temporary": createTemporaryJobHandler,

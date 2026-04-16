@@ -145,8 +145,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (result.Attributes) {
              for (const key in result.Attributes) {
                  const val = result.Attributes[key];
-                 if (val.S) unmarshalledAttributes[key] = val.S;
-                 if (val.BOOL !== undefined) unmarshalledAttributes[key] = val.BOOL;
+                 if (val.S !== undefined) unmarshalledAttributes[key] = val.S;
+                 else if (val.N !== undefined) unmarshalledAttributes[key] = Number(val.N);
+                 else if (val.BOOL !== undefined) unmarshalledAttributes[key] = val.BOOL;
+                 else if (val.SS) unmarshalledAttributes[key] = val.SS;
+                 else if (val.L) unmarshalledAttributes[key] = val.L;
+                 else if (val.M) unmarshalledAttributes[key] = val.M;
              }
         }
 

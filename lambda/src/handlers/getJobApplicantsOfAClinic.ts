@@ -166,72 +166,110 @@ function chooseLatestNegotiation(items: any[]) {
   return best;
 }
 
-async function fetchNegotiationsForNegotiatingApps(applications: any[], concurrency = 10) {
-  const ids = dedupe(
-    applications
-      .filter((a) => (a.applicationStatus || "").toLowerCase() === "negotiating")
-      .map((a) => (a.applicationId ?? "").toString().trim())
-      .filter(Boolean)
+function formatNegotiation(item: any) {
+  const clinicField = item?.clinic ?? item?.clinicId ?? null;
+  return {
+    negotiationId: item?.negotiationId ?? null,
+    clinicCounterHourlyRate: item?.clinicCounterHourlyRate ?? null,
+    professionalCounterHourlyRate: item?.professionalCounterHourlyRate ?? null,
+    clinicCounterRate: item?.clinicCounterRate ?? item?.clinicCounterHourlyRate ?? null,
+    professionalCounterRate: item?.professionalCounterRate ?? item?.professionalCounterHourlyRate ?? null,
+    status: item?.status ?? item?.negotiationStatus ?? null,
+    clinic: clinicField,
+    updatedAt: item?.updatedAt ?? null,
+    createdAt: item?.createdAt ?? null,
+  };
+}
+
+async function fetchNegotiationsForNegotiatingApps(applications: any[]) {
+  const negotiatingApps = applications.filter(
+    (a) => (a.applicationStatus || "").toLowerCase() === "negotiating"
   );
 
-  console.log(
-    `🤝 Negotiations fetch for ${ids.length} applicationIds on GSI "${NEGOTIATION_GSI}" (HASH=${NEGOTIATION_HASH_KEY})`
-  );
+  if (!negotiatingApps.length) {
+    console.log("🤝 No negotiating applications — skipping negotiations fetch");
+    return new Map<string, any>();
+  }
 
-  const out = new Map<string, any>();
-  let cursor = 0;
+  // Split: apps WITH a negotiationId can use BatchGetItem (1 call); others need a Query
+  const withNegId: { applicationId: string; negotiationId: string }[] = [];
+  const withoutNegId: string[] = [];
 
-  async function worker(wid: number) {
-    while (true) {
-      const idx = cursor++;
-      if (idx >= ids.length) break;
-
-      const applicationId = ids[idx];
-
-      try {
-        const resp = await dynamodb.send(
-          new QueryCommand({
-            TableName: NEGOTIATIONS_TABLE,
-            IndexName: NEGOTIATION_GSI,
-            KeyConditionExpression: "#pk = :pk",
-            ExpressionAttributeNames: { "#pk": NEGOTIATION_HASH_KEY },
-            ExpressionAttributeValues: { ":pk": { S: applicationId } },
-          })
-        );
-
-        const items = (resp.Items || []).map((it) => unmarshall(it as Record<string, AttributeValue>));
-
-        if (!items.length) {
-          console.log(`🧭 [W${wid}] no negotiations for applicationId=${applicationId}`);
-          out.set(applicationId, null);
-          continue;
-        }
-
-        const latest = chooseLatestNegotiation(items);
-        const clinicField = latest?.clinic ?? latest?.clinicId ?? null;
-
-        out.set(applicationId, {
-          negotiationId: latest?.negotiationId ?? null,
-          clinicCounterHourlyRate: latest?.clinicCounterHourlyRate ?? null,
-          professionalCounterHourlyRate: latest?.professionalCounterHourlyRate ?? null,
-          clinic: clinicField,
-          updatedAt: latest?.updatedAt ?? null,
-          createdAt: latest?.createdAt ?? null,
-        });
-
-        console.log(
-          `🧭 [W${wid}] applicationId=${applicationId} → negotiationId=${latest?.negotiationId ?? "N/A"}`
-        );
-      } catch (e: any) {
-        console.error(`❌ [W${wid}] negotiations query failed for applicationId=${applicationId}:`, e.message);
-        out.set(applicationId, null);
-      }
+  for (const app of negotiatingApps) {
+    const appId = (app.applicationId ?? "").toString().trim();
+    const negId = (app.negotiationId ?? "").toString().trim();
+    if (!appId) continue;
+    if (negId) {
+      withNegId.push({ applicationId: appId, negotiationId: negId });
+    } else {
+      withoutNegId.push(appId);
     }
   }
 
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, ids.length) }, (_, i) => worker(i + 1))
-  );
+  console.log(`🤝 Negotiations: ${withNegId.length} via BatchGetItem, ${withoutNegId.length} via Query`);
+
+  const out = new Map<string, any>();
+
+  // --- Path A: BatchGetItem for apps with known negotiationId (1 call for up to 100) ---
+  if (withNegId.length > 0) {
+    const uniqueKeys = dedupe(withNegId.map((k) => `${k.applicationId}|${k.negotiationId}`))
+      .map((key: string) => {
+        const [appId, negId] = key.split("|");
+        return { applicationId: { S: appId }, negotiationId: { S: negId } };
+      });
+
+    try {
+      const batchResult = await batchGetChunked({
+        [NEGOTIATIONS_TABLE]: { Keys: uniqueKeys },
+      });
+
+      for (const raw of batchResult.Responses?.[NEGOTIATIONS_TABLE] || []) {
+        const item = unmarshall(raw as Record<string, AttributeValue>);
+        const appId = (item.applicationId ?? "").toString().trim();
+        if (appId) {
+          out.set(appId, formatNegotiation(item));
+          console.log(`🧭 [batch] applicationId=${appId} → negotiationId=${item.negotiationId ?? "N/A"}`);
+        }
+      }
+    } catch (e: any) {
+      console.error("❌ BatchGetItem for negotiations failed, falling back to Query:", e.message);
+      // Move failed keys to the query path
+      withoutNegId.push(...withNegId.map((k) => k.applicationId));
+    }
+  }
+
+  // --- Path B: Query primary table for apps without negotiationId ---
+  const toQuery = dedupe(withoutNegId.filter((id) => !out.has(id)));
+
+  if (toQuery.length > 0) {
+    await Promise.all(
+      toQuery.map(async (applicationId: string) => {
+        try {
+          const resp = await dynamodb.send(
+            new QueryCommand({
+              TableName: NEGOTIATIONS_TABLE,
+              KeyConditionExpression: "applicationId = :pk",
+              ExpressionAttributeValues: { ":pk": { S: applicationId } },
+            })
+          );
+
+          const items = (resp.Items || []).map((it) => unmarshall(it as Record<string, AttributeValue>));
+
+          if (!items.length) {
+            out.set(applicationId, null);
+            return;
+          }
+
+          const latest = chooseLatestNegotiation(items);
+          out.set(applicationId, formatNegotiation(latest));
+          console.log(`🧭 [query] applicationId=${applicationId} → negotiationId=${latest?.negotiationId ?? "N/A"}`);
+        } catch (e: any) {
+          console.error(`❌ Negotiation query failed for applicationId=${applicationId}:`, e.message);
+          out.set(applicationId, null);
+        }
+      })
+    );
+  }
 
   return out;
 }
@@ -270,13 +308,29 @@ export const handler = async (
     }
 
     const CLINIC_ID_INDEX = process.env.CLINIC_ID_INDEX || "clinicId-index";
+    const CLINIC_JOB_INDEX = process.env.CLINIC_JOB_INDEX || "clinicId-jobId-index";
 
-    const queryInput: QueryCommandInput = {
-      TableName: APPLICATIONS_TABLE,
-      IndexName: CLINIC_ID_INDEX,
-      KeyConditionExpression: "clinicId = :clinicId",
-      ExpressionAttributeValues: { ":clinicId": { S: clinicId } },
-    };
+    // Optional jobId filter — when provided, use the composite GSI for a targeted query
+    const jobIdFilter = event.queryStringParameters?.jobId;
+
+    const queryInput: QueryCommandInput = jobIdFilter
+      ? {
+          TableName: APPLICATIONS_TABLE,
+          IndexName: CLINIC_JOB_INDEX,
+          KeyConditionExpression: "clinicId = :clinicId AND jobId = :jobId",
+          ExpressionAttributeValues: {
+            ":clinicId": { S: clinicId },
+            ":jobId": { S: jobIdFilter },
+          },
+        }
+      : {
+          TableName: APPLICATIONS_TABLE,
+          IndexName: CLINIC_ID_INDEX,
+          KeyConditionExpression: "clinicId = :clinicId",
+          ExpressionAttributeValues: { ":clinicId": { S: clinicId } },
+        };
+
+    console.log(`🔍 Query mode: ${jobIdFilter ? `filtered by jobId=${jobIdFilter}` : "all jobs"}`);
 
     const queryResp = await dynamodb.send(new QueryCommand(queryInput));
     const applications = (queryResp.Items || []).map((it) => unmarshall(it as Record<string, AttributeValue>));
@@ -301,55 +355,23 @@ export const handler = async (
     const jobIds = dedupe(applications.map((a) => a.jobId).filter(Boolean));
     const profSubs = dedupe(applications.map((a) => a.professionalUserSub).filter(Boolean));
 
-    const negotiationMap = await fetchNegotiationsForNegotiatingApps(applications);
-
-    const keyVariations = [
-      jobIds.map((jobId: string) => ({
-        clinicId: { S: clinicId },
-        jobId: { S: jobId },
-      })),
-      jobIds.map((jobId: string) => ({
-        clinicUserSub: { S: clinicId },
-        jobId: { S: jobId },
-      })),
-      jobIds.map((jobId: string) => ({ jobId: { S: jobId } })),
-    ];
-
+    // Fetch negotiations, job postings, and profiles in parallel
     const profileKeys = profSubs.map((s: string) => ({ userSub: { S: s } }));
 
-    let postingsRaw: any[] = [];
-    let profilesRaw: any[] = [];
-    let success = false;
+    const [negotiationMap, postingsRaw, profilesRaw] = await Promise.all([
+      // 1. Negotiations (batch + query hybrid)
+      fetchNegotiationsForNegotiatingApps(applications),
 
-    for (let i = 0; i < keyVariations.length && !success; i++) {
-      try {
-        const batchResp = await batchGetChunked({
-          [POSTINGS_TABLE]: { Keys: keyVariations[i] },
-          [PROFILES_TABLE]: { Keys: profileKeys },
-        });
+      // 2. Job postings via jobId-index-1 GSI (reliable, no key guessing)
+      getJobsUsingQuery(jobIds, clinicId),
 
-        postingsRaw = (batchResp.Responses?.[POSTINGS_TABLE] || []).map((item: Record<string, AttributeValue>) => unmarshall(item));
-        profilesRaw = (batchResp.Responses?.[PROFILES_TABLE] || []).map((item: Record<string, AttributeValue>) => unmarshall(item));
-
-        if (postingsRaw.length) success = true;
-      } catch (e: any) {
-        console.error(`❌ Batch variation ${i + 1} failed:`, e.message);
-      }
-    }
-
-    if (!success) {
-      postingsRaw = await getJobsUsingQuery(jobIds, clinicId);
-
-      try {
-        const pr = await batchGetChunked({
-          [PROFILES_TABLE]: { Keys: profileKeys },
-        });
-
-        profilesRaw = (pr.Responses?.[PROFILES_TABLE] || []).map((item: Record<string, AttributeValue>) => unmarshall(item));
-      } catch (e: any) {
-        console.error("❌ Profile batch fallback failed:", e.message);
-      }
-    }
+      // 3. Professional profiles via BatchGetItem (userSub is the direct PK)
+      profileKeys.length > 0
+        ? batchGetChunked({ [PROFILES_TABLE]: { Keys: profileKeys } })
+            .then((r) => (r.Responses?.[PROFILES_TABLE] || []).map((item: Record<string, AttributeValue>) => unmarshall(item)))
+            .catch((e: any) => { console.error("❌ Profile batch failed:", e.message); return [] as any[]; })
+        : Promise.resolve([] as any[]),
+    ]);
 
     const postingByJobId = new Map(
       postingsRaw.filter(Boolean).map((p) => [p.jobId, p])

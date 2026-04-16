@@ -22,18 +22,20 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 });
 
 // Define the map for path segments to internal file types
-const fileTypeMap: Record<string, 'profile-image' | 'certificate' | 'video-resume'> = {
+type FileType = 'profile-image' | 'certificate' | 'video-resume' | 'professional-resume' | 'professional-license' | 'driving-license' | 'clinic-office-image';
+
+const fileTypeMap: Record<string, FileType> = {
     'profile-images': 'profile-image',
     'certificates': 'certificate',
     'video-resumes': 'video-resume',
+    'professional-resumes': 'professional-resume',
+    'professional-licenses': 'professional-license',
+    'driving-licenses': 'driving-license',
+    'clinic-office-images': 'clinic-office-image',
 };
 
 // Define the structure for the bucket mapping
-interface BucketMap {
-    'profile-image': string | undefined;
-    'certificate': string | undefined;
-    'video-resume': string | undefined;
-}
+type BucketMap = Record<FileType, string | undefined>;
 
 // --- 3. Main Handler ---
 
@@ -70,7 +72,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const fileType = fileTypeMap[pathFileType]; 
         
         if (!fileType) {
-            return json(400, { error: 'Invalid file type in path. Must be one of: profile-images, certificates, video-resumes' });
+            return json(400, { error: `Invalid file type in path. Must be one of: ${Object.keys(fileTypeMap).join(', ')}` });
         }
 
         // 4. Get Object Key from query parameters
@@ -83,7 +85,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const buckets: BucketMap = {
             'profile-image': process.env.PROFILE_IMAGES_BUCKET,
             'certificate': process.env.CERTIFICATES_BUCKET,
-            'video-resume': process.env.VIDEO_RESUMES_BUCKET
+            'video-resume': process.env.VIDEO_RESUMES_BUCKET,
+            'professional-resume': process.env.PROFESSIONAL_RESUMES_BUCKET,
+            'professional-license': process.env.PROFESSIONAL_LICENSES_BUCKET,
+            'driving-license': process.env.DRIVING_LICENSES_BUCKET,
+            'clinic-office-image': process.env.CLINIC_OFFICE_IMAGES_BUCKET,
         };
         const bucket: string | undefined = buckets[fileType];
 
