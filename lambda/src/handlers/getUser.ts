@@ -40,6 +40,7 @@ interface UserDetails {
     status?: string;
     role?: string;
     assignedClinicsCount?: number;
+    clinicIds?: string[];
     error?: string;
 }
 
@@ -148,12 +149,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(500, { error: "Configuration error: USER_POOL_ID missing" });
         }
 
-        // Step 3.5: Pre-calculate the assigned clinics count for all users based on allClinics
+        // Step 3.5: Pre-calculate the assigned clinics count and IDs for all users
         const userClinicCountMap = new Map<string, number>();
+        const userClinicIdsMap = new Map<string, string[]>();
         allClinics.forEach(clinic => {
             if (clinic.AssociatedUsers && Array.isArray(clinic.AssociatedUsers)) {
                 clinic.AssociatedUsers.forEach(uSub => {
                     userClinicCountMap.set(uSub, (userClinicCountMap.get(uSub) || 0) + 1);
+                    const ids = userClinicIdsMap.get(uSub) || [];
+                    if (clinic.clinicId) ids.push(clinic.clinicId);
+                    userClinicIdsMap.set(uSub, ids);
                 });
             }
         });
@@ -196,7 +201,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     phone: userPhoneNumber || "N/A",
                     status: userResponse.UserStatus,
                     role: userRole,
-                    assignedClinicsCount: userClinicCountMap.get(userSubToFetch) || 0
+                    assignedClinicsCount: userClinicCountMap.get(userSubToFetch) || 0,
+                    clinicIds: userClinicIdsMap.get(userSubToFetch) || [],
                 };
             } catch (cognitoError: any) {
                 console.error(`Error fetching details for user ${userSubToFetch}:`, cognitoError.message);
@@ -207,6 +213,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     phone: "Error Fetching",
                     role: "Error Fetching",
                     assignedClinicsCount: 0,
+                    clinicIds: [],
                     error: cognitoError.message
                 };
             }
