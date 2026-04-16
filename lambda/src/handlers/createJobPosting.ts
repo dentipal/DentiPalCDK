@@ -112,6 +112,11 @@ const validateTemporaryJob = (jobData: TemporaryJobData): string | null => {
     if (isNaN(jobDate.getTime())) {
         return "Invalid date format. Use ISO date string.";
     }
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (jobDate < today) {
+        return "Job date must be in the future";
+    }
     if (jobData.hours < 1 || jobData.hours > 12) {
         return "Hours must be between 1 and 12";
     }

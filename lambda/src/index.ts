@@ -223,8 +223,8 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "DELETE:/jobs/{jobId}": deleteJobPostingHandler,
 
         // Job applications for clinics
-        "GET:/clinics/{clinicId}/jobs/": getJobApplicationsForClinicHandler,
-        "GET:/{clinicId}/jobs": getJobApplicantsOfAClinicHandler,
+        "GET:/clinics/{clinicId}/jobs": getJobApplicationsForClinicHandler,
+        "GET:/clinics/{clinicId}/applicants": getJobApplicantsOfAClinicHandler,
 
         // Specific job type endpoints
         "POST:/jobs/temporary": createTemporaryJobHandler,
@@ -332,14 +332,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "DELETE:/user-addresses": deleteUserAddressHandler,
 
         // Public routes (Duplicates for explicit public path)
-        "GET:public/publicprofessionals": publicProfessionalsHandler,
-        "GET:public/publicJobs": publicClinicsHandler,
+        "GET:/public/publicprofessionals": publicProfessionalsHandler,
+        "GET:/public/publicJobs": publicClinicsHandler,
         "GET:/clinics/{clinicId}/address": getClinicAddressHandler,
 
-        // --- Stage-prefixed duplicates (for API Gateway stage = prod) ---
-        "GET:/prod/negotiations": getAllNegotiationsProfHandler,
-        "GET:/prod/allnegotiations": getAllNegotiationsProfHandler,
-        "PUT:/prod/applications/{applicationId}/negotiations/{negotiationId}/response": respondToNegotiationHandler,
     };
 
     // First try exact match
@@ -404,9 +400,9 @@ const matchesPattern = (actualRoute: string, patternRoute: string): boolean => {
 // Main Lambda Handler
 export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult> = async (event: APIGatewayProxyEvent | any, context: Context): Promise<APIGatewayProxyResult> => {
 
-    console.log("--- START: FULL INCOMING EVENT ---");
-    console.log(JSON.stringify(event, null, 2));
-    console.log("--- END: FULL INCOMING EVENT ---");
+    const logMethod = event.httpMethod || event.requestContext?.http?.method || "";
+    const logPath = event.path || event.rawPath || event.resource || "";
+    console.log(`[Router] ${logMethod} ${logPath}`);
 
     // --- STEP 1: EventBridge Scheduled Task Check ---
     if (event.source === 'aws.events') {

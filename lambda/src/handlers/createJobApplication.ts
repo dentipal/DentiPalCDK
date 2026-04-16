@@ -175,10 +175,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 professionalUserSub: userSub,
                 clinicId: clinicIdFromJob,
                 negotiationStatus: 'pending',
-                // Generic rate field (primary) — works for all pay types
                 proposedRate: Number(applicationData.proposedRate),
-                // Legacy alias for backward compatibility
-                proposedHourlyRate: Number(applicationData.proposedRate),
                 payType: jobPayType,
                 createdAt: timestamp,
                 updatedAt: timestamp,

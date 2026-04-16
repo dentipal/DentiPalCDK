@@ -383,20 +383,43 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }));
         });
 
-        await Promise.all(postJobsPromises);
+        const results = await Promise.allSettled(postJobsPromises);
+
+        const succeeded: string[] = [];
+        const failed: { clinicId: string; error: string }[] = [];
+        results.forEach((result, idx) => {
+            const clinicId = jobData.clinicIds[idx];
+            if (result.status === "fulfilled") {
+                succeeded.push(jobIds[idx]);
+            } else {
+                failed.push({ clinicId, error: result.reason?.message || "Unknown error" });
+            }
+        });
+
+        if (succeeded.length === 0) {
+            return json(500, {
+                error: "Internal Server Error",
+                message: "Failed to create any temporary job postings",
+                details: { failed },
+            });
+        }
 
         // 6. Response
-        return json(201, {
-            status: "success",
-            message: "Temporary job postings created successfully",
+        const statusCode = failed.length > 0 ? 207 : 201;
+        return json(statusCode, {
+            status: failed.length > 0 ? "partial_success" : "success",
+            message: failed.length > 0
+                ? `Created ${succeeded.length} of ${jobData.clinicIds.length} job postings`
+                : "Temporary job postings created successfully",
             data: {
-                jobIds,
+                jobIds: succeeded,
                 jobType: "temporary",
                 professionalRole: jobData.professional_role,
                 date: jobData.date,
                 hours: jobData.hours,
                 payType: payType,
                 rate: jobData.rate,
+                ...(failed.length > 0 && { failed }),
             },
             timestamp: timestamp
         });
