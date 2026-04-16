@@ -850,53 +850,72 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
     }
 }
 
-async function onGetHistory(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> { 
-    await validateToken(event);
+async function onGetHistory(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const claims = await validateToken(event);
     const body = JSON.parse(event.body || "{}");
-    const { clinicId, professionalSub, limit: bodyLimit, nextKey } = body as { 
-        clinicId: string, 
-        professionalSub: string, 
-        limit: string | number | undefined, 
-        nextKey: any 
+    const { clinicId, professionalSub, limit: bodyLimit, nextKey } = body as {
+        clinicId: string,
+        professionalSub: string,
+        limit: string | number | undefined,
+        nextKey: any
     };
-    
+
     // Safety clamp the limit
-    const limit = Math.max(1, Math.min(200, Number(bodyLimit) || 50)); 
+    const limit = Math.max(1, Math.min(200, Number(bodyLimit) || 50));
 
     if (!clinicId || !professionalSub) {
         return { statusCode: 400, body: "Missing clinicId/professionalSub" };
     }
     const convoId = makeConversationId(clinicId, professionalSub);
 
-    const params: QueryCommand["input"] = {
+    // Fetch messages and conversation record in parallel
+    const msgParams: QueryCommand["input"] = {
         TableName: MESSAGES_TABLE,
         KeyConditionExpression: "conversationId = :cid",
         ExpressionAttributeValues: { ":cid": { S: convoId } },
         ScanIndexForward: false, // Newest messages first
-        Limit: limit, 
+        Limit: limit,
     };
-    if (nextKey) params.ExclusiveStartKey = nextKey as Record<string, AttributeValue>;
+    if (nextKey) msgParams.ExclusiveStartKey = nextKey as Record<string, AttributeValue>;
 
-    const out = await ddb.send(new QueryCommand(params));
+    const [out, convoRes, profName, clinicName] = await Promise.all([
+        ddb.send(new QueryCommand(msgParams)),
+        ddb.send(new GetItemCommand({
+            TableName: CONVOS_TABLE,
+            Key: { conversationId: { S: convoId } },
+            ProjectionExpression: "clinicUnread, profUnread",
+        })),
+        getCognitoNameBySub(professionalSub),
+        getClinicDisplayByKey(`clinic#${clinicId}`),
+    ]);
 
-    const profName = await getCognitoNameBySub(professionalSub);
-    // Note: getClinicDisplayByKey accepts 'clinic#<id>'
-    const clinicName = await getClinicDisplayByKey(`clinic#${clinicId}`);
+    // Determine unread counts for the OTHER side to figure out read status of my messages
+    const clinicUnread = Number(convoRes.Item?.clinicUnread?.N || 0);
+    const profUnread = Number(convoRes.Item?.profUnread?.N || 0);
+    const iAmClinic = claims.userType === "Clinic";
+    // If the other side has 0 unread, all my messages are "read"
+    const otherUnread = iAmClinic ? profUnread : clinicUnread;
+    const myKey = iAmClinic ? `clinic#${clinicId}` : `prof#${professionalSub}`;
 
     const connClient = wsClientFromEvent(event);
     await send(connClient, event.requestContext.connectionId, {
         type: "history",
         conversationId: convoId,
-        items: (out.Items || []).map((i) => { 
+        items: (out.Items || []).map((i) => {
             const senderKey = i.senderKey.S!;
             const senderName = senderKey.startsWith("clinic#") ? clinicName : profName;
+            const isMine = senderKey === myKey;
+            // My messages: "read" if other side has 0 unread, otherwise "delivered"
+            // Their messages: no status needed (frontend only shows ticks on mine)
+            const status = isMine ? (otherUnread === 0 ? "read" : "delivered") : undefined;
             return {
                 messageId: i.messageId.S,
                 timestamp: i.timestamp.S,
                 senderKey,
-                senderName, 
+                senderName,
                 content: i.content.S,
                 messageType: i.type.S,
+                ...(status ? { status } : {}),
             };
         }),
         nextKey: out.LastEvaluatedKey || null,
