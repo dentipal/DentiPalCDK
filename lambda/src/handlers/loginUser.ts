@@ -1,6 +1,7 @@
 import {
   CognitoIdentityProviderClient,
   InitiateAuthCommand,
+  AdminGetUserCommand,
   AuthFlowType,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient, ScanCommand, ScanCommandInput } from "@aws-sdk/client-dynamodb";
@@ -288,6 +289,24 @@ export const handler = async (
     let details: any = {};
 
     if (error.name === "NotAuthorizedException") {
+      // Check if this is a Google-only user trying email/password login
+      try {
+        const loginData = JSON.parse(event.body || "{}");
+        const userInfo = await cognito.send(new AdminGetUserCommand({
+          UserPoolId: process.env.USER_POOL_ID!,
+          Username: String(loginData.email).toLowerCase(),
+        }));
+        const address = userInfo.UserAttributes?.find(a => a.Name === "address")?.Value || "";
+        if (address.startsWith("userType:")) {
+          // This user was created via Google login
+          statusCode = 401;
+          errorMessage = "Unauthorized";
+          details = { message: "This account uses Google Sign-In. Please click the Google button to log in." };
+          return json(statusCode, { error: errorMessage, statusCode, details, timestamp: new Date().toISOString() });
+        }
+      } catch {
+        // User lookup failed, continue with default error
+      }
       statusCode = 401;
       errorMessage = "Unauthorized";
       details = { message: "Invalid email or password" };

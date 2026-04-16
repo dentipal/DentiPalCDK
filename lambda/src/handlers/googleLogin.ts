@@ -5,6 +5,7 @@ import {
   AdminSetUserPasswordCommand,
   AdminAddUserToGroupCommand,
   AdminInitiateAuthCommand,
+  AdminRespondToAuthChallengeCommand,
   AdminListGroupsForUserCommand,
   ListUsersCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
@@ -251,26 +252,41 @@ export const handler = async (
       }
     }
 
-    // 6. Set a known password and authenticate to get Cognito tokens
-    const pwd = googlePassword(userSub);
-    await cognito.send(new AdminSetUserPasswordCommand({
-      UserPoolId: process.env.USER_POOL_ID!,
-      Username: username!,
-      Password: pwd,
-      Permanent: true,
-    }));
+    // 6. Authenticate to get Cognito tokens
+    let tokens;
 
-    const authRes = await cognito.send(new AdminInitiateAuthCommand({
-      UserPoolId: process.env.USER_POOL_ID!,
-      ClientId: process.env.CLIENT_ID!,
-      AuthFlow: "ADMIN_USER_PASSWORD_AUTH" as any,
-      AuthParameters: {
-        USERNAME: username!,
-        PASSWORD: pwd,
-      },
-    }));
+    if (isNewUser) {
+      // New user — use password auth (password was set during creation)
+      const pwd = googlePassword(userSub);
+      const authRes = await cognito.send(new AdminInitiateAuthCommand({
+        UserPoolId: process.env.USER_POOL_ID!,
+        ClientId: process.env.CLIENT_ID!,
+        AuthFlow: "ADMIN_USER_PASSWORD_AUTH" as any,
+        AuthParameters: { USERNAME: username!, PASSWORD: pwd },
+      }));
+      tokens = authRes.AuthenticationResult;
+    } else {
+      // Existing user — use CUSTOM_AUTH to get tokens WITHOUT changing password
+      const initRes = await cognito.send(new AdminInitiateAuthCommand({
+        UserPoolId: process.env.USER_POOL_ID!,
+        ClientId: process.env.CLIENT_ID!,
+        AuthFlow: "CUSTOM_AUTH" as any,
+        AuthParameters: { USERNAME: username! },
+      }));
 
-    const tokens = authRes.AuthenticationResult;
+      const challengeRes = await cognito.send(new AdminRespondToAuthChallengeCommand({
+        UserPoolId: process.env.USER_POOL_ID!,
+        ClientId: process.env.CLIENT_ID!,
+        ChallengeName: "CUSTOM_CHALLENGE",
+        Session: initRes.Session!,
+        ChallengeResponses: {
+          USERNAME: username!,
+          ANSWER: "google-verified",
+        },
+      }));
+      tokens = challengeRes.AuthenticationResult;
+    }
+
     if (!tokens) {
       return json(500, {
         error: "Internal Server Error",
