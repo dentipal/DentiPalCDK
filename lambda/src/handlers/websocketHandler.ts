@@ -20,7 +20,7 @@ import {
     AttributeType, 
 } from "@aws-sdk/client-cognito-identity-provider";
 
-import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, GetObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 import { 
@@ -50,6 +50,7 @@ const USER_POOL_ID = process.env.USER_POOL_ID!;
 const PROFESSIONAL_PROFILES_TABLE = process.env.PROFESSIONAL_PROFILES_TABLE || "DentiPal-V5-ProfessionalProfiles";
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-Clinic-Profiles";
 const PROFILE_IMAGES_BUCKET = process.env.PROFILE_IMAGES_BUCKET || "";
+const CLINIC_OFFICE_IMAGES_BUCKET = process.env.CLINIC_OFFICE_IMAGES_BUCKET || "";
 
 const ddb = new DynamoDBClient({ region: REGION });
 const cognitoIdp = new CognitoIdentityProviderClient({ region: REGION });
@@ -637,9 +638,8 @@ async function getProfessionalAvatarUrl(profSub: string): Promise<string> {
 }
 
 /**
- * Looks up a clinic's office image key from DynamoDB and returns a presigned URL.
- * Uses a Query because clinicId is the partition key but userSub is required as sort key.
- * We query by partition key only and take the first item (typically one profile per clinic).
+ * Looks up a clinic's office image from the clinic office images S3 bucket.
+ * Lists objects under {clinicId}/clinic-office-image/ and presigns the latest one.
  */
 async function getClinicAvatarUrl(clinicId: string): Promise<string> {
     if (!clinicId) return "";
@@ -648,6 +648,28 @@ async function getClinicAvatarUrl(clinicId: string): Promise<string> {
     if (cached && (Date.now() - cached.cachedAt) < AVATAR_CACHE_TTL_MS) return cached.url;
 
     try {
+        // First try: S3 clinic office images bucket
+        if (CLINIC_OFFICE_IMAGES_BUCKET) {
+            const prefix = `${clinicId}/clinic-office-image/`;
+            const listRes = await s3.send(new ListObjectsV2Command({
+                Bucket: CLINIC_OFFICE_IMAGES_BUCKET,
+                Prefix: prefix,
+            }));
+            const files = (listRes.Contents || [])
+                .filter(obj => obj.Key && !obj.Key.includes("/.meta/"))
+                .sort((a, b) => (b.LastModified?.getTime() ?? 0) - (a.LastModified?.getTime() ?? 0));
+
+            if (files.length > 0 && files[0].Key) {
+                const url = await getSignedUrl(s3, new GetObjectCommand({
+                    Bucket: CLINIC_OFFICE_IMAGES_BUCKET,
+                    Key: files[0].Key,
+                }), { expiresIn: 3600 });
+                avatarCache.set(cacheKey, { url, cachedAt: Date.now() });
+                return url;
+            }
+        }
+
+        // Fallback: DynamoDB clinic profiles table (office_image_key)
         const res = await ddb.send(new QueryCommand({
             TableName: CLINIC_PROFILES_TABLE,
             KeyConditionExpression: "clinicId = :cid",
@@ -749,12 +771,20 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                 const profUnread = Number(it.profUnread?.N || 0);
 
                 let recipientName = "";
+                const otherKey = iAmClinic ? profKey : clinicKey;
                 if (iAmClinic) {
                     const profSub = (profKey || "").replace(/^prof#/, "");
                     recipientName = await getCognitoNameBySub(profSub);
                 } else {
                     recipientName = await getClinicDisplayByKey(clinicKey || "");
                 }
+
+                // Check if the other party is online (has active connections)
+                let isOnline = false;
+                try {
+                    const conns = await getConnections(otherKey);
+                    isOnline = conns.length > 0;
+                } catch {}
 
                 const unreadCount = iAmClinic ? clinicUnread : profUnread;
 
@@ -764,6 +794,7 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                     lastMessage: lastPreview,
                     lastMessageAt,
                     unreadCount,
+                    isOnline,
                     clinicKey,
                     profKey,
                 };
@@ -929,6 +960,23 @@ async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGateway
             action: "markRead",
         });
 
+        // Notify the OTHER party that their messages have been read
+        const otherKey = isSenderClinic ? `prof#${professionalSub}` : `clinic#${clinicId}`;
+        try {
+            const otherConns = await getConnections(otherKey);
+            await Promise.all(
+                otherConns.map(async (cid) => {
+                    try {
+                        await send(connClient, cid, {
+                            type: "readReceipt",
+                            conversationId,
+                            readBy: senderKey,
+                        });
+                    } catch {}
+                })
+            );
+        } catch {}
+
         return { statusCode: 200, body: "Messages marked as read" };
     } catch (error) {
         console.error("Error marking messages as read:", {
@@ -1062,10 +1110,12 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
         const payload = { ...flat, message: flat };
 
         // Push to all recipient connections
+        let delivered = false;
         await Promise.all(
             recipientConnections.map(async (connectionId) => {
                 try {
                     await send(connClient, connectionId, payload);
+                    delivered = true;
                 } catch (err) {
                     console.error("Failed to notify recipient:", {
                         connectionId,
@@ -1092,12 +1142,13 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
             );
         }
 
-        // Sender ack on the current connection
+        // Sender ack with delivery status
         await send(connClient, currentConnectionId, {
             type: "ack",
             messageId,
             conversationId,
             timestamp,
+            status: delivered ? "delivered" : "sent",
         });
 
         return { statusCode: 200, body: "Message sent" };

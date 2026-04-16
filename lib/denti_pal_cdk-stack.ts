@@ -1329,6 +1329,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 PROFESSIONAL_PROFILES_TABLE: professionalProfilesTable.tableName, // for avatar lookup
                 CLINIC_PROFILES_TABLE: clinicProfilesTable.tableName,             // for avatar lookup
                 PROFILE_IMAGES_BUCKET: profileImagesBucket.bucketName,            // for presigned URLs
+                CLINIC_OFFICE_IMAGES_BUCKET: clinicOfficeImagesBucket.bucketName, // for clinic office image presigned URLs
             },
             timeout: cdk.Duration.seconds(30),
             memorySize: 256,
@@ -1347,6 +1348,7 @@ export class DentiPalCDKStack extends cdk.Stack {
 
         // 1c. S3 read access for presigning profile image URLs
         profileImagesBucket.grantRead(webSocketChatHandler);
+        clinicOfficeImagesBucket.grantRead(webSocketChatHandler);
 
         // 2. Cognito Permissions (AdminGetUser for display name lookup)
         webSocketChatHandler.addToRolePolicy(new iam.PolicyStatement({
