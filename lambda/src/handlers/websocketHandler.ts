@@ -5,7 +5,6 @@ import {
     QueryCommand,
     DeleteItemCommand,
     GetItemCommand,
-    ScanCommand,
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 
@@ -23,11 +22,13 @@ import {
 import { S3Client, GetObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-import { 
-    APIGatewayProxyEventV2, 
-    APIGatewayProxyResultV2, 
+import { CognitoJwtVerifier } from "aws-jwt-verify";
+
+import {
+    APIGatewayProxyEventV2,
+    APIGatewayProxyResultV2,
     APIGatewayEventRequestContextV2
-} from "aws-lambda"; 
+} from "aws-lambda";
 
 // Define a type assertion interface for the requestContext when used in a WebSocket API.
 interface WebSocketRequestContext extends APIGatewayEventRequestContextV2 {
@@ -47,6 +48,7 @@ const CONNS_TABLE = process.env.CONNS_TABLE!;
 const CONVOS_TABLE = process.env.CONVOS_TABLE!;
 const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
 const USER_POOL_ID = process.env.USER_POOL_ID!;
+const CLIENT_ID = process.env.CLIENT_ID || "";
 const PROFESSIONAL_PROFILES_TABLE = process.env.PROFESSIONAL_PROFILES_TABLE || "DentiPal-V5-ProfessionalProfiles";
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-Clinic-Profiles";
 const PROFILE_IMAGES_BUCKET = process.env.PROFILE_IMAGES_BUCKET || "";
@@ -57,8 +59,52 @@ const cognitoIdp = new CognitoIdentityProviderClient({ region: REGION });
 const s3 = new S3Client({ region: REGION });
 const MAX_LEN = 1000;
 
-// simple in-memory name cache (warm Lambda only)
-const nameCache = new Map<string, string>(); // keys: "prof#<sub>" or "clinic#<id>" -> display
+// Pagination defaults (applied everywhere — no more unbounded reads)
+const DEFAULT_CONVO_PAGE = 50;
+const MAX_CONVO_PAGE = 100;
+const DEFAULT_HISTORY_PAGE = 50;
+const MAX_HISTORY_PAGE = 200;
+
+// Cognito lookup concurrency when hydrating conversation rows
+const COGNITO_CONCURRENCY = 10;
+
+// Cognito JWT verifier (signature + exp + iss + token_use). Shared, reused across invocations.
+// Note: clientId=null accepts any app client in this user pool. If you later want to pin
+// to a single app client, pass CLIENT_ID instead.
+const accessVerifier = CognitoJwtVerifier.create({
+    userPoolId: USER_POOL_ID,
+    tokenUse: "access",
+    clientId: CLIENT_ID || null,
+});
+
+// Bounded LRU-ish name cache (warm Lambda only).
+// Entries expire after NAME_CACHE_TTL_MS and we trim to MAX_NAME_CACHE_ENTRIES.
+const NAME_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_NAME_CACHE_ENTRIES = 500;
+const nameCache = new Map<string, { value: string; cachedAt: number }>();
+
+function getNameFromCache(key: string): string | undefined {
+    const hit = nameCache.get(key);
+    if (!hit) return undefined;
+    if (Date.now() - hit.cachedAt > NAME_CACHE_TTL_MS) {
+        nameCache.delete(key);
+        return undefined;
+    }
+    // LRU bump
+    nameCache.delete(key);
+    nameCache.set(key, hit);
+    return hit.value;
+}
+
+function setNameInCache(key: string, value: string): void {
+    if (nameCache.has(key)) nameCache.delete(key);
+    nameCache.set(key, { value, cachedAt: Date.now() });
+    while (nameCache.size > MAX_NAME_CACHE_ENTRIES) {
+        const firstKey = nameCache.keys().next().value as string | undefined;
+        if (!firstKey) break;
+        nameCache.delete(firstKey);
+    }
+}
 
 interface UserClaims {
     userType: "Clinic" | "Professional";
@@ -118,6 +164,7 @@ async function send(client: ApiGatewayManagementApiClient, connectionId: string,
                         IndexName: "connectionId-index",
                         KeyConditionExpression: "connectionId = :cid",
                         ExpressionAttributeValues: { ":cid": { S: connectionId } },
+                        Limit: 5,
                     })
                 );
                 await Promise.all(
@@ -163,10 +210,11 @@ function displayFromTokenPayload(payload: any): string {
     return gn || nm || (em && em.split("@")[0]) || "";
 }
 
-// Get human name for a professional from Cognito (cached)
+// Get human name for a professional from Cognito (cached with TTL + LRU)
 async function getCognitoNameBySub(sub: string): Promise<string> {
     const cacheKey = `prof#${sub}`;
-    if (nameCache.has(cacheKey)) return nameCache.get(cacheKey)!;
+    const cached = getNameFromCache(cacheKey);
+    if (cached !== undefined) return cached;
 
     try {
         const out = await cognitoIdp.send(
@@ -187,20 +235,35 @@ async function getCognitoNameBySub(sub: string): Promise<string> {
             sanitizeDisplayName(email && email.split("@")[0]) ||
             `User ${String(sub).slice(0, 6)}`;
 
-        nameCache.set(cacheKey, display);
+        setNameInCache(cacheKey, display);
         return display;
     } catch (e) {
         console.error("getCognitoNameBySub failed", { sub, error: (e as Error).message });
         const fallback = `User ${String(sub).slice(0, 6)}`;
-        nameCache.set(cacheKey, fallback);
+        setNameInCache(cacheKey, fallback);
         return fallback;
     }
+}
+
+// Resolve a batch of professional sub → display name with bounded concurrency.
+// Replaces the sequential await-per-row pattern in onGetConversations.
+async function getCognitoNamesBySubs(subs: string[]): Promise<Record<string, string>> {
+    const unique = Array.from(new Set(subs.filter(Boolean)));
+    const out: Record<string, string> = {};
+
+    for (let i = 0; i < unique.length; i += COGNITO_CONCURRENCY) {
+        const chunk = unique.slice(i, i + COGNITO_CONCURRENCY);
+        const results = await Promise.all(chunk.map((s) => getCognitoNameBySub(s)));
+        chunk.forEach((sub, idx) => { out[sub] = results[idx]; });
+    }
+    return out;
 }
 
 // Try to grab a human display for a clinic — Clinics table first, then active connections
 async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
     if (!clinicKey) return "";
-    if (nameCache.has(clinicKey)) return nameCache.get(clinicKey)!;
+    const cached = getNameFromCache(clinicKey);
+    if (cached !== undefined) return cached;
 
     const clinicId = clinicKey.replace(/^clinic#/, "");
 
@@ -217,7 +280,7 @@ async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
             result.Item?.name?.S ||
             result.Item?.businessName?.S;
         if (name?.trim()) {
-            nameCache.set(clinicKey, name.trim());
+            setNameInCache(clinicKey, name.trim());
             return name.trim();
         }
     } catch (e) {
@@ -231,6 +294,7 @@ async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
                 TableName: CONNS_TABLE,
                 KeyConditionExpression: "userKey = :uk",
                 ExpressionAttributeValues: { ":uk": { S: clinicKey } },
+                Limit: 5,
             })
         );
         const items = q.Items || [];
@@ -243,7 +307,7 @@ async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
             const display =
                 (best.display && sanitizeDisplayName(best.display.S)) || "";
             if (display) {
-                nameCache.set(clinicKey, display);
+                setNameInCache(clinicKey, display);
                 return display;
             }
         }
@@ -253,32 +317,27 @@ async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
 
     // 3. Last resort fallback
     const fallback = `Clinic ${clinicId.slice(0, 6)}`;
-    nameCache.set(clinicKey, fallback);
+    setNameInCache(clinicKey, fallback);
     return fallback;
 }
 
-// ============== ACCESS TOKEN DECODING UTILITIES (Adapted) ==============
+// ============== ACCESS TOKEN VERIFICATION ==============
 
 /**
- * Extracts and decodes the JWT payload from the token string.
- * @param token - The raw JWT (Access Token).
- * @returns Decoded JWT claims object.
- * @throws Error if token format is invalid or decoding fails.
+ * Verifies the Cognito access-token signature, expiration, issuer, and token_use.
+ * Replaces the previous base64-only decode that accepted any forged/expired JWT.
+ * @throws Error if verification fails for any reason.
  */
-function extractAndDecodeAccessTokenPayload(token: string): Record<string, any> {
-    const tokenParts = token.split(".");
-    if (tokenParts.length !== 3) {
-        throw new Error("Invalid access token format (expected 3 parts)");
+async function verifyAccessToken(token: string): Promise<Record<string, any>> {
+    if (!token || token.split(".").length !== 3) {
+        throw new Error("Invalid access token format (expected 3 JWT parts)");
     }
-
     try {
-        // Decode the payload (second part of JWT)
-        const payload = tokenParts[1];
-        // Base64 URL decode
-        const decoded = Buffer.from(payload, "base64url").toString("utf-8");
-        return JSON.parse(decoded);
-    } catch (error) {
-        throw new Error("Failed to decode access token payload");
+        // aws-jwt-verify fetches the JWKS once, caches it, and checks signature + exp + iss + token_use
+        const payload = await accessVerifier.verify(token);
+        return payload as unknown as Record<string, any>;
+    } catch (err) {
+        throw new Error(`Access token verification failed: ${(err as Error).message}`);
     }
 }
 
@@ -293,8 +352,8 @@ function extractUserInfoFromAccessTokenClaims(claims: Record<string, any>): User
     if (!claims.sub) {
         throw new Error("User sub not found in token claims");
     }
-    
-    // Crucial check: must be an Access Token
+
+    // Defence-in-depth: aws-jwt-verify already enforces token_use === "access"
     if (claims.token_use !== 'access') {
         throw new Error(`Invalid token type: Expected 'access', got '${claims.token_use}'`);
     }
@@ -351,6 +410,7 @@ async function claimsFromConnection(event: WebSocketAPIGatewayEventV2): Promise<
             IndexName: "connectionId-index",
             KeyConditionExpression: "connectionId = :cid",
             ExpressionAttributeValues: { ":cid": { S: connectionId } },
+            Limit: 5,
         })
     );
     const item = q.Items && q.Items[0];
@@ -390,20 +450,20 @@ async function validateToken(event: WebSocketAPIGatewayEventV2): Promise<UserCla
     const route = event.requestContext.routeKey;
 
     if (route === "$connect") {
-        const qpToken = event.queryStringParameters?.token || null; 
+        const qpToken = event.queryStringParameters?.token || null;
         const token = qpToken?.trim() || "";
         if (!token) {
             console.error("Missing token in query parameters for $connect");
             throw new Error("Missing token");
         }
-        
-        // --- Access Token Validation ---
+
+        // --- Access Token Verification (signature + exp + iss + token_use) ---
         const claims = await (async () => {
             try {
-                const payload = extractAndDecodeAccessTokenPayload(token);
+                const payload = await verifyAccessToken(token);
                 return extractUserInfoFromAccessTokenClaims(payload);
             } catch (err) {
-                console.error("Access Token decoding failed:", {
+                console.error("Access Token verification failed:", {
                     error: (err as Error).message,
                 });
                 throw new Error("Invalid Access Token");
@@ -446,13 +506,13 @@ async function validateToken(event: WebSocketAPIGatewayEventV2): Promise<UserCla
         }
 
         if (bodyToken) {
-            // Optional re-verification using token in body
+            // Optional re-verification using token in body (full signature + exp check)
             const tokenClaims = await (async () => {
                 try {
-                    const payload = extractAndDecodeAccessTokenPayload(bodyToken);
+                    const payload = await verifyAccessToken(bodyToken);
                     return extractUserInfoFromAccessTokenClaims(payload);
                 } catch (err) {
-                    console.error("Access Token decoding failed in body:", {
+                    console.error("Access Token verification failed in body:", {
                         error: (err as Error).message,
                     });
                     throw new Error("Invalid Access Token in body");
@@ -522,6 +582,7 @@ async function getConnections(userKey: string): Promise<string[]> {
             TableName: CONNS_TABLE,
             KeyConditionExpression: "userKey = :uk",
             ExpressionAttributeValues: { ":uk": { S: userKey } },
+            Limit: 20,
         })
     );
     const connections = out.Items?.map((i) => i.connectionId.S!) || [];
@@ -555,6 +616,7 @@ async function onDisconnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
             IndexName: "connectionId-index",
             KeyConditionExpression: "connectionId = :cid",
             ExpressionAttributeValues: { ":cid": { S: connectionId } },
+            Limit: 5,
         })
     );
 
@@ -694,16 +756,35 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
     const connClient = wsClientFromEvent(event);
     const connectionId = event.requestContext.connectionId;
 
-    // Read optional clinicId from body for multi-clinic filtering
+    // Read optional body params: clinicId (for multi-clinic clinic users), pagination
     let bodyClinicId: string | null = null;
+    let bodyLimit: unknown = undefined;
+    let bodyNextKey: Record<string, AttributeValue> | undefined;
     try {
         const body = JSON.parse(event.body || "{}");
         bodyClinicId = body.clinicId || null;
+        bodyLimit = body.limit;
+        bodyNextKey = body.nextKey || undefined;
     } catch {
         // ignore parse errors
     }
 
-    // Determine which key to query with
+    const limit = Math.max(1, Math.min(MAX_CONVO_PAGE, Number(bodyLimit) || DEFAULT_CONVO_PAGE));
+
+    // --- Authorization: clinic users filtering by clinicId must own that clinic ---
+    // Previously any authenticated user could pass any clinicId and leak that clinic's inbox.
+    if (claims.userType === "Clinic" && bodyClinicId && bodyClinicId !== "all") {
+        // Root can see any clinic; otherwise the body clinicId must match the connection's clinicId
+        if (!claims.isRoot && claims.clinicId !== bodyClinicId) {
+            await send(connClient, connectionId, {
+                type: "error",
+                error: "Not authorized to view this clinic's conversations",
+            });
+            return { statusCode: 403, body: "Forbidden" };
+        }
+    }
+
+    // Determine which GSI key to query with
     let queryKey: string;
     if (claims.userType === "Clinic" && bodyClinicId && bodyClinicId !== "all") {
         queryKey = `clinic#${bodyClinicId}`;
@@ -713,51 +794,50 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
 
     try {
         let items: Record<string, AttributeValue>[] = [];
+        let lastEvaluatedKey: Record<string, AttributeValue> | undefined;
 
         if (queryKey.startsWith("clinic#")) {
-            const res = await ddb
-                .send(
-                    new QueryCommand({
-                        TableName: CONVOS_TABLE,
-                        IndexName: "clinicKey-lastMessageAt",
-                        KeyConditionExpression: "clinicKey = :uk",
-                        ExpressionAttributeValues: { ":uk": { S: queryKey } },
-                        ScanIndexForward: false,
-                    })
-                )
-                .catch(() => ({ Items: [] }));
+            const res = await ddb.send(
+                new QueryCommand({
+                    TableName: CONVOS_TABLE,
+                    IndexName: "clinicKey-lastMessageAt",
+                    KeyConditionExpression: "clinicKey = :uk",
+                    ExpressionAttributeValues: { ":uk": { S: queryKey } },
+                    ScanIndexForward: false,
+                    Limit: limit,
+                    ExclusiveStartKey: bodyNextKey,
+                })
+            );
             items = res.Items || [];
-
-            if (!items.length) {
-                const scan = await ddb
-                    .send(
-                        new ScanCommand({
-                            TableName: CONVOS_TABLE,
-                            FilterExpression: "clinicKey = :uk",
-                            ExpressionAttributeValues: { ":uk": { S: queryKey } },
-                        })
-                    )
-                    .catch(() => ({ Items: [] }));
-                items = scan.Items || [];
-            }
+            lastEvaluatedKey = res.LastEvaluatedKey;
         } else if (queryKey.startsWith("prof#")) {
-            const res = await ddb
-                .send(
-                    new QueryCommand({
-                        TableName: CONVOS_TABLE,
-                        IndexName: "profKey-lastMessageAt",
-                        KeyConditionExpression: "profKey = :uk",
-                        ExpressionAttributeValues: { ":uk": { S: queryKey } },
-                        ScanIndexForward: false,
-                    })
-                )
-                    .catch(() => ({ Items: [] }));
+            const res = await ddb.send(
+                new QueryCommand({
+                    TableName: CONVOS_TABLE,
+                    IndexName: "profKey-lastMessageAt",
+                    KeyConditionExpression: "profKey = :uk",
+                    ExpressionAttributeValues: { ":uk": { S: queryKey } },
+                    ScanIndexForward: false,
+                    Limit: limit,
+                    ExclusiveStartKey: bodyNextKey,
+                })
+            );
             items = res.Items || [];
+            lastEvaluatedKey = res.LastEvaluatedKey;
         }
 
         const iAmClinic = claims.userType === "Clinic";
 
-        // PHASE 1: Build conversations with names only (fast — no avatar lookups)
+        // Pre-batch the Cognito name lookups so we don't serialize them per row
+        let profNameMap: Record<string, string> = {};
+        if (iAmClinic) {
+            const profSubs = items
+                .map((it) => (it.profKey?.S || "").replace(/^prof#/, ""))
+                .filter(Boolean);
+            profNameMap = await getCognitoNamesBySubs(profSubs);
+        }
+
+        // PHASE 1: Build conversation rows (names only — avatars come in Phase 2)
         const conversations = await Promise.all(
             items.map(async (it) => {
                 const conversationId = it.conversationId?.S || "";
@@ -774,7 +854,7 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                 const otherKey = iAmClinic ? profKey : clinicKey;
                 if (iAmClinic) {
                     const profSub = (profKey || "").replace(/^prof#/, "");
-                    recipientName = await getCognitoNameBySub(profSub);
+                    recipientName = profNameMap[profSub] || await getCognitoNameBySub(profSub);
                 } else {
                     recipientName = await getClinicDisplayByKey(clinicKey || "");
                 }
@@ -784,7 +864,9 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                 try {
                     const conns = await getConnections(otherKey);
                     isOnline = conns.length > 0;
-                } catch {}
+                } catch (e) {
+                    console.warn("isOnline lookup failed", otherKey, (e as Error).message);
+                }
 
                 const unreadCount = iAmClinic ? clinicUnread : profUnread;
 
@@ -807,6 +889,8 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
         await send(connClient, connectionId, {
             type: "conversationsResponse",
             conversations: conversations.map(({ clinicKey, profKey, ...rest }) => rest),
+            nextKey: lastEvaluatedKey || null,
+            hasMore: !!lastEvaluatedKey,
         });
 
         // PHASE 2: Fetch avatars in background and send update
@@ -860,12 +944,30 @@ async function onGetHistory(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
         nextKey: any
     };
 
-    // Safety clamp the limit
-    const limit = Math.max(1, Math.min(200, Number(bodyLimit) || 50));
+    // Safety clamp the limit to the paginated default/max
+    const limit = Math.max(1, Math.min(MAX_HISTORY_PAGE, Number(bodyLimit) || DEFAULT_HISTORY_PAGE));
 
     if (!clinicId || !professionalSub) {
         return { statusCode: 400, body: "Missing clinicId/professionalSub" };
     }
+
+    // --- Authorization: caller must be one of the two parties in this conversation ---
+    // Previously onGetHistory had NO auth check, so any authenticated user could fetch
+    // any clinic↔professional conversation by guessing IDs.
+    const isAuthorized =
+        claims.isRoot === true ||
+        (claims.userType === "Clinic" && claims.clinicId === clinicId) ||
+        (claims.userType === "Professional" && claims.sub === professionalSub);
+
+    if (!isAuthorized) {
+        const connClient = wsClientFromEvent(event);
+        await send(connClient, event.requestContext.connectionId, {
+            type: "error",
+            error: "Not authorized to view this conversation's history",
+        });
+        return { statusCode: 403, body: "Forbidden" };
+    }
+
     const convoId = makeConversationId(clinicId, professionalSub);
 
     // Fetch messages and conversation record in parallel
@@ -940,13 +1042,14 @@ async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGateway
             return { statusCode: 400, body: "Missing clinicId or professionalSub" };
         }
 
-        const expectedSenderKey =
-            claims.userType === "Clinic" ? `clinic#${claims.clinicId}` : `prof#${claims.sub}`;
-        
-        // Authorization check: User must be one of the two parties in the conversation
-        const isUserAuthorized = 
-            (claims.userType === "Clinic" && claims.clinicId === clinicId) ||
-            (claims.userType === "Professional" && claims.sub === professionalSub);
+        // Authorization check: caller must be one of the two parties in the conversation.
+        // Root bypasses for admin tooling; otherwise:
+        // - Clinic users must own the clinicId they're marking
+        // - Professionals must be the professionalSub they're marking
+        const isUserAuthorized =
+            claims.isRoot === true ||
+            (claims.userType === "Clinic" && !!claims.clinicId && claims.clinicId === clinicId) ||
+            (claims.userType === "Professional" && !!claims.sub && claims.sub === professionalSub);
 
         if (!isUserAuthorized) {
             const connClient = wsClientFromEvent(event);
@@ -1027,10 +1130,11 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
             return { statusCode: 400, body: "Missing or invalid data" };
         }
 
-        // Authorization check: User must be one of the two parties in the conversation
-        const isUserAuthorized = 
-            (claims.userType === "Clinic" && claims.clinicId === clinicId) ||
-            (claims.userType === "Professional" && claims.sub === professionalSub);
+        // Authorization check: caller must be one of the two parties in the conversation.
+        // (Root cannot send on behalf of someone else — that requires an explicit senderKey contract.)
+        const isUserAuthorized =
+            (claims.userType === "Clinic" && !!claims.clinicId && claims.clinicId === clinicId) ||
+            (claims.userType === "Professional" && !!claims.sub && claims.sub === professionalSub);
 
         if (!isUserAuthorized) {
             const connClient = wsClientFromEvent(event);
