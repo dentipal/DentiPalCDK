@@ -1004,6 +1004,12 @@ export class DentiPalCDKStack extends cdk.Stack {
             billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
         });
+        // NOTE (audit 2026-04-17): `ConversationIdIndex` has the same PK+SK as the base
+        // table above (conversationId + messageId) and is never queried — it is pure
+        // WCU and storage cost, duplicating every write. It is kept here for now because
+        // removing it requires a deployment against a live production table; see the
+        // inbox audit report for guidance. When you're ready to drop it, comment out
+        // this block and run `cdk deploy`; the GSI will be removed without touching data.
         messagesTable.addGlobalSecondaryIndex({
             indexName: 'ConversationIdIndex',
             partitionKey: { name: 'conversationId', type: dynamodb.AttributeType.STRING },
@@ -1342,6 +1348,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             environment: {
                 REGION: this.region,
                 USER_POOL_ID: userPool.userPoolId,
+                CLIENT_ID: client.userPoolClientId,
                 MESSAGES_TABLE: messagesTable.tableName, // DentiPal-Messages
                 CONNS_TABLE: connectionsTable.tableName,   // DentiPal-Connections
                 CONVOS_TABLE: conversationsTable.tableName, // DentiPal-Conversations
@@ -1352,7 +1359,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 CLINIC_OFFICE_IMAGES_BUCKET: clinicOfficeImagesBucket.bucketName, // for clinic office image presigned URLs
             },
             timeout: cdk.Duration.seconds(30),
-            memorySize: 256,
+            memorySize: 512,
         });
 
         // --- WebSocket IAM Role Permissions ---
