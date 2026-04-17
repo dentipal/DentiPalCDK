@@ -1078,6 +1078,29 @@ export class DentiPalCDKStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
         });
 
+        // 18. DentiPal-JobPromotions (LinkedIn-style job promotion/boosting)
+        const jobPromotionsTable = new dynamodb.Table(this, 'JobPromotionsTable', {
+            tableName: 'DentiPal-V5-JobPromotions',
+            partitionKey: { name: 'jobId', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'promotionId', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+        // GSI for querying promotions by clinic user (my promotions dashboard)
+        jobPromotionsTable.addGlobalSecondaryIndex({
+            indexName: 'clinicUserSub-index',
+            partitionKey: { name: 'clinicUserSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+        // GSI for expiry cron job (find active promotions that have expired)
+        jobPromotionsTable.addGlobalSecondaryIndex({
+            indexName: 'status-expiresAt-index',
+            partitionKey: { name: 'status', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'expiresAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
 
         // Collect all tables for the main REST handler
         const allTables = [
@@ -1085,7 +1108,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             conversationsTable, feedbackTable, jobApplicationsTable, jobInvitationsTable,
             jobNegotiationsTable, jobPostingsTable, messagesTable, notificationsTable,
             otpVerificationTable, professionalProfilesTable, referralsTable, userAddressesTable,
-            userClinicAssignmentsTable
+            userClinicAssignmentsTable, jobPromotionsTable
         ];
 
         // ========================================================================
@@ -1185,6 +1208,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 REFERRALS_TABLE: referralsTable.tableName,
                 USER_ADDRESSES_TABLE: userAddressesTable.tableName,
                 USER_CLINIC_ASSIGNMENTS_TABLE: userClinicAssignmentsTable.tableName,
+                JOB_PROMOTIONS_TABLE: jobPromotionsTable.tableName,
 
                 // Stats/Alias mappings for code compatibility
                 CLINIC_JOBS_POSTED_TABLE: jobPostingsTable.tableName,
@@ -1349,6 +1373,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 REGION: this.region,
                 USER_POOL_ID: userPool.userPoolId,
                 CLIENT_ID: client.userPoolClientId,
+                USER_CLINIC_ASSIGNMENTS_TABLE: userClinicAssignmentsTable.tableName,
                 MESSAGES_TABLE: messagesTable.tableName, // DentiPal-Messages
                 CONNS_TABLE: connectionsTable.tableName,   // DentiPal-Connections
                 CONVOS_TABLE: conversationsTable.tableName, // DentiPal-Conversations
@@ -1372,6 +1397,9 @@ export class DentiPalCDKStack extends cdk.Stack {
         // 1b. Read access on profile tables (for avatar URLs in conversations response)
         professionalProfilesTable.grantReadData(webSocketChatHandler);
         clinicProfilesTable.grantReadData(webSocketChatHandler);
+
+        // 1b². Read access on user-clinic assignments (multi-clinic authorization check)
+        userClinicAssignmentsTable.grantReadData(webSocketChatHandler);
 
         // 1c. S3 read access for presigning profile image URLs
         profileImagesBucket.grantRead(webSocketChatHandler);
