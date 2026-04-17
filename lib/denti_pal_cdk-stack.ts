@@ -1353,6 +1353,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 REGION: this.region,
                 USER_POOL_ID: userPool.userPoolId,
                 CLIENT_ID: client.userPoolClientId,
+                USER_CLINIC_ASSIGNMENTS_TABLE: userClinicAssignmentsTable.tableName,
                 MESSAGES_TABLE: messagesTable.tableName, // DentiPal-Messages
                 CONNS_TABLE: connectionsTable.tableName,   // DentiPal-Connections
                 CONVOS_TABLE: conversationsTable.tableName, // DentiPal-Conversations
@@ -1376,6 +1377,9 @@ export class DentiPalCDKStack extends cdk.Stack {
         // 1b. Read access on profile tables (for avatar URLs in conversations response)
         professionalProfilesTable.grantReadData(webSocketChatHandler);
         clinicProfilesTable.grantReadData(webSocketChatHandler);
+
+        // 1b². Read access on user-clinic assignments (multi-clinic authorization check)
+        userClinicAssignmentsTable.grantReadData(webSocketChatHandler);
 
         // 1c. S3 read access for presigning profile image URLs
         profileImagesBucket.grantRead(webSocketChatHandler);
