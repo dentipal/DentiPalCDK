@@ -212,6 +212,11 @@ export const handler = async (
       createdAt: s(it.createdAt),
       created_by: s(it.created_by) || s(it.createdBy),
       creatorName: s(it.creatorName),
+      // Promotion fields
+      isPromoted: b(it.isPromoted),
+      promotionPlanId: s(it.promotionPlanId),
+      promotionId: s(it.promotionId),
+      promotionExpiresAt: s(it.promotionExpiresAt),
     }));
 
     // Resolve creator names for records without creatorName (old records with userSub)

@@ -3,9 +3,10 @@ import {
     AdminUpdateUserAttributesCommand, 
     AdminListGroupsForUserCommand, 
     AdminRemoveUserFromGroupCommand, 
-    AdminAddUserToGroupCommand, 
-    ListUsersCommand, 
-    AdminGetUserCommand, 
+    AdminAddUserToGroupCommand,
+    AdminSetUserPasswordCommand,
+    ListUsersCommand,
+    AdminGetUserCommand,
     AttributeType,
     ListUsersCommandOutput,
     AdminGetUserCommandOutput,
@@ -50,6 +51,8 @@ interface RequestBody {
     subgroup?: string;
     clinicIds?: string[]; // Array of clinic IDs to associate
     email?: string;
+    password?: string;
+    verifyPassword?: string;
 }
 
 // --- 3. Utility Functions ---
@@ -231,29 +234,29 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        // --- Parse body ---
-        let body: RequestBody;
-        try {
-            body = JSON.parse(event.body || "{}");
-        } catch {
-            return json(400, {
-                error: "Invalid JSON",
-                message: "Request body is not valid JSON. Please send a properly formatted JSON object.",
-                timestamp: new Date().toISOString()
-            });
-        }
+        const body: RequestBody = JSON.parse(event.body || "{}");
+        const { firstName, lastName, subgroup, clinicIds, password, verifyPassword } = body;
+        const email = body.email ? body.email.toLowerCase() : undefined;
 
-        const { firstName, lastName, subgroup, clinicIds, email: rawEmail } = body;
-        const email = rawEmail ? rawEmail.toLowerCase() : undefined;
+        // Validate password fields if provided
+        if (password || verifyPassword) {
+            if (password !== verifyPassword) {
+                return json(400, {
+                    error: "Bad Request",
+                    message: "Passwords do not match",
+                    timestamp: new Date().toISOString()
+                });
+            }
+            if (!password || password.length < 6) {
+                return json(400, {
+                    error: "Bad Request",
+                    message: "Password must be at least 6 characters",
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
 
         // --- Block fields that cannot be edited ---
-        if ((body as any).password || (body as any).newPassword) {
-            return json(400, {
-                error: "Not Editable",
-                message: "Password cannot be changed through this endpoint.",
-                timestamp: new Date().toISOString()
-            });
-        }
         if ((body as any).phoneNumber || (body as any).phone_number) {
             return json(400, {
                 error: "Not Editable",
@@ -274,15 +277,43 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const hasLastName = lastName !== undefined && lastName !== null;
         const hasSubgroup = subgroup !== undefined && subgroup !== null;
         const hasClinicIds = clinicIds !== undefined && clinicIds !== null;
+        const hasPassword = !!password;
 
-        if (!hasFirstName && !hasLastName && !hasSubgroup && !hasClinicIds) {
+        if (!hasFirstName && !hasLastName && !hasSubgroup && !hasClinicIds && !hasPassword) {
             return json(400, {
                 error: "Nothing to Update",
                 message: "Please provide at least one field to update.",
-                editableFields: ["firstName", "lastName", "subgroup", "clinicIds"],
+                editableFields: ["firstName", "lastName", "subgroup", "clinicIds", "password"],
                 timestamp: new Date().toISOString()
             });
         }
+
+        // --- Resolve username ---
+        const username: string | null = extractUsername(event, email);
+
+        if (!username) {
+            return json(400, {
+                error: "Missing Username",
+                message: "Could not determine which user to update. Provide the user's email in the URL path (PUT /users/{email}) or in the request body.",
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        // --- Ensure user exists in Cognito ---
+        try {
+            await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
+        } catch (e) {
+            return json(404, {
+                error: "User Not Found",
+                message: `No user found with username "${username}" in the system.`,
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        // Track clinic changes for response
+        const addedClinics: string[] = [];
+        const removedClinics: string[] = [];
+        const notFoundClinics: string[] = [];
 
         // --- Validate firstName ---
         if (hasFirstName) {
@@ -384,73 +415,44 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
-        // --- Resolve username ---
-        const username: string | null = extractUsername(event, email);
-
-        if (!username) {
-            return json(400, {
-                error: "Missing Username",
-                message: "Could not determine which user to update. Provide the user's email in the URL path (PUT /users/{email}) or in the request body.",
-                timestamp: new Date().toISOString()
-            });
-        }
-
-        // --- Ensure user exists in Cognito ---
-        try {
-            await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
-        } catch (e) {
-            return json(404, {
-                error: "User Not Found",
-                message: `No user found with username "${username}" in the system. Please check the email/username and try again.`,
-                timestamp: new Date().toISOString()
-            });
-        }
-
         // --- Update Cognito attributes (firstName, lastName) ---
         const attrs: AttributeType[] = [];
         if (hasFirstName) attrs.push({ Name: "given_name", Value: firstName!.trim() });
         if (hasLastName) attrs.push({ Name: "family_name", Value: lastName!.trim() });
 
         if (attrs.length) {
-            try {
-                await cognito.send(new AdminUpdateUserAttributesCommand({
-                    UserPoolId: USER_POOL_ID,
-                    Username: username,
-                    UserAttributes: attrs
-                }));
-            } catch (err: any) {
-                return json(500, {
-                    error: "Failed to Update Name",
-                    message: `Could not update user attributes in Cognito: ${err.message}`,
-                    timestamp: new Date().toISOString()
-                });
-            }
+            await cognito.send(new AdminUpdateUserAttributesCommand({
+                UserPoolId: USER_POOL_ID,
+                Username: username,
+                UserAttributes: attrs
+            }));
         }
 
-        // --- Update Cognito group (subgroup) ---
-        if (hasSubgroup) {
-            try {
-                await removeFromClinicSubgroups(username);
-                await cognito.send(new AdminAddUserToGroupCommand({
-                    UserPoolId: USER_POOL_ID,
-                    Username: username,
-                    GroupName: subgroup!
-                }));
-            } catch (err: any) {
-                return json(500, {
-                    error: "Failed to Update Role",
-                    message: `Could not update user role to "${subgroup}": ${err.message}`,
-                    timestamp: new Date().toISOString()
-                });
-            }
+        // 5. Update password if provided
+        if (password) {
+            await cognito.send(new AdminSetUserPasswordCommand({
+                UserPoolId: USER_POOL_ID,
+                Username: username,
+                Password: password,
+                Permanent: true,
+            }));
         }
 
-        // --- Update clinic assignments ---
-        const notFoundClinics: string[] = [];
-        const addedClinics: string[] = [];
-        const removedClinics: string[] = [];
+        // 6. Update Cognito group (if subgroup is provided)
+        if (subgroup) {
+            // Remove from all existing clinic groups first
+            await removeFromClinicSubgroups(username);
+            
+            // Add to the new subgroup
+            await cognito.send(new AdminAddUserToGroupCommand({
+                UserPoolId: USER_POOL_ID,
+                Username: username,
+                GroupName: subgroup
+            }));
+        }
 
-        if (hasClinicIds) {
+        // 6. Update DynamoDB to associate user with clinics (if clinicIds are provided)
+        if (Array.isArray(clinicIds) && clinicIds.length > 0) {
             const userSub: string | null = await getUserSubByUsername(username);
 
             if (!userSub) {
@@ -516,6 +518,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const updatedFields: string[] = [];
         if (hasFirstName) updatedFields.push("firstName");
         if (hasLastName) updatedFields.push("lastName");
+        if (hasPassword) updatedFields.push("password");
         if (hasSubgroup) updatedFields.push(`role → ${subgroup}`);
         if (addedClinics.length) updatedFields.push(`added to clinics: ${addedClinics.join(", ")}`);
         if (removedClinics.length) updatedFields.push(`removed from clinics: ${removedClinics.join(", ")}`);
