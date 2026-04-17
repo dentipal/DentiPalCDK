@@ -3,9 +3,10 @@ import {
     AdminUpdateUserAttributesCommand, 
     AdminListGroupsForUserCommand, 
     AdminRemoveUserFromGroupCommand, 
-    AdminAddUserToGroupCommand, 
-    ListUsersCommand, 
-    AdminGetUserCommand, 
+    AdminAddUserToGroupCommand,
+    AdminSetUserPasswordCommand,
+    ListUsersCommand,
+    AdminGetUserCommand,
     AttributeType,
     ListUsersCommandOutput,
     AdminGetUserCommandOutput,
@@ -50,6 +51,8 @@ interface RequestBody {
     subgroup?: string;
     clinicIds?: string[]; // Array of clinic IDs to associate
     email?: string;
+    password?: string;
+    verifyPassword?: string;
 }
 
 // --- 3. Utility Functions ---
@@ -232,7 +235,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         const body: RequestBody = JSON.parse(event.body || "{}");
-        const { firstName, lastName, phoneNumber, subgroup, clinicIds, email } = body;
+        const { firstName, lastName, phoneNumber, subgroup, clinicIds, email, password, verifyPassword } = body;
+
+        // Validate password fields if provided
+        if (password || verifyPassword) {
+            if (password !== verifyPassword) {
+                return json(400, {
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Passwords do not match",
+                    timestamp: new Date().toISOString()
+                });
+            }
+            if (!password || password.length < 6) {
+                return json(400, {
+                    error: "Bad Request",
+                    statusCode: 400,
+                    message: "Password must be at least 6 characters",
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
 
         const username: string | null = extractUsername(event, email);
         
@@ -309,7 +332,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }));
         }
 
-        // 5. Update Cognito group (if subgroup is provided)
+        // 5. Update password if provided
+        if (password) {
+            await cognito.send(new AdminSetUserPasswordCommand({
+                UserPoolId: USER_POOL_ID,
+                Username: username,
+                Password: password,
+                Permanent: true,
+            }));
+        }
+
+        // 6. Update Cognito group (if subgroup is provided)
         if (subgroup) {
             // Remove from all existing clinic groups first
             await removeFromClinicSubgroups(username);
