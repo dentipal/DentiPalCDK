@@ -11,6 +11,7 @@ import { extractUserFromBearerToken } from "./utils"; // Assuming extractUserFro
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { geocodeAddressParts } from "./geo";
 
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -80,6 +81,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const timestamp: string = new Date().toISOString();
 
+        // Geocode the address — best-effort, non-fatal
+        const coords = await geocodeAddressParts({
+            addressLine1: addressData.addressLine1,
+            city: addressData.city,
+            state: addressData.state,
+            pincode: addressData.pincode,
+            country: addressData.country || "USA",
+        });
+        if (coords) {
+            console.log(`[createUserAddress] Geocoded → (${coords.lat}, ${coords.lng})`);
+        } else {
+            console.warn(`[createUserAddress] Could not geocode ${addressData.addressLine1}, ${addressData.city}`);
+        }
+
         // Step 3: Build DynamoDB item
         // Note: The structure implies userSub is the Partition Key (PK) for a 1:1 relationship.
         const item: Record<string, AttributeValue> = {
@@ -91,10 +106,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             country: { S: addressData.country || "USA" },
             addressType: { S: addressData.addressType || "home" },
             // isDefault defaults to true unless explicitly set to false in the body
-            isDefault: { BOOL: addressData.isDefault !== false }, 
+            isDefault: { BOOL: addressData.isDefault !== false },
             createdAt: { S: timestamp },
             updatedAt: { S: timestamp },
         };
+
+        // Attach geocoded coordinates (if available)
+        if (coords) {
+            item.lat = { N: String(coords.lat) };
+            item.lng = { N: String(coords.lng) };
+        }
 
         // Optional fields
         if (addressData.addressLine2) {

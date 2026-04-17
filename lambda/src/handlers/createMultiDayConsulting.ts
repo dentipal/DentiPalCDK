@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { geocodeAddressParts } from "./geo";
 
 // --- 1. Configuration ---
 const REGION: string = process.env.REGION || process.env.AWS_REGION || "us-east-1";
@@ -394,10 +395,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 item.requirements = new Set(jobData.requirements);
             }
 
+            // Geocode the clinic address — best-effort, non-fatal
+            const coords = await geocodeAddressParts({
+                addressLine1: clinicAddress.addressLine1,
+                city: clinicAddress.city,
+                state: clinicAddress.state,
+                pincode: clinicAddress.pincode,
+                country: "USA",
+            });
+            if (coords) {
+                console.log(`[createMultiDayConsulting] Geocoded ${clinicAddress.city}, ${clinicAddress.state} to (${coords.lat}, ${coords.lng})`);
+                item.lat = coords.lat;
+                item.lng = coords.lng;
+            } else {
+                console.warn(`[createMultiDayConsulting] Could not geocode: ${clinicAddress.addressLine1}, ${clinicAddress.city}, ${clinicAddress.state} ${clinicAddress.pincode}`);
+            }
+
             // Put item
             await ddbDoc.send(new PutCommand({
-                TableName: JOB_POSTINGS_TABLE, 
-                Item: item 
+                TableName: JOB_POSTINGS_TABLE,
+                Item: item
             }));
         });
 

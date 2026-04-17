@@ -10,20 +10,19 @@
     "@aws-sdk/client-cognito-identity-provider": "^3.940.0",
     "@aws-sdk/client-dynamodb": "^3.940.0",
     "@aws-sdk/client-eventbridge": "^3.1029.0",
+    "@aws-sdk/client-location": "^3.1031.0",
     "@aws-sdk/client-s3": "^3.940.0",
     "@aws-sdk/client-ses": "^3.940.0",
     "@aws-sdk/client-sns": "^3.940.0",
     "@aws-sdk/lib-dynamodb": "^3.645.0",
     "@aws-sdk/s3-request-presigner": "^3.940.0",
     "aws-sdk": "^2.1692.0",
-    "uuid": "^9.0.1",
-    "zipcodes": "^8.0.0"
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.161",
     "@types/node": "^20.12.7",
     "@types/uuid": "^9.0.8",
-    "@types/zipcodes": "^8.0.5",
     "typescript": "^5.4.5"
   }
 }

@@ -6,7 +6,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
-import { zipToCoords, haversineDistance, type Coordinates } from "./geo";
+import { haversineDistance, type Coordinates } from "./geo";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
@@ -48,11 +48,19 @@ function itemToObject(item: Record<string, AttributeValue>): any {
 }
 
 /**
- * Get all jobIds the professional has already applied to,
- * using the professionalUserSub-index GSI.
+ * Get all jobIds + clinicIds the professional has already applied to.
+ * Used for:
+ *  - Excluding already-applied jobs from results (jobIds)
+ *  - Boosting jobs from familiar clinics (clinicIds)
  */
-async function getAppliedJobIds(userSub: string): Promise<Set<string>> {
+interface AppliedInfo {
+  jobIds: Set<string>;
+  clinicIds: Set<string>;
+}
+
+async function getAppliedJobInfo(userSub: string): Promise<AppliedInfo> {
   const jobIds = new Set<string>();
+  const clinicIds = new Set<string>();
   let lastKey: Record<string, AttributeValue> | undefined;
 
   do {
@@ -62,68 +70,70 @@ async function getAppliedJobIds(userSub: string): Promise<Set<string>> {
         IndexName: "professionalUserSub-index",
         KeyConditionExpression: "professionalUserSub = :userSub",
         ExpressionAttributeValues: { ":userSub": { S: userSub } },
-        ProjectionExpression: "jobId",
+        ProjectionExpression: "jobId, clinicId",
         ExclusiveStartKey: lastKey,
       })
     );
 
     resp.Items?.forEach((item) => {
-      const id = str(item.jobId);
-      if (id) jobIds.add(id);
+      const jid = str(item.jobId);
+      const cid = str(item.clinicId);
+      if (jid) jobIds.add(jid);
+      if (cid) clinicIds.add(cid);
     });
 
     lastKey = resp.LastEvaluatedKey;
   } while (lastKey);
 
-  return jobIds;
+  return { jobIds, clinicIds };
 }
 
 /**
- * Look up the professional's zip code from the user-addresses table.
+ * Look up the professional's stored coordinates from the user-addresses table.
+ * Returns null if the user has no address or no coordinates.
  */
-async function getProfessionalZip(userSub: string): Promise<string | null> {
+async function getProfessionalCoords(userSub: string): Promise<Coordinates | null> {
   try {
     const resp = await ddb.send(
       new QueryCommand({
         TableName: USER_ADDRESSES_TABLE,
         KeyConditionExpression: "userSub = :userSub",
         ExpressionAttributeValues: { ":userSub": { S: userSub } },
-        ProjectionExpression: "pincode",
+        ProjectionExpression: "lat, lng",
         Limit: 1,
       })
     );
     const item = resp.Items?.[0];
     if (!item) return null;
-    return str(item.pincode) || null;
+    const lat = num(item.lat);
+    const lng = num(item.lng);
+    if (lat === null || lng === null) return null;
+    return { lat, lng };
   } catch {
     return null;
   }
 }
 
 /**
- * Get the zip code (pincode) from a job DynamoDB item.
- * Checks both flat and nested location fields.
+ * Read stored lat/lng from a job item. Returns null if not geocoded.
  */
-function getJobZip(item: Record<string, AttributeValue>): string | null {
-  // Check flat field first
-  const flat = str(item.pincode) || str(item.zipCode) || str(item.zip);
-  if (flat) return flat;
-
-  // Check nested location object
-  if (item.location && "M" in item.location) {
-    const locMap = item.location.M as Record<string, AttributeValue>;
-    return str(locMap?.zipCode) || str(locMap?.pincode) || str(locMap?.zip) || null;
-  }
-  return null;
+function getJobCoords(item: Record<string, AttributeValue>): Coordinates | null {
+  const lat = num(item.lat);
+  const lng = num(item.lng);
+  if (lat === null || lng === null) return null;
+  return { lat, lng };
 }
 
 /**
  * Compute a relevance score for a job based on available signals.
- * Higher = more relevant. Score range: 0-100.
+ * Higher = more relevant. Score range: 0-125 (with all bonuses).
  */
 function computeRelevanceScore(job: Record<string, AttributeValue>, params: {
   role?: string;
   location?: string;
+  distanceMi?: number | null;
+  radiusMiles?: number;
+  appliedClinicIds?: Set<string>;
 }): number {
   let score = 0;
 
@@ -159,6 +169,22 @@ function computeRelevanceScore(job: Record<string, AttributeValue>, params: {
   if (str(job.professional_role) || str(job.professionalRole)) completeness += 2.5;
   if (rate > 0) completeness += 2.5;
   score += completeness;
+
+  // Distance weighting (0-10): closer jobs score higher within the radius.
+  // Only applied when user has a radius filter active and we computed a distance.
+  if (params.distanceMi != null && params.radiusMiles && params.radiusMiles > 0) {
+    const distanceScore = 10 * (1 - params.distanceMi / params.radiusMiles);
+    score += Math.max(0, distanceScore);
+  }
+
+  // Applied-clinic boost (+15): user has applied to this clinic before.
+  // Strong familiarity signal — they've engaged with the clinic before.
+  if (params.appliedClinicIds && params.appliedClinicIds.size > 0) {
+    const jobClinicId = str(job.clinicId);
+    if (jobClinicId && params.appliedClinicIds.has(jobClinicId)) {
+      score += 15;
+    }
+  }
 
   return Math.round(score * 100) / 100;
 }
@@ -283,6 +309,15 @@ export const handler = async (
 
   const radiusMiles = qs.radius ? Number(qs.radius) : undefined;
 
+  // Live user location override (from browser geolocation on the frontend).
+  // If provided, we use these coords instead of looking up the stored profile address.
+  const userLatNum = qs.userLat ? Number(qs.userLat) : NaN;
+  const userLngNum = qs.userLng ? Number(qs.userLng) : NaN;
+  const liveUserCoords: Coordinates | null =
+    Number.isFinite(userLatNum) && Number.isFinite(userLngNum)
+      ? { lat: userLatNum, lng: userLngNum }
+      : null;
+
   const filters = {
     role: qs.role || undefined,
     jobType: qs.jobType || undefined,
@@ -296,15 +331,19 @@ export const handler = async (
   };
 
   try {
-    // 1) Get jobIds the professional has already applied to
-    // + resolve professional's coordinates for radius filtering (in parallel)
-    const [appliedJobIds, profZip] = await Promise.all([
-      getAppliedJobIds(userSub),
-      radiusMiles ? getProfessionalZip(userSub) : Promise.resolve(null),
+    // 1) Get applied job/clinic info
+    // + resolve professional's coordinates (prefer live browser coords over stored profile)
+    const needStoredCoords = radiusMiles && !liveUserCoords;
+    const [appliedInfo, storedCoords] = await Promise.all([
+      getAppliedJobInfo(userSub),
+      needStoredCoords ? getProfessionalCoords(userSub) : Promise.resolve(null as Coordinates | null),
     ]);
 
-    const profCoords: Coordinates | null = profZip ? zipToCoords(profZip) : null;
-    console.log(`Excluding ${appliedJobIds.size} applied jobs. Radius: ${radiusMiles ?? "none"}, profZip: ${profZip ?? "none"}`);
+    const appliedJobIds = appliedInfo.jobIds;
+    const appliedClinicIds = appliedInfo.clinicIds;
+
+    const profCoords: Coordinates | null = liveUserCoords ?? storedCoords;
+    console.log(`Excluding ${appliedJobIds.size} applied jobs. Boost: ${appliedClinicIds.size} familiar clinics. Radius: ${radiusMiles ?? "none"}, source: ${liveUserCoords ? "live browser" : storedCoords ? "saved profile" : "none"}, coords: ${profCoords ? `(${profCoords.lat}, ${profCoords.lng})` : "none"}`);
 
     // 2) Query the status-createdAt GSI for "open" jobs, newest first
     //    Falls back to scanning "active" status if "open" yields nothing
@@ -358,17 +397,24 @@ export const handler = async (
           // Radius filter: skip jobs outside the professional's travel radius
           let distanceMi: number | null = null;
           if (radiusMiles && profCoords) {
-            const jobZip = getJobZip(item);
-            const jobCoords = zipToCoords(jobZip ?? undefined);
+            const jobCoords = getJobCoords(item);
             if (jobCoords) {
               distanceMi = haversineDistance(profCoords.lat, profCoords.lng, jobCoords.lat, jobCoords.lng);
               if (distanceMi > radiusMiles) continue; // too far — skip
+            } else {
+              // Job has no stored coords — cannot verify it's within radius, so exclude it
+              continue;
             }
-            // If job has no zip, don't exclude it — let it through
           }
 
           // Compute relevance score
-          const score = computeRelevanceScore(item, { role: filters.role, location: filters.location });
+          const score = computeRelevanceScore(item, {
+            role: filters.role,
+            location: filters.location,
+            distanceMi,
+            radiusMiles,
+            appliedClinicIds,
+          });
           matchedJobs.push({ item, score, distanceMi });
         }
 

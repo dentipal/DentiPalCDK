@@ -19,7 +19,26 @@ const NEGOTIATIONS_TABLE = process.env.JOB_NEGOTIATIONS_TABLE || "DentiPal-JobNe
 const NEGOTIATION_GSI = "applicationId-index";
 const NEGOTIATION_HASH_KEY = "applicationId";
 
+// Pagination bounds for the applications query.
+const DEFAULT_PAGE_LIMIT = 50;
+const MAX_PAGE_LIMIT = 200;
+
 const dynamodb = new DynamoDBClient({ region: REGION });
+
+// Encode/decode a DynamoDB ExclusiveStartKey as an opaque base64url nextToken
+// so clients don't have to know the underlying key shape.
+function encodeNextToken(key: Record<string, AttributeValue> | undefined): string | null {
+  if (!key) return null;
+  return Buffer.from(JSON.stringify(key)).toString("base64url");
+}
+function decodeNextToken(token?: string | null): Record<string, AttributeValue> | undefined {
+  if (!token) return undefined;
+  try {
+    return JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
+  } catch {
+    return undefined;
+  }
+}
 
 // ✅ ADDED: Import auth utility
 import { extractUserFromBearerToken } from "./utils";
@@ -57,22 +76,33 @@ function chunk<T>(arr: T[], maxSize: number): T[][] {
   return chunks;
 }
 
-// BatchGetItem with automatic chunking for >100 keys
+// BatchGetItem with automatic chunking for >100 keys.
+// Accepts optional ProjectionExpression/ExpressionAttributeNames so callers can trim payload size.
 async function batchGetChunked(
-  tables: Record<string, { Keys: Record<string, AttributeValue>[] }>,
+  tables: Record<string, {
+    Keys: Record<string, AttributeValue>[];
+    ProjectionExpression?: string;
+    ExpressionAttributeNames?: Record<string, string>;
+  }>,
   maxRetries = 3
 ) {
-  // Collect all keys across tables, chunk to 100 total per request
   const allResponses: Record<string, any[]> = {};
 
-  // Process each table separately to ensure no single request exceeds 100 keys
   for (const [tableName, tableRequest] of Object.entries(tables)) {
     allResponses[tableName] = [];
     const keyChunks = chunk(tableRequest.Keys, 100);
 
     for (const keyChunk of keyChunks) {
+      const tableEntry: {
+        Keys: Record<string, AttributeValue>[];
+        ProjectionExpression?: string;
+        ExpressionAttributeNames?: Record<string, string>;
+      } = { Keys: keyChunk };
+      if (tableRequest.ProjectionExpression) tableEntry.ProjectionExpression = tableRequest.ProjectionExpression;
+      if (tableRequest.ExpressionAttributeNames) tableEntry.ExpressionAttributeNames = tableRequest.ExpressionAttributeNames;
+
       const result = await batchGetAll({
-        RequestItems: { [tableName]: { Keys: keyChunk } },
+        RequestItems: { [tableName]: tableEntry },
       }, maxRetries);
       allResponses[tableName].push(...(result.Responses?.[tableName] || []));
     }
@@ -94,6 +124,18 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     headers: CORS_HEADERS,
     body: JSON.stringify(bodyObj)
 });
+
+// Classifies errors thrown by extractUserFromBearerToken so handlers can return a generic 401.
+function isAuthError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : "";
+  return (
+    msg === "Authorization header missing" ||
+    msg.startsWith("Invalid authorization header") ||
+    msg === "Invalid access token format" ||
+    msg === "Failed to decode access token" ||
+    msg === "User sub not found in token claims"
+  );
+}
 
 async function getJobsUsingQuery(jobIds: string[], clinicId: string) {
   // Run all job queries in parallel instead of sequentially
@@ -313,29 +355,61 @@ export const handler = async (
     // Optional jobId filter — when provided, use the composite GSI for a targeted query
     const jobIdFilter = event.queryStringParameters?.jobId;
 
+    // Pagination — clients pass `limit` (capped) and `nextToken` (opaque from a previous response).
+    const requestedLimit = Number(event.queryStringParameters?.limit);
+    const pageLimit = Number.isFinite(requestedLimit) && requestedLimit > 0
+      ? Math.min(Math.floor(requestedLimit), MAX_PAGE_LIMIT)
+      : DEFAULT_PAGE_LIMIT;
+    const exclusiveStartKey = decodeNextToken(event.queryStringParameters?.nextToken);
+
+    // Filter out already-acted-on applications at the DDB layer so pagination pages don't look sparse
+    // to the client. DDB's LastEvaluatedKey is computed against scanned items (pre-filter), so cursor
+    // pagination remains correct whether a batch filters 0 items or all of them.
+    const nonActionableFilter = "(attribute_not_exists(applicationStatus) OR NOT (applicationStatus IN (:sAccepted, :sRejected, :sScheduled, :sCompleted, :sHired, :sDeclined, :sConfirmed)))";
+    const nonActionableValues: Record<string, AttributeValue> = {
+      ":sAccepted": { S: "accepted" },
+      ":sRejected": { S: "rejected" },
+      ":sScheduled": { S: "scheduled" },
+      ":sCompleted": { S: "completed" },
+      ":sHired": { S: "hired" },
+      ":sDeclined": { S: "declined" },
+      ":sConfirmed": { S: "confirmed" },
+    };
+
     const queryInput: QueryCommandInput = jobIdFilter
       ? {
           TableName: APPLICATIONS_TABLE,
           IndexName: CLINIC_JOB_INDEX,
           KeyConditionExpression: "clinicId = :clinicId AND jobId = :jobId",
+          FilterExpression: nonActionableFilter,
           ExpressionAttributeValues: {
             ":clinicId": { S: clinicId },
             ":jobId": { S: jobIdFilter },
+            ...nonActionableValues,
           },
+          Limit: pageLimit,
+          ExclusiveStartKey: exclusiveStartKey,
         }
       : {
           TableName: APPLICATIONS_TABLE,
           IndexName: CLINIC_ID_INDEX,
           KeyConditionExpression: "clinicId = :clinicId",
-          ExpressionAttributeValues: { ":clinicId": { S: clinicId } },
+          FilterExpression: nonActionableFilter,
+          ExpressionAttributeValues: {
+            ":clinicId": { S: clinicId },
+            ...nonActionableValues,
+          },
+          Limit: pageLimit,
+          ExclusiveStartKey: exclusiveStartKey,
         };
 
-    console.log(`🔍 Query mode: ${jobIdFilter ? `filtered by jobId=${jobIdFilter}` : "all jobs"}`);
+    console.log(`🔍 Query mode: ${jobIdFilter ? `filtered by jobId=${jobIdFilter}` : "all jobs"} (limit=${pageLimit}${exclusiveStartKey ? ", paginated" : ""})`);
 
     const queryResp = await dynamodb.send(new QueryCommand(queryInput));
     const applications = (queryResp.Items || []).map((it) => unmarshall(it as Record<string, AttributeValue>));
+    const nextToken = encodeNextToken(queryResp.LastEvaluatedKey as Record<string, AttributeValue> | undefined);
 
-    console.log(`📋 Found ${applications.length} applications`);
+    console.log(`📋 Found ${applications.length} applications${nextToken ? " (more available)" : ""}`);
 
     if (!applications.length) {
       return json(200, {
@@ -346,7 +420,8 @@ export const handler = async (
           clinicId: clinicId,
           totalApplications: 0,
           applications: [],
-          byJobId: {}
+          byJobId: {},
+          pagination: { limit: pageLimit, nextToken: null },
         },
         timestamp: new Date().toISOString()
       });
@@ -358,6 +433,13 @@ export const handler = async (
     // Fetch negotiations, job postings, and profiles in parallel
     const profileKeys = profSubs.map((s: string) => ({ userSub: { S: s } }));
 
+    // Project only the fields the applicants list needs. The profile modal re-fetches the full
+    // profile on open, so bio/certificates/skills/specializations/videos don't need to ride along
+    // with every applicant card — that was inflating response size ~10x for no visible gain.
+    const PROFILE_LIST_PROJECTION =
+      "userSub, firstName, first_name, lastName, last_name, professional_role, professionalRole, #role, yearsExperience, years_of_experience, yearsOfExperience, profile_image_url, profileImageKey";
+    const PROFILE_LIST_EXPR_NAMES = { "#role": "role" };
+
     const [negotiationMap, postingsRaw, profilesRaw] = await Promise.all([
       // 1. Negotiations (batch + query hybrid)
       fetchNegotiationsForNegotiatingApps(applications),
@@ -365,20 +447,26 @@ export const handler = async (
       // 2. Job postings via jobId-index-1 GSI (reliable, no key guessing)
       getJobsUsingQuery(jobIds, clinicId),
 
-      // 3. Professional profiles via BatchGetItem (userSub is the direct PK)
+      // 3. Professional profiles via BatchGetItem — trimmed projection.
       profileKeys.length > 0
-        ? batchGetChunked({ [PROFILES_TABLE]: { Keys: profileKeys } })
+        ? batchGetChunked({
+            [PROFILES_TABLE]: {
+              Keys: profileKeys,
+              ProjectionExpression: PROFILE_LIST_PROJECTION,
+              ExpressionAttributeNames: PROFILE_LIST_EXPR_NAMES,
+            },
+          })
             .then((r) => (r.Responses?.[PROFILES_TABLE] || []).map((item: Record<string, AttributeValue>) => unmarshall(item)))
             .catch((e: any) => { console.error("❌ Profile batch failed:", e.message); return [] as any[]; })
         : Promise.resolve([] as any[]),
     ]);
 
     const postingByJobId = new Map(
-      postingsRaw.filter(Boolean).map((p) => [p.jobId, p])
+      postingsRaw.filter((p): p is NonNullable<typeof p> => Boolean(p)).map((p) => [p.jobId, p])
     );
 
     const profileByUserSub = new Map(
-      profilesRaw.filter(Boolean).map((p) => [p.userSub, p])
+      profilesRaw.filter((p): p is NonNullable<typeof p> => Boolean(p)).map((p) => [p.userSub, p])
     );
 
     const applicationsJoined = applications.map((app) => {
@@ -406,7 +494,8 @@ export const handler = async (
           negotiationId: app.negotiationId ?? null,
         },
         negotiation: nego,
-        job: job ? { ...job, job_type: job.job_type || null } : null,
+        // `job` lives on byJobId[jobId].job so it's not duplicated per applicant in the flat list.
+        _job: job,  // internal — stripped below before returning
         professional: prof,
       };
     });
@@ -415,8 +504,9 @@ export const handler = async (
 
     for (const row of applicationsJoined) {
       const jid = row.application.jobId;
+      const job = row._job;
 
-      if (!byJobId[jid]) byJobId[jid] = { job: row.job, applicants: [] };
+      if (!byJobId[jid]) byJobId[jid] = { job: job ? { ...job, job_type: job.job_type || null } : null, applicants: [] };
 
       byJobId[jid].applicants.push({
         professional: row.professional,
@@ -425,40 +515,42 @@ export const handler = async (
       });
     }
 
+    // Strip the private `_job` reference so clients see only { application, negotiation, professional }.
+    const applicationsFlat = applicationsJoined.map(({ _job, ...rest }) => rest);
+
     return json(200, {
       status: "success",
       statusCode: 200,
       message: "Job applicants retrieved successfully",
       data: {
         clinicId: clinicId,
-        totalApplications: applicationsJoined.length,
-        applications: applicationsJoined,
-        byJobId: byJobId
+        totalApplications: applicationsFlat.length,
+        applications: applicationsFlat,
+        byJobId: byJobId,
+        pagination: { limit: pageLimit, nextToken: nextToken },
       },
       timestamp: new Date().toISOString()
     });
   } catch (error: any) {
     console.error("❌ handler error:", error);
-    
-    // ✅ Added Auth error handling
-    if (error.message === "Authorization header missing" || 
-        error.message?.startsWith("Invalid authorization header") ||
-        error.message === "Invalid access token format" ||
-        error.message === "Failed to decode access token" ||
-        error.message === "User sub not found in token claims") {
-        
-        return json(401, {
-            error: "Unauthorized",
-            details: error.message
-        });
+
+    if (isAuthError(error)) {
+      // Return a generic 401 — server logs above retain the specific reason.
+      return json(401, {
+        status: "error",
+        statusCode: 401,
+        error: "Unauthorized",
+        message: "Authentication required",
+        timestamp: new Date().toISOString(),
+      });
     }
 
     return json(500, {
-      error: "Internal Server Error",
+      status: "error",
       statusCode: 500,
+      error: "Internal Server Error",
       message: "Failed to fetch applicants",
-      details: { reason: error.message },
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   }
 };
