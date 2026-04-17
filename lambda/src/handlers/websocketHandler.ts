@@ -265,30 +265,55 @@ async function hasClinicAccess(userSub: string, clinicId: string): Promise<boole
     if (cached && (Date.now() - cached.cachedAt) < ACCESS_CACHE_TTL_MS) {
         return cached.allowed;
     }
+
+    // Two sources of truth exist for clinic membership in this codebase:
+    //  1. DentiPal-V5-Clinics.AssociatedUsers  (set[userSub])  — used by getAllClinics
+    //  2. DentiPal-V5-UserClinicAssignments    (userSub, clinicId) — used by utils.hasClinicAccess
+    // They can disagree (legacy: #1 existed first, #2 was added later and isn't
+    // always backfilled). Treat EITHER as proof of membership so the inbox
+    // respects the clinic list the user actually sees in the UI.
+    let allowed = false;
     try {
-        const out = await ddb.send(new GetItemCommand({
-            TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
-            Key: { userSub: { S: userSub }, clinicId: { S: clinicId } },
-            ProjectionExpression: "userSub",
+        const clinicRow = await ddb.send(new GetItemCommand({
+            TableName: CLINICS_TABLE,
+            Key: { clinicId: { S: clinicId } },
+            ProjectionExpression: "AssociatedUsers, createdBy",
         }));
-        const allowed = !!out.Item;
-        console.log("[authz] hasClinicAccess", {
-            userSub,
-            clinicId,
-            table: USER_CLINIC_ASSIGNMENTS_TABLE,
-            allowed,
-        });
-        accessCache.set(cacheKey, { allowed, cachedAt: Date.now() });
-        return allowed;
+        const associated = clinicRow.Item?.AssociatedUsers;
+        const createdBy = clinicRow.Item?.createdBy?.S;
+        // AssociatedUsers can be stored as StringSet (SS) or List-of-strings (L)
+        if (associated?.SS?.includes(userSub)) allowed = true;
+        else if (associated?.L?.some((x) => x.S === userSub)) allowed = true;
+        else if (createdBy === userSub) allowed = true; // Root/creator case
     } catch (e) {
-        console.error("[authz] hasClinicAccess lookup failed", {
+        console.warn("[authz] Clinics.AssociatedUsers lookup failed", {
             userSub,
             clinicId,
-            table: USER_CLINIC_ASSIGNMENTS_TABLE,
             error: (e as Error).message,
         });
-        return false; // fail closed
     }
+
+    if (!allowed) {
+        // Fall back to the assignments table for completeness
+        try {
+            const out = await ddb.send(new GetItemCommand({
+                TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
+                Key: { userSub: { S: userSub }, clinicId: { S: clinicId } },
+                ProjectionExpression: "userSub",
+            }));
+            if (out.Item) allowed = true;
+        } catch (e) {
+            console.error("[authz] UserClinicAssignments lookup failed", {
+                userSub,
+                clinicId,
+                error: (e as Error).message,
+            });
+        }
+    }
+
+    console.log("[authz] hasClinicAccess", { userSub, clinicId, allowed });
+    accessCache.set(cacheKey, { allowed, cachedAt: Date.now() });
+    return allowed;
 }
 
 // Resolve a batch of professional sub → display name with bounded concurrency.
@@ -637,24 +662,41 @@ async function getConnections(userKey: string): Promise<string[]> {
 
 // ============== ROUTE HANDLERS ==============
 
-async function onConnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> { 
+async function onConnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
+    const connectionId = event.requestContext.connectionId;
+    console.log("[ws] $connect START", { connectionId });
+
     const claims = await validateToken(event);
     const userKey = userKeyFromClaims(claims);
 
     await putConnection(
         userKey,
-        event.requestContext.connectionId,
+        connectionId,
         claims.userType,
         claims.name || claims.email || "",
         claims.sub || "",
         claims.email || ""
     );
 
+    console.log("[ws] $connect OK", {
+        connectionId,
+        userKey,
+        userType: claims.userType,
+        sub: claims.sub,
+        clinicId: claims.clinicId,
+        isRoot: claims.isRoot === true,
+        email: claims.email,
+        elapsedMs: Date.now() - started,
+    });
+
     return { statusCode: 200, body: "Connected" };
 }
 
 async function onDisconnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
     const connectionId = event.requestContext.connectionId;
+    console.log("[ws] $disconnect START", { connectionId });
 
     const q = await ddb.send(
         new QueryCommand({
@@ -667,8 +709,11 @@ async function onDisconnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
     );
 
     if (!q.Items || q.Items.length === 0) {
+        console.log("[ws] $disconnect OK (no rows)", { connectionId, elapsedMs: Date.now() - started });
         return { statusCode: 200, body: "Disconnected" };
     }
+
+    const userKeys = q.Items.map((i) => i.userKey?.S).filter((v): v is string => !!v);
 
     // Delete all connection records associated with this connectionId
     await Promise.all(
@@ -681,6 +726,13 @@ async function onDisconnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
             )
         )
     );
+
+    console.log("[ws] $disconnect OK", {
+        connectionId,
+        userKeys,
+        deleted: q.Items.length,
+        elapsedMs: Date.now() - started,
+    });
 
     return { statusCode: 200, body: "Disconnected" };
 }
@@ -798,6 +850,7 @@ async function getClinicAvatarUrl(clinicId: string): Promise<string> {
 }
 
 async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
     const claims = await validateToken(event);
     const connClient = wsClientFromEvent(event);
     const connectionId = event.requestContext.connectionId;
@@ -812,10 +865,20 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
         bodyLimit = body.limit;
         bodyNextKey = body.nextKey || undefined;
     } catch {
-        // ignore parse errors
+        console.warn("[ws] getConversations body parse failed", { body: event.body });
     }
 
     const limit = Math.max(1, Math.min(MAX_CONVO_PAGE, Number(bodyLimit) || DEFAULT_CONVO_PAGE));
+
+    console.log("[ws] getConversations START", {
+        connectionId,
+        userType: claims.userType,
+        sub: claims.sub,
+        connectionClinicId: claims.clinicId,
+        bodyClinicId,
+        limit,
+        hasNextKey: !!bodyNextKey,
+    });
 
     // --- Authorization: clinic users filtering by clinicId must have an assignment to that clinic ---
     // A user may belong to several clinics (see the "All Clinics" view which fans
@@ -855,6 +918,7 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
         let items: Record<string, AttributeValue>[] = [];
         let lastEvaluatedKey: Record<string, AttributeValue> | undefined;
 
+        const queryStarted = Date.now();
         if (queryKey.startsWith("clinic#")) {
             const res = await ddb.send(
                 new QueryCommand({
@@ -884,6 +948,12 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
             items = res.Items || [];
             lastEvaluatedKey = res.LastEvaluatedKey;
         }
+        console.log("[ws] getConversations DDB Query done", {
+            queryKey,
+            items: items.length,
+            hasMore: !!lastEvaluatedKey,
+            queryMs: Date.now() - queryStarted,
+        });
 
         const iAmClinic = claims.userType === "Clinic";
 
@@ -951,8 +1021,15 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
             nextKey: lastEvaluatedKey || null,
             hasMore: !!lastEvaluatedKey,
         });
+        console.log("[ws] getConversations conversationsResponse sent", {
+            connectionId,
+            count: conversations.length,
+            hasMore: !!lastEvaluatedKey,
+            phase1Ms: Date.now() - started,
+        });
 
         // PHASE 2: Fetch avatars in background and send update
+        const avatarStarted = Date.now();
         try {
             const avatarMap: Record<string, string> = {};
             await Promise.all(
@@ -967,7 +1044,9 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                             url = await getClinicAvatarUrl(cid);
                         }
                         if (url) avatarMap[c.conversationId] = url;
-                    } catch { /* ignore */ }
+                    } catch (e) {
+                        console.warn("[ws] avatar lookup failed for", c.conversationId, (e as Error).message);
+                    }
                 })
             );
 
@@ -976,14 +1055,32 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                     type: "avatarsUpdate",
                     avatars: avatarMap,
                 });
+                console.log("[ws] getConversations avatarsUpdate sent", {
+                    connectionId,
+                    avatars: Object.keys(avatarMap).length,
+                    avatarMs: Date.now() - avatarStarted,
+                });
+            } else {
+                console.log("[ws] getConversations no avatars resolved", {
+                    connectionId,
+                    avatarMs: Date.now() - avatarStarted,
+                });
             }
-        } catch { /* avatar fetch is best-effort */ }
+        } catch (e) {
+            console.warn("[ws] avatar phase errored", (e as Error).message);
+        }
 
+        console.log("[ws] getConversations DONE", {
+            connectionId,
+            totalMs: Date.now() - started,
+        });
         return { statusCode: 200, body: "OK" };
     } catch (error) {
-        console.error("Error fetching conversations:", {
+        console.error("[ws] getConversations FAILED", {
+            connectionId,
             error: (error as Error).message,
             stack: (error as Error).stack,
+            elapsedMs: Date.now() - started,
         });
         await send(connClient, connectionId, {
             type: "error",
@@ -994,6 +1091,8 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
 }
 
 async function onGetHistory(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
+    const connectionId = event.requestContext.connectionId;
     const claims = await validateToken(event);
     const body = JSON.parse(event.body || "{}");
     const { clinicId, professionalSub, limit: bodyLimit, nextKey } = body as {
@@ -1006,7 +1105,19 @@ async function onGetHistory(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
     // Safety clamp the limit to the paginated default/max
     const limit = Math.max(1, Math.min(MAX_HISTORY_PAGE, Number(bodyLimit) || DEFAULT_HISTORY_PAGE));
 
+    console.log("[ws] getHistory START", {
+        connectionId,
+        userType: claims.userType,
+        sub: claims.sub,
+        connectionClinicId: claims.clinicId,
+        bodyClinicId: clinicId,
+        bodyProfessionalSub: professionalSub,
+        limit,
+        hasNextKey: !!nextKey,
+    });
+
     if (!clinicId || !professionalSub) {
+        console.warn("[ws] getHistory 400 missing params", { clinicId, professionalSub });
         return { statusCode: 400, body: "Missing clinicId/professionalSub" };
     }
 
@@ -1095,17 +1206,36 @@ async function onGetHistory(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
         nextKey: out.LastEvaluatedKey || null,
     });
 
+    console.log("[ws] getHistory DONE", {
+        connectionId,
+        conversationId: convoId,
+        items: (out.Items || []).length,
+        hasMore: !!out.LastEvaluatedKey,
+        totalMs: Date.now() - started,
+    });
     return { statusCode: 200, body: "OK" };
 }
 
 async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
+    const connectionId = event.requestContext.connectionId;
     try {
         const claims = await validateToken(event);
         const senderKey = userKeyFromClaims(claims);
         const body = JSON.parse(event.body || "{}");
         const { clinicId, professionalSub } = body;
 
+        console.log("[ws] markRead START", {
+            connectionId,
+            senderKey,
+            userType: claims.userType,
+            sub: claims.sub,
+            bodyClinicId: clinicId,
+            bodyProfessionalSub: professionalSub,
+        });
+
         if (!clinicId || !professionalSub) {
+            console.warn("[ws] markRead 400 missing params", { clinicId, professionalSub });
             const connClient = wsClientFromEvent(event);
             await send(connClient, event.requestContext.connectionId, {
                 type: "error",
@@ -1166,6 +1296,7 @@ async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGateway
 
         // Notify the OTHER party that their messages have been read
         const otherKey = isSenderClinic ? `prof#${professionalSub}` : `clinic#${clinicId}`;
+        let receiptsSent = 0;
         try {
             const otherConns = await getConnections(otherKey);
             await Promise.all(
@@ -1176,16 +1307,31 @@ async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGateway
                             conversationId,
                             readBy: senderKey,
                         });
-                    } catch {}
+                        receiptsSent++;
+                    } catch (err) {
+                        console.warn("[ws] markRead readReceipt send failed", { cid, error: (err as Error).message });
+                    }
                 })
             );
-        } catch {}
+        } catch (err) {
+            console.warn("[ws] markRead fan-out lookup failed", { otherKey, error: (err as Error).message });
+        }
 
+        console.log("[ws] markRead DONE", {
+            connectionId,
+            conversationId,
+            senderKey,
+            otherKey,
+            readReceiptsDelivered: receiptsSent,
+            totalMs: Date.now() - started,
+        });
         return { statusCode: 200, body: "Messages marked as read" };
     } catch (error) {
-        console.error("Error marking messages as read:", {
+        console.error("[ws] markRead FAILED", {
+            connectionId,
             error: (error as Error).message,
             stack: (error as Error).stack,
+            elapsedMs: Date.now() - started,
         });
         const connClient = wsClientFromEvent(event);
         await send(connClient, event.requestContext.connectionId, {
@@ -1197,13 +1343,31 @@ async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGateway
 }
 
 async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
+    const connectionId = event.requestContext.connectionId;
     try {
         const claims = await validateToken(event);
         const senderKey = userKeyFromClaims(claims);
         const body = JSON.parse(event.body || "{}");
         const { clinicId, professionalSub, content, messageType = "text" } = body;
 
+        console.log("[ws] sendMessage START", {
+            connectionId,
+            senderKey,
+            userType: claims.userType,
+            sub: claims.sub,
+            bodyClinicId: clinicId,
+            bodyProfessionalSub: professionalSub,
+            messageType,
+            contentLen: typeof content === "string" ? content.length : 0,
+        });
+
         if (!clinicId || !professionalSub || !content || content.length > MAX_LEN) {
+            console.warn("[ws] sendMessage 400 invalid payload", {
+                hasClinicId: !!clinicId,
+                hasProfSub: !!professionalSub,
+                contentLen: typeof content === "string" ? content.length : 0,
+            });
             const connClient = wsClientFromEvent(event);
             await send(connClient, event.requestContext.connectionId, {
                 type: "error",
@@ -1367,9 +1531,25 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
             status: delivered ? "delivered" : "sent",
         });
 
+        console.log("[ws] sendMessage DONE", {
+            connectionId,
+            conversationId,
+            messageId,
+            senderKey,
+            recipientKey,
+            recipientConns: recipientConnections.length,
+            senderOtherConns: otherSenderConns.length,
+            delivered,
+            totalMs: Date.now() - started,
+        });
         return { statusCode: 200, body: "Message sent" };
     } catch (error) {
-        console.error("Error sending message:", { error: (error as Error).message, stack: (error as Error).stack });
+        console.error("[ws] sendMessage FAILED", {
+            connectionId,
+            error: (error as Error).message,
+            stack: (error as Error).stack,
+            elapsedMs: Date.now() - started,
+        });
         const connClient = wsClientFromEvent(event);
         await send(connClient, event.requestContext.connectionId, {
             type: "error",
@@ -1380,6 +1560,10 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
 }
 
 async function onDefault(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    console.warn("[ws] onDefault (unknown action)", {
+        connectionId: event.requestContext.connectionId,
+        body: event.body,
+    });
     const connClient = wsClientFromEvent(event);
     await send(connClient, event.requestContext.connectionId, {
         type: "error",
@@ -1390,23 +1574,31 @@ async function onDefault(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayP
 }
 
 // ============== MAIN HANDLER ==============
-export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => { 
+export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
     // Assert the event shape to include connectionId, as it must be present for WebSocket invocations
     const wsEvent = event as WebSocketAPIGatewayEventV2;
+    const handlerStarted = Date.now();
 
     try {
         const route = wsEvent.requestContext.routeKey;
         let action = route;
-        
+
         // Handle custom routes sent through the $default route by checking the body 'action' field
         if (route === "$default" && wsEvent.body) {
             try {
-                const body = JSON.parse(wsEvent.body) as { action?: string }; 
+                const body = JSON.parse(wsEvent.body) as { action?: string };
                 action = body.action || route;
             } catch (e) {
-                console.warn("Could not parse body for action:", (e as Error).message);
+                console.warn("[ws] handler body parse failed:", (e as Error).message);
             }
         }
+
+        console.log("[ws] handler INVOKE", {
+            connectionId: wsEvent.requestContext.connectionId,
+            route,
+            action,
+            bodyLen: wsEvent.body?.length || 0,
+        });
 
         if (action === "$connect") return await onConnect(wsEvent);
         if (action === "$disconnect") return await onDisconnect(wsEvent);
@@ -1418,7 +1610,12 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
         return await onDefault(wsEvent);
     } catch (err) {
-        console.error("WebSocket handler error:", { error: (err as Error).message, stack: (err as Error).stack });
+        console.error("[ws] handler UNCAUGHT", {
+            connectionId: wsEvent.requestContext.connectionId,
+            error: (err as Error).message,
+            stack: (err as Error).stack,
+            elapsedMs: Date.now() - handlerStarted,
+        });
         try {
             const connClient = wsClientFromEvent(wsEvent);
             await send(connClient, wsEvent.requestContext.connectionId, {
@@ -1426,7 +1623,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
                 error: (err as Error)?.message || "Internal error",
             });
         } catch (sendErr) {
-            console.error("Failed to send error response:", { error: (sendErr as Error).message });
+            console.error("[ws] handler error-frame send failed", { error: (sendErr as Error).message });
         }
         return { statusCode: 500, body: "Error" };
     }
