@@ -24,17 +24,17 @@ interface JobPosting {
   status: string;
   createdAt: string;
   updatedAt: string;
-  
+
   // Common fields
   jobTitle?: string;
   jobDescription?: string;
-  
+
   // Rate/Salary fields
   rate?: number | null;
   payType?: string;
   salaryMin?: number;
   salaryMax?: number;
-  
+
   // Date/Time fields
   date?: string;
   dates?: string[];
@@ -42,13 +42,18 @@ interface JobPosting {
   hours?: number;
   startTime?: string;
   endTime?: string;
-  
+
   // Location details
   city?: string;
   state?: string;
   addressLine1?: string;
   addressLine2?: string;
   addressLine3?: string;
+
+  // Promotion fields
+  isPromoted?: boolean;
+  promotionPlanId?: string;
+  promotionExpiresAt?: string;
 
   // Enriched Data
   clinic?: ClinicInfo;
@@ -156,6 +161,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           if (item.addressLine2?.S) job.addressLine2 = item.addressLine2.S;
           if (item.addressLine3?.S) job.addressLine3 = item.addressLine3.S;
 
+          // Promotion fields (denormalized on job for fast access)
+          if (item.isPromoted?.BOOL) {
+            // Check if promotion has expired
+            const expiresAt = item.promotionExpiresAt?.S;
+            if (expiresAt && new Date(expiresAt) > new Date()) {
+              job.isPromoted = true;
+              job.promotionPlanId = item.promotionPlanId?.S;
+              job.promotionExpiresAt = expiresAt;
+            } else {
+              job.isPromoted = false;
+            }
+          }
+
           // Enrich with clinic info (name, contact) if available
           const clinicUserSub = item.clinicUserSub?.S;
           if (clinicUserSub) {
@@ -172,11 +190,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       ExclusiveStartKey = scanResponse.LastEvaluatedKey;
     } while (ExclusiveStartKey);
 
-    // Sort by createdAt descending (newest first). Fallback to 0.
+    // LinkedIn-style sorting: promoted jobs first (by tier weight), then by recency
+    const promoWeight: Record<string, number> = { premium: 3, featured: 2, basic: 1 };
     jobPostings.sort((a, b) => {
+      const wa = a.isPromoted ? (promoWeight[a.promotionPlanId || ""] || 1) : 0;
+      const wb = b.isPromoted ? (promoWeight[b.promotionPlanId || ""] || 1) : 0;
+      if (wa !== wb) return wb - wa; // Higher tier promoted jobs first
       const ta = new Date(a.createdAt).getTime() || 0;
       const tb = new Date(b.createdAt).getTime() || 0;
-      return tb - ta;
+      return tb - ta; // Then newest first
     });
 
     return {

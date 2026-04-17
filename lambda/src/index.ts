@@ -133,6 +133,14 @@ import { handler as publicProfessionalsHandler } from "./handlers/publicProfessi
 import { handler as publicClinicsHandler } from "./handlers/findJobs";
 import { handler as getProfessionalFilteredJobsHandler } from "./handlers/getProfessionalFilteredJobs";
 
+// Job Promotions
+import { handler as getPromotionPlansHandler } from "./handlers/getPromotionPlans";
+import { handler as createPromotionHandler } from "./handlers/createPromotion";
+import { handler as getPromotionsHandler } from "./handlers/getPromotions";
+import { handler as getPromotionHandler } from "./handlers/getPromotion";
+import { handler as cancelPromotionHandler } from "./handlers/cancelPromotion";
+import { handler as activatePromotionHandler } from "./handlers/activatePromotion";
+
 // --- TYPE DEFINITIONS ---
 
 // FIX: Use 'any' for RouteHandler to prevent TypeScript errors when mixing
@@ -335,6 +343,14 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/public/publicprofessionals": publicProfessionalsHandler,
         "GET:/public/publicJobs": publicClinicsHandler,
         "GET:/clinics/{clinicId}/address": getClinicAddressHandler,
+
+        // Job Promotions
+        "GET:/promotions/plans": getPromotionPlansHandler,
+        "POST:/promotions": createPromotionHandler,
+        "GET:/promotions": getPromotionsHandler,
+        "GET:/promotions/{promotionId}": getPromotionHandler,
+        "PUT:/promotions/{promotionId}/cancel": cancelPromotionHandler,
+        "PUT:/promotions/{promotionId}/activate": activatePromotionHandler,
 
     };
 
