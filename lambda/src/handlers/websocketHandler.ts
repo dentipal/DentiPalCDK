@@ -256,7 +256,10 @@ const ACCESS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const accessCache = new Map<string, { allowed: boolean; cachedAt: number }>();
 
 async function hasClinicAccess(userSub: string, clinicId: string): Promise<boolean> {
-    if (!userSub || !clinicId) return false;
+    if (!userSub || !clinicId) {
+        console.warn("[authz] hasClinicAccess called with empty sub/clinic", { userSub, clinicId });
+        return false;
+    }
     const cacheKey = `${userSub}|${clinicId}`;
     const cached = accessCache.get(cacheKey);
     if (cached && (Date.now() - cached.cachedAt) < ACCESS_CACHE_TTL_MS) {
@@ -269,10 +272,21 @@ async function hasClinicAccess(userSub: string, clinicId: string): Promise<boole
             ProjectionExpression: "userSub",
         }));
         const allowed = !!out.Item;
+        console.log("[authz] hasClinicAccess", {
+            userSub,
+            clinicId,
+            table: USER_CLINIC_ASSIGNMENTS_TABLE,
+            allowed,
+        });
         accessCache.set(cacheKey, { allowed, cachedAt: Date.now() });
         return allowed;
     } catch (e) {
-        console.error("hasClinicAccess lookup failed", { userSub, clinicId, error: (e as Error).message });
+        console.error("[authz] hasClinicAccess lookup failed", {
+            userSub,
+            clinicId,
+            table: USER_CLINIC_ASSIGNMENTS_TABLE,
+            error: (e as Error).message,
+        });
         return false; // fail closed
     }
 }
@@ -813,6 +827,14 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
             claims.clinicId === bodyClinicId || // fast path: the clinic they connected as
             (!!claims.sub && await hasClinicAccess(claims.sub, bodyClinicId));
         if (!allowed) {
+            console.warn("[authz] onGetConversations REJECTED", {
+                reason: "no UserClinicAssignments row + not connection clinic + not root",
+                userType: claims.userType,
+                sub: claims.sub,
+                connectionClinicId: claims.clinicId,
+                bodyClinicId,
+                isRoot: claims.isRoot,
+            });
             await send(connClient, connectionId, {
                 type: "error",
                 error: "Not authorized to view this clinic's conversations",
@@ -1002,6 +1024,14 @@ async function onGetHistory(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
     const isAuthorized = claims.isRoot === true || clinicOk || profOk;
 
     if (!isAuthorized) {
+        console.warn("[authz] onGetHistory REJECTED", {
+            userType: claims.userType,
+            sub: claims.sub,
+            connectionClinicId: claims.clinicId,
+            bodyClinicId: clinicId,
+            bodyProfessionalSub: professionalSub,
+            isRoot: claims.isRoot,
+        });
         const connClient = wsClientFromEvent(event);
         await send(connClient, event.requestContext.connectionId, {
             type: "error",
@@ -1096,6 +1126,14 @@ async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGateway
         const isUserAuthorized = claims.isRoot === true || clinicOk || profOk;
 
         if (!isUserAuthorized) {
+            console.warn("[authz] onMarkRead REJECTED", {
+                userType: claims.userType,
+                sub: claims.sub,
+                connectionClinicId: claims.clinicId,
+                bodyClinicId: clinicId,
+                bodyProfessionalSub: professionalSub,
+                isRoot: claims.isRoot,
+            });
             const connClient = wsClientFromEvent(event);
             await send(connClient, event.requestContext.connectionId, {
                 type: "error",
@@ -1184,6 +1222,14 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
         const isUserAuthorized = clinicOk || profOk;
 
         if (!isUserAuthorized) {
+            console.warn("[authz] onSendMessage REJECTED", {
+                userType: claims.userType,
+                sub: claims.sub,
+                connectionClinicId: claims.clinicId,
+                bodyClinicId: clinicId,
+                bodyProfessionalSub: professionalSub,
+                isRoot: claims.isRoot,
+            });
             const connClient = wsClientFromEvent(event);
             await send(connClient, event.requestContext.connectionId, {
                 type: "error",
