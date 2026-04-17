@@ -49,6 +49,7 @@ const CONVOS_TABLE = process.env.CONVOS_TABLE!;
 const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
 const USER_POOL_ID = process.env.USER_POOL_ID!;
 const CLIENT_ID = process.env.CLIENT_ID || "";
+const USER_CLINIC_ASSIGNMENTS_TABLE = process.env.USER_CLINIC_ASSIGNMENTS_TABLE || "DentiPal-V5-UserClinicAssignments";
 const PROFESSIONAL_PROFILES_TABLE = process.env.PROFESSIONAL_PROFILES_TABLE || "DentiPal-V5-ProfessionalProfiles";
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-Clinic-Profiles";
 const PROFILE_IMAGES_BUCKET = process.env.PROFILE_IMAGES_BUCKET || "";
@@ -242,6 +243,37 @@ async function getCognitoNameBySub(sub: string): Promise<string> {
         const fallback = `User ${String(sub).slice(0, 6)}`;
         setNameInCache(cacheKey, fallback);
         return fallback;
+    }
+}
+
+// ── Multi-clinic access check ──
+// A single Cognito user can belong to multiple clinics (tracked in the
+// UserClinicAssignments table). The `claims.clinicId` on the connection is
+// only the clinic they opened the socket with — for "All Clinics" views the
+// client fans out one getConversations per assigned clinic, and every one of
+// those requests needs to be authorized against the assignments table.
+const ACCESS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const accessCache = new Map<string, { allowed: boolean; cachedAt: number }>();
+
+async function hasClinicAccess(userSub: string, clinicId: string): Promise<boolean> {
+    if (!userSub || !clinicId) return false;
+    const cacheKey = `${userSub}|${clinicId}`;
+    const cached = accessCache.get(cacheKey);
+    if (cached && (Date.now() - cached.cachedAt) < ACCESS_CACHE_TTL_MS) {
+        return cached.allowed;
+    }
+    try {
+        const out = await ddb.send(new GetItemCommand({
+            TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
+            Key: { userSub: { S: userSub }, clinicId: { S: clinicId } },
+            ProjectionExpression: "userSub",
+        }));
+        const allowed = !!out.Item;
+        accessCache.set(cacheKey, { allowed, cachedAt: Date.now() });
+        return allowed;
+    } catch (e) {
+        console.error("hasClinicAccess lookup failed", { userSub, clinicId, error: (e as Error).message });
+        return false; // fail closed
     }
 }
 
@@ -771,11 +803,16 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
 
     const limit = Math.max(1, Math.min(MAX_CONVO_PAGE, Number(bodyLimit) || DEFAULT_CONVO_PAGE));
 
-    // --- Authorization: clinic users filtering by clinicId must own that clinic ---
-    // Previously any authenticated user could pass any clinicId and leak that clinic's inbox.
+    // --- Authorization: clinic users filtering by clinicId must have an assignment to that clinic ---
+    // A user may belong to several clinics (see the "All Clinics" view which fans
+    // out one getConversations per clinic), so we verify access against the
+    // UserClinicAssignments table rather than only against claims.clinicId.
     if (claims.userType === "Clinic" && bodyClinicId && bodyClinicId !== "all") {
-        // Root can see any clinic; otherwise the body clinicId must match the connection's clinicId
-        if (!claims.isRoot && claims.clinicId !== bodyClinicId) {
+        const allowed =
+            claims.isRoot === true ||
+            claims.clinicId === bodyClinicId || // fast path: the clinic they connected as
+            (!!claims.sub && await hasClinicAccess(claims.sub, bodyClinicId));
+        if (!allowed) {
             await send(connClient, connectionId, {
                 type: "error",
                 error: "Not authorized to view this clinic's conversations",
@@ -952,12 +989,17 @@ async function onGetHistory(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
     }
 
     // --- Authorization: caller must be one of the two parties in this conversation ---
-    // Previously onGetHistory had NO auth check, so any authenticated user could fetch
-    // any clinic↔professional conversation by guessing IDs.
-    const isAuthorized =
-        claims.isRoot === true ||
-        (claims.userType === "Clinic" && claims.clinicId === clinicId) ||
-        (claims.userType === "Professional" && claims.sub === professionalSub);
+    // Previously onGetHistory had NO auth check. Clinic users can belong to many
+    // clinics, so we verify via UserClinicAssignments when the body clinicId
+    // doesn't match the connection clinicId.
+    const clinicOk =
+        claims.userType === "Clinic" &&
+        !!claims.sub &&
+        (claims.isRoot === true ||
+            claims.clinicId === clinicId ||
+            await hasClinicAccess(claims.sub, clinicId));
+    const profOk = claims.userType === "Professional" && !!claims.sub && claims.sub === professionalSub;
+    const isAuthorized = claims.isRoot === true || clinicOk || profOk;
 
     if (!isAuthorized) {
         const connClient = wsClientFromEvent(event);
@@ -1042,14 +1084,16 @@ async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGateway
             return { statusCode: 400, body: "Missing clinicId or professionalSub" };
         }
 
-        // Authorization check: caller must be one of the two parties in the conversation.
-        // Root bypasses for admin tooling; otherwise:
-        // - Clinic users must own the clinicId they're marking
-        // - Professionals must be the professionalSub they're marking
-        const isUserAuthorized =
-            claims.isRoot === true ||
-            (claims.userType === "Clinic" && !!claims.clinicId && claims.clinicId === clinicId) ||
-            (claims.userType === "Professional" && !!claims.sub && claims.sub === professionalSub);
+        // Authorization check: caller must be one of the two parties.
+        // For clinic users, the clinicId is checked against UserClinicAssignments
+        // so multi-clinic users can markRead on any of their assigned clinics.
+        const clinicOk =
+            claims.userType === "Clinic" && !!claims.sub &&
+            (claims.isRoot === true ||
+                claims.clinicId === clinicId ||
+                await hasClinicAccess(claims.sub, clinicId));
+        const profOk = claims.userType === "Professional" && !!claims.sub && claims.sub === professionalSub;
+        const isUserAuthorized = claims.isRoot === true || clinicOk || profOk;
 
         if (!isUserAuthorized) {
             const connClient = wsClientFromEvent(event);
@@ -1131,10 +1175,13 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
         }
 
         // Authorization check: caller must be one of the two parties in the conversation.
-        // (Root cannot send on behalf of someone else — that requires an explicit senderKey contract.)
-        const isUserAuthorized =
-            (claims.userType === "Clinic" && !!claims.clinicId && claims.clinicId === clinicId) ||
-            (claims.userType === "Professional" && !!claims.sub && claims.sub === professionalSub);
+        // Multi-clinic users are allowed if they have an assignment to the clinic.
+        // (Root cannot send on behalf of someone else — that would need an explicit senderKey contract.)
+        const clinicOk =
+            claims.userType === "Clinic" && !!claims.sub &&
+            (claims.clinicId === clinicId || await hasClinicAccess(claims.sub, clinicId));
+        const profOk = claims.userType === "Professional" && !!claims.sub && claims.sub === professionalSub;
+        const isUserAuthorized = clinicOk || profOk;
 
         if (!isUserAuthorized) {
             const connClient = wsClientFromEvent(event);
