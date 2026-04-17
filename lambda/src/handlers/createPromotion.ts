@@ -62,17 +62,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const promotionId = uuidv4();
     const now = new Date().toISOString();
 
+    // GSI "status-expiresAt-index" requires expiresAt to be a String (never null).
+    // Use a placeholder value for pending promotions; activatePromotion overwrites it.
     const promotionItem = {
       jobId,
       promotionId,
       clinicUserSub: user.sub,
       clinicId: job.clinicId || "",
       planId,
-      status: "pending_payment", // Will be activated after payment
+      status: "pending_payment",
       createdAt: now,
       updatedAt: now,
-      activatedAt: null,
-      expiresAt: null,
+      activatedAt: "PENDING",
+      expiresAt: "PENDING",
       impressions: 0,
       clicks: 0,
       applications: 0,
