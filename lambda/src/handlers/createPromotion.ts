@@ -62,7 +62,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const promotionId = uuidv4();
     const now = new Date().toISOString();
 
-    const promotionItem = {
+    // NOTE: Do NOT include activatedAt/expiresAt as null — DynamoDB GSIs
+    // require String-typed sort keys. Null values cause "Type mismatch" errors.
+    // These fields will be added when the promotion is activated.
+    const promotionItem: Record<string, any> = {
       jobId,
       promotionId,
       clinicUserSub: user.sub,
@@ -71,8 +74,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       status: "pending_payment", // Will be activated after payment
       createdAt: now,
       updatedAt: now,
-      activatedAt: null,
-      expiresAt: null,
       impressions: 0,
       clicks: 0,
       applications: 0,
