@@ -1,6 +1,7 @@
 import {
     DynamoDBClient,
     GetItemCommand,
+    QueryCommand,
     UpdateItemCommand,
     UpdateItemCommandInput,
 } from "@aws-sdk/client-dynamodb";
@@ -14,7 +15,8 @@ import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Initialization ---
 const REGION: string = process.env.AWS_REGION || process.env.REGION || "us-east-1";
-const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || process.env.JOB_POSTINGS_TABLE!;
+const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE!;
+const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE!;
 
 const dynamo = new DynamoDBClient({ region: REGION });
 const eb = new EventBridgeClient({ region: REGION });
@@ -164,11 +166,50 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         let inboxMessageSent = false;
 
+        // Fetch the actual job posting for shift details
+        let jobItem: Record<string, any> | null = null;
         if (clinicId) {
+            try {
+                const jobRes = await dynamo.send(new QueryCommand({
+                    TableName: JOB_POSTINGS_TABLE,
+                    IndexName: "jobId-index-1",
+                    KeyConditionExpression: "jobId = :jid",
+                    ExpressionAttributeValues: { ":jid": { S: jobId } },
+                    Limit: 1,
+                }));
+                jobItem = (jobRes.Items || [])[0] || null;
+            } catch (e) {
+                console.warn("Failed to fetch job posting for shift details:", (e as Error).message);
+            }
+        }
+
+        if (clinicId) {
+            const shiftDate = jobItem?.date?.S || jobItem?.start_date?.S || matchingItem.date?.S || "TBD";
+            const shiftRole = jobItem?.professional_role?.S || matchingItem.role?.S || matchingItem.professionalRole?.S || "Professional";
+            const shiftRate = matchingItem.proposedRate?.N ? Number(matchingItem.proposedRate.N)
+                : (jobItem?.rate?.N ? Number(jobItem.rate.N) : 0);
+            const shiftStartTime = jobItem?.start_time?.S || "";
+            const shiftEndTime = jobItem?.end_time?.S || "";
+            const shiftLocation = jobItem?.city?.S || jobItem?.fullAddress?.S || "";
+            const jobType = jobItem?.job_type?.S || "";
+
+            // Format date nicely
+            let formattedDate = shiftDate;
+            try {
+                const d = new Date(shiftDate);
+                if (!isNaN(d.getTime())) {
+                    formattedDate = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+                }
+            } catch {}
+
             const shiftDetails = {
-                date: matchingItem.date?.S || "TBD",
-                role: matchingItem.role?.S || matchingItem.professionalRole?.S || "Professional",
-                rate: matchingItem.proposedRate?.N ? Number(matchingItem.proposedRate.N) : 0
+                date: formattedDate,
+                role: shiftRole.split("_").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+                rate: shiftRate,
+                startTime: shiftStartTime,
+                endTime: shiftEndTime,
+                location: shiftLocation,
+                jobType,
             };
 
             await eb.send(new PutEventsCommand({

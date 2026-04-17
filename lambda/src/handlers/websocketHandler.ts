@@ -5,7 +5,6 @@ import {
     QueryCommand,
     DeleteItemCommand,
     GetItemCommand,
-    ScanCommand,
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 
@@ -20,14 +19,16 @@ import {
     AttributeType, 
 } from "@aws-sdk/client-cognito-identity-provider";
 
-import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, GetObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-import { 
-    APIGatewayProxyEventV2, 
-    APIGatewayProxyResultV2, 
+import { CognitoJwtVerifier } from "aws-jwt-verify";
+
+import {
+    APIGatewayProxyEventV2,
+    APIGatewayProxyResultV2,
     APIGatewayEventRequestContextV2
-} from "aws-lambda"; 
+} from "aws-lambda";
 
 // Define a type assertion interface for the requestContext when used in a WebSocket API.
 interface WebSocketRequestContext extends APIGatewayEventRequestContextV2 {
@@ -47,17 +48,64 @@ const CONNS_TABLE = process.env.CONNS_TABLE!;
 const CONVOS_TABLE = process.env.CONVOS_TABLE!;
 const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
 const USER_POOL_ID = process.env.USER_POOL_ID!;
+const CLIENT_ID = process.env.CLIENT_ID || "";
+const USER_CLINIC_ASSIGNMENTS_TABLE = process.env.USER_CLINIC_ASSIGNMENTS_TABLE || "DentiPal-V5-UserClinicAssignments";
 const PROFESSIONAL_PROFILES_TABLE = process.env.PROFESSIONAL_PROFILES_TABLE || "DentiPal-V5-ProfessionalProfiles";
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-Clinic-Profiles";
 const PROFILE_IMAGES_BUCKET = process.env.PROFILE_IMAGES_BUCKET || "";
+const CLINIC_OFFICE_IMAGES_BUCKET = process.env.CLINIC_OFFICE_IMAGES_BUCKET || "";
 
 const ddb = new DynamoDBClient({ region: REGION });
 const cognitoIdp = new CognitoIdentityProviderClient({ region: REGION });
 const s3 = new S3Client({ region: REGION });
 const MAX_LEN = 1000;
 
-// simple in-memory name cache (warm Lambda only)
-const nameCache = new Map<string, string>(); // keys: "prof#<sub>" or "clinic#<id>" -> display
+// Pagination defaults (applied everywhere — no more unbounded reads)
+const DEFAULT_CONVO_PAGE = 50;
+const MAX_CONVO_PAGE = 100;
+const DEFAULT_HISTORY_PAGE = 50;
+const MAX_HISTORY_PAGE = 200;
+
+// Cognito lookup concurrency when hydrating conversation rows
+const COGNITO_CONCURRENCY = 10;
+
+// Cognito JWT verifier (signature + exp + iss + token_use). Shared, reused across invocations.
+// Note: clientId=null accepts any app client in this user pool. If you later want to pin
+// to a single app client, pass CLIENT_ID instead.
+const accessVerifier = CognitoJwtVerifier.create({
+    userPoolId: USER_POOL_ID,
+    tokenUse: "access",
+    clientId: CLIENT_ID || null,
+});
+
+// Bounded LRU-ish name cache (warm Lambda only).
+// Entries expire after NAME_CACHE_TTL_MS and we trim to MAX_NAME_CACHE_ENTRIES.
+const NAME_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_NAME_CACHE_ENTRIES = 500;
+const nameCache = new Map<string, { value: string; cachedAt: number }>();
+
+function getNameFromCache(key: string): string | undefined {
+    const hit = nameCache.get(key);
+    if (!hit) return undefined;
+    if (Date.now() - hit.cachedAt > NAME_CACHE_TTL_MS) {
+        nameCache.delete(key);
+        return undefined;
+    }
+    // LRU bump
+    nameCache.delete(key);
+    nameCache.set(key, hit);
+    return hit.value;
+}
+
+function setNameInCache(key: string, value: string): void {
+    if (nameCache.has(key)) nameCache.delete(key);
+    nameCache.set(key, { value, cachedAt: Date.now() });
+    while (nameCache.size > MAX_NAME_CACHE_ENTRIES) {
+        const firstKey = nameCache.keys().next().value as string | undefined;
+        if (!firstKey) break;
+        nameCache.delete(firstKey);
+    }
+}
 
 interface UserClaims {
     userType: "Clinic" | "Professional";
@@ -117,6 +165,7 @@ async function send(client: ApiGatewayManagementApiClient, connectionId: string,
                         IndexName: "connectionId-index",
                         KeyConditionExpression: "connectionId = :cid",
                         ExpressionAttributeValues: { ":cid": { S: connectionId } },
+                        Limit: 5,
                     })
                 );
                 await Promise.all(
@@ -162,10 +211,11 @@ function displayFromTokenPayload(payload: any): string {
     return gn || nm || (em && em.split("@")[0]) || "";
 }
 
-// Get human name for a professional from Cognito (cached)
+// Get human name for a professional from Cognito (cached with TTL + LRU)
 async function getCognitoNameBySub(sub: string): Promise<string> {
     const cacheKey = `prof#${sub}`;
-    if (nameCache.has(cacheKey)) return nameCache.get(cacheKey)!;
+    const cached = getNameFromCache(cacheKey);
+    if (cached !== undefined) return cached;
 
     try {
         const out = await cognitoIdp.send(
@@ -186,20 +236,105 @@ async function getCognitoNameBySub(sub: string): Promise<string> {
             sanitizeDisplayName(email && email.split("@")[0]) ||
             `User ${String(sub).slice(0, 6)}`;
 
-        nameCache.set(cacheKey, display);
+        setNameInCache(cacheKey, display);
         return display;
     } catch (e) {
         console.error("getCognitoNameBySub failed", { sub, error: (e as Error).message });
         const fallback = `User ${String(sub).slice(0, 6)}`;
-        nameCache.set(cacheKey, fallback);
+        setNameInCache(cacheKey, fallback);
         return fallback;
     }
+}
+
+// ── Multi-clinic access check ──
+// A single Cognito user can belong to multiple clinics (tracked in the
+// UserClinicAssignments table). The `claims.clinicId` on the connection is
+// only the clinic they opened the socket with — for "All Clinics" views the
+// client fans out one getConversations per assigned clinic, and every one of
+// those requests needs to be authorized against the assignments table.
+const ACCESS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const accessCache = new Map<string, { allowed: boolean; cachedAt: number }>();
+
+async function hasClinicAccess(userSub: string, clinicId: string): Promise<boolean> {
+    if (!userSub || !clinicId) {
+        console.warn("[authz] hasClinicAccess called with empty sub/clinic", { userSub, clinicId });
+        return false;
+    }
+    const cacheKey = `${userSub}|${clinicId}`;
+    const cached = accessCache.get(cacheKey);
+    if (cached && (Date.now() - cached.cachedAt) < ACCESS_CACHE_TTL_MS) {
+        return cached.allowed;
+    }
+
+    // Two sources of truth exist for clinic membership in this codebase:
+    //  1. DentiPal-V5-Clinics.AssociatedUsers  (set[userSub])  — used by getAllClinics
+    //  2. DentiPal-V5-UserClinicAssignments    (userSub, clinicId) — used by utils.hasClinicAccess
+    // They can disagree (legacy: #1 existed first, #2 was added later and isn't
+    // always backfilled). Treat EITHER as proof of membership so the inbox
+    // respects the clinic list the user actually sees in the UI.
+    let allowed = false;
+    try {
+        const clinicRow = await ddb.send(new GetItemCommand({
+            TableName: CLINICS_TABLE,
+            Key: { clinicId: { S: clinicId } },
+            ProjectionExpression: "AssociatedUsers, createdBy",
+        }));
+        const associated = clinicRow.Item?.AssociatedUsers;
+        const createdBy = clinicRow.Item?.createdBy?.S;
+        // AssociatedUsers can be stored as StringSet (SS) or List-of-strings (L)
+        if (associated?.SS?.includes(userSub)) allowed = true;
+        else if (associated?.L?.some((x) => x.S === userSub)) allowed = true;
+        else if (createdBy === userSub) allowed = true; // Root/creator case
+    } catch (e) {
+        console.warn("[authz] Clinics.AssociatedUsers lookup failed", {
+            userSub,
+            clinicId,
+            error: (e as Error).message,
+        });
+    }
+
+    if (!allowed) {
+        // Fall back to the assignments table for completeness
+        try {
+            const out = await ddb.send(new GetItemCommand({
+                TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
+                Key: { userSub: { S: userSub }, clinicId: { S: clinicId } },
+                ProjectionExpression: "userSub",
+            }));
+            if (out.Item) allowed = true;
+        } catch (e) {
+            console.error("[authz] UserClinicAssignments lookup failed", {
+                userSub,
+                clinicId,
+                error: (e as Error).message,
+            });
+        }
+    }
+
+    console.log("[authz] hasClinicAccess", { userSub, clinicId, allowed });
+    accessCache.set(cacheKey, { allowed, cachedAt: Date.now() });
+    return allowed;
+}
+
+// Resolve a batch of professional sub → display name with bounded concurrency.
+// Replaces the sequential await-per-row pattern in onGetConversations.
+async function getCognitoNamesBySubs(subs: string[]): Promise<Record<string, string>> {
+    const unique = Array.from(new Set(subs.filter(Boolean)));
+    const out: Record<string, string> = {};
+
+    for (let i = 0; i < unique.length; i += COGNITO_CONCURRENCY) {
+        const chunk = unique.slice(i, i + COGNITO_CONCURRENCY);
+        const results = await Promise.all(chunk.map((s) => getCognitoNameBySub(s)));
+        chunk.forEach((sub, idx) => { out[sub] = results[idx]; });
+    }
+    return out;
 }
 
 // Try to grab a human display for a clinic — Clinics table first, then active connections
 async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
     if (!clinicKey) return "";
-    if (nameCache.has(clinicKey)) return nameCache.get(clinicKey)!;
+    const cached = getNameFromCache(clinicKey);
+    if (cached !== undefined) return cached;
 
     const clinicId = clinicKey.replace(/^clinic#/, "");
 
@@ -216,7 +351,7 @@ async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
             result.Item?.name?.S ||
             result.Item?.businessName?.S;
         if (name?.trim()) {
-            nameCache.set(clinicKey, name.trim());
+            setNameInCache(clinicKey, name.trim());
             return name.trim();
         }
     } catch (e) {
@@ -230,6 +365,7 @@ async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
                 TableName: CONNS_TABLE,
                 KeyConditionExpression: "userKey = :uk",
                 ExpressionAttributeValues: { ":uk": { S: clinicKey } },
+                Limit: 5,
             })
         );
         const items = q.Items || [];
@@ -242,7 +378,7 @@ async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
             const display =
                 (best.display && sanitizeDisplayName(best.display.S)) || "";
             if (display) {
-                nameCache.set(clinicKey, display);
+                setNameInCache(clinicKey, display);
                 return display;
             }
         }
@@ -252,32 +388,27 @@ async function getClinicDisplayByKey(clinicKey: string): Promise<string> {
 
     // 3. Last resort fallback
     const fallback = `Clinic ${clinicId.slice(0, 6)}`;
-    nameCache.set(clinicKey, fallback);
+    setNameInCache(clinicKey, fallback);
     return fallback;
 }
 
-// ============== ACCESS TOKEN DECODING UTILITIES (Adapted) ==============
+// ============== ACCESS TOKEN VERIFICATION ==============
 
 /**
- * Extracts and decodes the JWT payload from the token string.
- * @param token - The raw JWT (Access Token).
- * @returns Decoded JWT claims object.
- * @throws Error if token format is invalid or decoding fails.
+ * Verifies the Cognito access-token signature, expiration, issuer, and token_use.
+ * Replaces the previous base64-only decode that accepted any forged/expired JWT.
+ * @throws Error if verification fails for any reason.
  */
-function extractAndDecodeAccessTokenPayload(token: string): Record<string, any> {
-    const tokenParts = token.split(".");
-    if (tokenParts.length !== 3) {
-        throw new Error("Invalid access token format (expected 3 parts)");
+async function verifyAccessToken(token: string): Promise<Record<string, any>> {
+    if (!token || token.split(".").length !== 3) {
+        throw new Error("Invalid access token format (expected 3 JWT parts)");
     }
-
     try {
-        // Decode the payload (second part of JWT)
-        const payload = tokenParts[1];
-        // Base64 URL decode
-        const decoded = Buffer.from(payload, "base64url").toString("utf-8");
-        return JSON.parse(decoded);
-    } catch (error) {
-        throw new Error("Failed to decode access token payload");
+        // aws-jwt-verify fetches the JWKS once, caches it, and checks signature + exp + iss + token_use
+        const payload = await accessVerifier.verify(token);
+        return payload as unknown as Record<string, any>;
+    } catch (err) {
+        throw new Error(`Access token verification failed: ${(err as Error).message}`);
     }
 }
 
@@ -292,8 +423,8 @@ function extractUserInfoFromAccessTokenClaims(claims: Record<string, any>): User
     if (!claims.sub) {
         throw new Error("User sub not found in token claims");
     }
-    
-    // Crucial check: must be an Access Token
+
+    // Defence-in-depth: aws-jwt-verify already enforces token_use === "access"
     if (claims.token_use !== 'access') {
         throw new Error(`Invalid token type: Expected 'access', got '${claims.token_use}'`);
     }
@@ -350,6 +481,7 @@ async function claimsFromConnection(event: WebSocketAPIGatewayEventV2): Promise<
             IndexName: "connectionId-index",
             KeyConditionExpression: "connectionId = :cid",
             ExpressionAttributeValues: { ":cid": { S: connectionId } },
+            Limit: 5,
         })
     );
     const item = q.Items && q.Items[0];
@@ -361,13 +493,14 @@ async function claimsFromConnection(event: WebSocketAPIGatewayEventV2): Promise<
     const userKey = item.userKey.S!;
     const display = (item.display && item.display.S) || "";
     const sub = (item.sub && item.sub.S) || "";
+    const email = (item.email && item.email.S) || "";
 
     if (userKey.startsWith("clinic#")) {
         return {
             userType: "Clinic",
             clinicId: userKey.slice(7),
             sub,
-            email: display, 
+            email,
             name: display,
         };
     }
@@ -376,7 +509,7 @@ async function claimsFromConnection(event: WebSocketAPIGatewayEventV2): Promise<
             userType: "Professional",
             clinicId: undefined,
             sub: userKey.slice(5),
-            email: display,
+            email,
             name: display,
         };
     }
@@ -388,20 +521,20 @@ async function validateToken(event: WebSocketAPIGatewayEventV2): Promise<UserCla
     const route = event.requestContext.routeKey;
 
     if (route === "$connect") {
-        const qpToken = event.queryStringParameters?.token || null; 
+        const qpToken = event.queryStringParameters?.token || null;
         const token = qpToken?.trim() || "";
         if (!token) {
             console.error("Missing token in query parameters for $connect");
             throw new Error("Missing token");
         }
-        
-        // --- Access Token Validation ---
+
+        // --- Access Token Verification (signature + exp + iss + token_use) ---
         const claims = await (async () => {
             try {
-                const payload = extractAndDecodeAccessTokenPayload(token);
+                const payload = await verifyAccessToken(token);
                 return extractUserInfoFromAccessTokenClaims(payload);
             } catch (err) {
-                console.error("Access Token decoding failed:", {
+                console.error("Access Token verification failed:", {
                     error: (err as Error).message,
                 });
                 throw new Error("Invalid Access Token");
@@ -444,13 +577,13 @@ async function validateToken(event: WebSocketAPIGatewayEventV2): Promise<UserCla
         }
 
         if (bodyToken) {
-            // Optional re-verification using token in body
+            // Optional re-verification using token in body (full signature + exp check)
             const tokenClaims = await (async () => {
                 try {
-                    const payload = extractAndDecodeAccessTokenPayload(bodyToken);
+                    const payload = await verifyAccessToken(bodyToken);
                     return extractUserInfoFromAccessTokenClaims(payload);
                 } catch (err) {
-                    console.error("Access Token decoding failed in body:", {
+                    console.error("Access Token verification failed in body:", {
                         error: (err as Error).message,
                     });
                     throw new Error("Invalid Access Token in body");
@@ -486,7 +619,7 @@ async function validateToken(event: WebSocketAPIGatewayEventV2): Promise<UserCla
     }
 }
 
-async function putConnection(userKey: string, connectionId: string, userType: string, display: string, sub: string) {
+async function putConnection(userKey: string, connectionId: string, userType: string, display: string, sub: string, email: string = "") {
     const ttl = Math.floor(Date.now() / 1000) + 60 * 60 * 24; // 24h
     await ddb.send(
         new PutItemCommand({
@@ -497,8 +630,9 @@ async function putConnection(userKey: string, connectionId: string, userType: st
                 ttl: { N: String(ttl) },
                 connectedAt: { N: String(nowMs()) },
                 userType: { S: userType },
-                display: { S: display || "" }, 
-                sub: { S: sub || "" }, 
+                display: { S: display || "" },
+                sub: { S: sub || "" },
+                email: { S: email || "" },
             },
         })
     );
@@ -519,6 +653,7 @@ async function getConnections(userKey: string): Promise<string[]> {
             TableName: CONNS_TABLE,
             KeyConditionExpression: "userKey = :uk",
             ExpressionAttributeValues: { ":uk": { S: userKey } },
+            Limit: 20,
         })
     );
     const connections = out.Items?.map((i) => i.connectionId.S!) || [];
@@ -527,23 +662,41 @@ async function getConnections(userKey: string): Promise<string[]> {
 
 // ============== ROUTE HANDLERS ==============
 
-async function onConnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> { 
+async function onConnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
+    const connectionId = event.requestContext.connectionId;
+    console.log("[ws] $connect START", { connectionId });
+
     const claims = await validateToken(event);
     const userKey = userKeyFromClaims(claims);
 
     await putConnection(
         userKey,
-        event.requestContext.connectionId,
+        connectionId,
         claims.userType,
         claims.name || claims.email || "",
-        claims.sub || ""
+        claims.sub || "",
+        claims.email || ""
     );
+
+    console.log("[ws] $connect OK", {
+        connectionId,
+        userKey,
+        userType: claims.userType,
+        sub: claims.sub,
+        clinicId: claims.clinicId,
+        isRoot: claims.isRoot === true,
+        email: claims.email,
+        elapsedMs: Date.now() - started,
+    });
 
     return { statusCode: 200, body: "Connected" };
 }
 
 async function onDisconnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
     const connectionId = event.requestContext.connectionId;
+    console.log("[ws] $disconnect START", { connectionId });
 
     const q = await ddb.send(
         new QueryCommand({
@@ -551,12 +704,16 @@ async function onDisconnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
             IndexName: "connectionId-index",
             KeyConditionExpression: "connectionId = :cid",
             ExpressionAttributeValues: { ":cid": { S: connectionId } },
+            Limit: 5,
         })
     );
 
     if (!q.Items || q.Items.length === 0) {
+        console.log("[ws] $disconnect OK (no rows)", { connectionId, elapsedMs: Date.now() - started });
         return { statusCode: 200, body: "Disconnected" };
     }
+
+    const userKeys = q.Items.map((i) => i.userKey?.S).filter((v): v is string => !!v);
 
     // Delete all connection records associated with this connectionId
     await Promise.all(
@@ -570,14 +727,22 @@ async function onDisconnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatew
         )
     );
 
+    console.log("[ws] $disconnect OK", {
+        connectionId,
+        userKeys,
+        deleted: q.Items.length,
+        elapsedMs: Date.now() - started,
+    });
+
     return { statusCode: 200, body: "Disconnected" };
 }
 
 
 // ============== AVATAR / PROFILE IMAGE HELPERS ==============
 
-// In-memory cache for presigned URLs (warm Lambda only, ~1h TTL baked in)
-const avatarCache = new Map<string, string>();
+// In-memory cache for presigned URLs with TTL (URLs expire after 1h, cache for 50min to be safe)
+const AVATAR_CACHE_TTL_MS = 50 * 60 * 1000; // 50 minutes
+const avatarCache = new Map<string, { url: string; cachedAt: number }>();
 
 /**
  * Generates a presigned S3 GET URL for a given object key.
@@ -607,12 +772,13 @@ async function presignS3Key(key: string): Promise<string> {
 
 /**
  * Looks up a professional's profile image key from DynamoDB and returns a presigned URL.
- * Result is cached for the lifetime of the Lambda warm instance.
+ * Result is cached for 50 minutes (presigned URLs expire after 60 min).
  */
 async function getProfessionalAvatarUrl(profSub: string): Promise<string> {
     if (!profSub) return "";
     const cacheKey = `prof:${profSub}`;
-    if (avatarCache.has(cacheKey)) return avatarCache.get(cacheKey)!;
+    const cached = avatarCache.get(cacheKey);
+    if (cached && (Date.now() - cached.cachedAt) < AVATAR_CACHE_TTL_MS) return cached.url;
 
     try {
         const res = await ddb.send(new GetItemCommand({
@@ -622,26 +788,48 @@ async function getProfessionalAvatarUrl(profSub: string): Promise<string> {
         }));
         const imageKey = res.Item?.profileImageKey?.S || "";
         const url = imageKey ? await presignS3Key(imageKey) : "";
-        avatarCache.set(cacheKey, url);
+        avatarCache.set(cacheKey, { url, cachedAt: Date.now() });
         return url;
     } catch (e) {
         console.warn("getProfessionalAvatarUrl failed", profSub, (e as Error).message);
-        avatarCache.set(cacheKey, "");
+        avatarCache.set(cacheKey, { url: "", cachedAt: Date.now() });
         return "";
     }
 }
 
 /**
- * Looks up a clinic's office image key from DynamoDB and returns a presigned URL.
- * Uses a Query because clinicId is the partition key but userSub is required as sort key.
- * We query by partition key only and take the first item (typically one profile per clinic).
+ * Looks up a clinic's office image from the clinic office images S3 bucket.
+ * Lists objects under {clinicId}/clinic-office-image/ and presigns the latest one.
  */
 async function getClinicAvatarUrl(clinicId: string): Promise<string> {
     if (!clinicId) return "";
     const cacheKey = `clinic:${clinicId}`;
-    if (avatarCache.has(cacheKey)) return avatarCache.get(cacheKey)!;
+    const cached = avatarCache.get(cacheKey);
+    if (cached && (Date.now() - cached.cachedAt) < AVATAR_CACHE_TTL_MS) return cached.url;
 
     try {
+        // First try: S3 clinic office images bucket
+        if (CLINIC_OFFICE_IMAGES_BUCKET) {
+            const prefix = `${clinicId}/clinic-office-image/`;
+            const listRes = await s3.send(new ListObjectsV2Command({
+                Bucket: CLINIC_OFFICE_IMAGES_BUCKET,
+                Prefix: prefix,
+            }));
+            const files = (listRes.Contents || [])
+                .filter(obj => obj.Key && !obj.Key.includes("/.meta/"))
+                .sort((a, b) => (b.LastModified?.getTime() ?? 0) - (a.LastModified?.getTime() ?? 0));
+
+            if (files.length > 0 && files[0].Key) {
+                const url = await getSignedUrl(s3, new GetObjectCommand({
+                    Bucket: CLINIC_OFFICE_IMAGES_BUCKET,
+                    Key: files[0].Key,
+                }), { expiresIn: 3600 });
+                avatarCache.set(cacheKey, { url, cachedAt: Date.now() });
+                return url;
+            }
+        }
+
+        // Fallback: DynamoDB clinic profiles table (office_image_key)
         const res = await ddb.send(new QueryCommand({
             TableName: CLINIC_PROFILES_TABLE,
             KeyConditionExpression: "clinicId = :cid",
@@ -652,30 +840,73 @@ async function getClinicAvatarUrl(clinicId: string): Promise<string> {
         const item = (res.Items || [])[0];
         const imageKey = item?.office_image_key?.S || "";
         const url = imageKey ? await presignS3Key(imageKey) : "";
-        avatarCache.set(cacheKey, url);
+        avatarCache.set(cacheKey, { url, cachedAt: Date.now() });
         return url;
     } catch (e) {
         console.warn("getClinicAvatarUrl failed", clinicId, (e as Error).message);
-        avatarCache.set(cacheKey, "");
+        avatarCache.set(cacheKey, { url: "", cachedAt: Date.now() });
         return "";
     }
 }
 
 async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
     const claims = await validateToken(event);
     const connClient = wsClientFromEvent(event);
     const connectionId = event.requestContext.connectionId;
 
-    // Read optional clinicId from body for multi-clinic filtering
+    // Read optional body params: clinicId (for multi-clinic clinic users), pagination
     let bodyClinicId: string | null = null;
+    let bodyLimit: unknown = undefined;
+    let bodyNextKey: Record<string, AttributeValue> | undefined;
     try {
         const body = JSON.parse(event.body || "{}");
         bodyClinicId = body.clinicId || null;
+        bodyLimit = body.limit;
+        bodyNextKey = body.nextKey || undefined;
     } catch {
-        // ignore parse errors
+        console.warn("[ws] getConversations body parse failed", { body: event.body });
     }
 
-    // Determine which key to query with
+    const limit = Math.max(1, Math.min(MAX_CONVO_PAGE, Number(bodyLimit) || DEFAULT_CONVO_PAGE));
+
+    console.log("[ws] getConversations START", {
+        connectionId,
+        userType: claims.userType,
+        sub: claims.sub,
+        connectionClinicId: claims.clinicId,
+        bodyClinicId,
+        limit,
+        hasNextKey: !!bodyNextKey,
+    });
+
+    // --- Authorization: clinic users filtering by clinicId must have an assignment to that clinic ---
+    // A user may belong to several clinics (see the "All Clinics" view which fans
+    // out one getConversations per clinic), so we verify access against the
+    // UserClinicAssignments table rather than only against claims.clinicId.
+    if (claims.userType === "Clinic" && bodyClinicId && bodyClinicId !== "all") {
+        const allowed =
+            claims.isRoot === true ||
+            claims.clinicId === bodyClinicId || // fast path: the clinic they connected as
+            (!!claims.sub && await hasClinicAccess(claims.sub, bodyClinicId));
+        if (!allowed) {
+            console.warn("[authz] onGetConversations REJECTED", {
+                reason: "no UserClinicAssignments row + not connection clinic + not root",
+                userType: claims.userType,
+                sub: claims.sub,
+                connectionClinicId: claims.clinicId,
+                bodyClinicId,
+                isRoot: claims.isRoot,
+            });
+            await send(connClient, connectionId, {
+                type: "error",
+                error: "Not authorized to view this clinic's conversations",
+            });
+            return { statusCode: 403, body: "Forbidden" };
+        }
+    }
+
+    // Determine which GSI key to query with
     let queryKey: string;
     if (claims.userType === "Clinic" && bodyClinicId && bodyClinicId !== "all") {
         queryKey = `clinic#${bodyClinicId}`;
@@ -685,48 +916,57 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
 
     try {
         let items: Record<string, AttributeValue>[] = [];
+        let lastEvaluatedKey: Record<string, AttributeValue> | undefined;
 
+        const queryStarted = Date.now();
         if (queryKey.startsWith("clinic#")) {
-            const res = await ddb
-                .send(
-                    new QueryCommand({
-                        TableName: CONVOS_TABLE,
-                        IndexName: "clinicKey-lastMessageAt",
-                        KeyConditionExpression: "clinicKey = :uk",
-                        ExpressionAttributeValues: { ":uk": { S: queryKey } },
-                        ScanIndexForward: false,
-                    })
-                )
-                .catch(() => ({ Items: [] }));
+            const res = await ddb.send(
+                new QueryCommand({
+                    TableName: CONVOS_TABLE,
+                    IndexName: "clinicKey-lastMessageAt",
+                    KeyConditionExpression: "clinicKey = :uk",
+                    ExpressionAttributeValues: { ":uk": { S: queryKey } },
+                    ScanIndexForward: false,
+                    Limit: limit,
+                    ExclusiveStartKey: bodyNextKey,
+                })
+            );
             items = res.Items || [];
-
-            if (!items.length) {
-                const scan = await ddb
-                    .send(
-                        new ScanCommand({
-                            TableName: CONVOS_TABLE,
-                            FilterExpression: "clinicKey = :uk",
-                            ExpressionAttributeValues: { ":uk": { S: queryKey } },
-                        })
-                    )
-                    .catch(() => ({ Items: [] }));
-                items = scan.Items || [];
-            }
+            lastEvaluatedKey = res.LastEvaluatedKey;
         } else if (queryKey.startsWith("prof#")) {
-            const res = await ddb
-                .send(
-                    new QueryCommand({
-                        TableName: CONVOS_TABLE,
-                        IndexName: "profKey-lastMessageAt",
-                        KeyConditionExpression: "profKey = :uk",
-                        ExpressionAttributeValues: { ":uk": { S: queryKey } },
-                        ScanIndexForward: false,
-                    })
-                )
-                    .catch(() => ({ Items: [] }));
+            const res = await ddb.send(
+                new QueryCommand({
+                    TableName: CONVOS_TABLE,
+                    IndexName: "profKey-lastMessageAt",
+                    KeyConditionExpression: "profKey = :uk",
+                    ExpressionAttributeValues: { ":uk": { S: queryKey } },
+                    ScanIndexForward: false,
+                    Limit: limit,
+                    ExclusiveStartKey: bodyNextKey,
+                })
+            );
             items = res.Items || [];
+            lastEvaluatedKey = res.LastEvaluatedKey;
+        }
+        console.log("[ws] getConversations DDB Query done", {
+            queryKey,
+            items: items.length,
+            hasMore: !!lastEvaluatedKey,
+            queryMs: Date.now() - queryStarted,
+        });
+
+        const iAmClinic = claims.userType === "Clinic";
+
+        // Pre-batch the Cognito name lookups so we don't serialize them per row
+        let profNameMap: Record<string, string> = {};
+        if (iAmClinic) {
+            const profSubs = items
+                .map((it) => (it.profKey?.S || "").replace(/^prof#/, ""))
+                .filter(Boolean);
+            profNameMap = await getCognitoNamesBySubs(profSubs);
         }
 
+        // PHASE 1: Build conversation rows (names only — avatars come in Phase 2)
         const conversations = await Promise.all(
             items.map(async (it) => {
                 const conversationId = it.conversationId?.S || "";
@@ -739,29 +979,25 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                 const clinicUnread = Number(it.clinicUnread?.N || 0);
                 const profUnread = Number(it.profUnread?.N || 0);
 
-                // Determine if I am the clinic side of this conversation
-                const iAmClinic = claims.userType === "Clinic";
                 let recipientName = "";
+                const otherKey = iAmClinic ? profKey : clinicKey;
                 if (iAmClinic) {
                     const profSub = (profKey || "").replace(/^prof#/, "");
-                    recipientName = await getCognitoNameBySub(profSub);
+                    recipientName = profNameMap[profSub] || await getCognitoNameBySub(profSub);
                 } else {
                     recipientName = await getClinicDisplayByKey(clinicKey || "");
                 }
 
-                const unreadCount = iAmClinic ? clinicUnread : profUnread;
-
-                // Fetch profile image — best-effort, never throws
-                let avatarUrl = "";
+                // Check if the other party is online (has active connections)
+                let isOnline = false;
                 try {
-                    if (iAmClinic) {
-                        const profSub = (profKey || "").replace(/^prof#/, "");
-                        avatarUrl = await getProfessionalAvatarUrl(profSub);
-                    } else {
-                        const cid = (clinicKey || "").replace(/^clinic#/, "");
-                        avatarUrl = await getClinicAvatarUrl(cid);
-                    }
-                } catch { /* ignore */ }
+                    const conns = await getConnections(otherKey);
+                    isOnline = conns.length > 0;
+                } catch (e) {
+                    console.warn("isOnline lookup failed", otherKey, (e as Error).message);
+                }
+
+                const unreadCount = iAmClinic ? clinicUnread : profUnread;
 
                 return {
                     conversationId,
@@ -769,26 +1005,82 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
                     lastMessage: lastPreview,
                     lastMessageAt,
                     unreadCount,
-                    ...(avatarUrl ? { avatarUrl } : {}),
+                    isOnline,
+                    clinicKey,
+                    profKey,
                 };
             })
         );
-        
-        // Sort in memory by lastMessageAt (most recent first) just in case GSI sort is slightly off 
-        // or if using the scan fallback.
+
         conversations.sort((a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime());
 
-
+        // Send conversations immediately — user sees the list fast
         await send(connClient, connectionId, {
             type: "conversationsResponse",
-            conversations,
+            conversations: conversations.map(({ clinicKey, profKey, ...rest }) => rest),
+            nextKey: lastEvaluatedKey || null,
+            hasMore: !!lastEvaluatedKey,
+        });
+        console.log("[ws] getConversations conversationsResponse sent", {
+            connectionId,
+            count: conversations.length,
+            hasMore: !!lastEvaluatedKey,
+            phase1Ms: Date.now() - started,
         });
 
+        // PHASE 2: Fetch avatars in background and send update
+        const avatarStarted = Date.now();
+        try {
+            const avatarMap: Record<string, string> = {};
+            await Promise.all(
+                conversations.map(async (c) => {
+                    try {
+                        let url = "";
+                        if (iAmClinic) {
+                            const profSub = (c.profKey || "").replace(/^prof#/, "");
+                            url = await getProfessionalAvatarUrl(profSub);
+                        } else {
+                            const cid = (c.clinicKey || "").replace(/^clinic#/, "");
+                            url = await getClinicAvatarUrl(cid);
+                        }
+                        if (url) avatarMap[c.conversationId] = url;
+                    } catch (e) {
+                        console.warn("[ws] avatar lookup failed for", c.conversationId, (e as Error).message);
+                    }
+                })
+            );
+
+            if (Object.keys(avatarMap).length > 0) {
+                await send(connClient, connectionId, {
+                    type: "avatarsUpdate",
+                    avatars: avatarMap,
+                });
+                console.log("[ws] getConversations avatarsUpdate sent", {
+                    connectionId,
+                    avatars: Object.keys(avatarMap).length,
+                    avatarMs: Date.now() - avatarStarted,
+                });
+            } else {
+                console.log("[ws] getConversations no avatars resolved", {
+                    connectionId,
+                    avatarMs: Date.now() - avatarStarted,
+                });
+            }
+        } catch (e) {
+            console.warn("[ws] avatar phase errored", (e as Error).message);
+        }
+
+        console.log("[ws] getConversations DONE", {
+            connectionId,
+            totalMs: Date.now() - started,
+        });
         return { statusCode: 200, body: "OK" };
     } catch (error) {
-        console.error("Error fetching conversations:", {
+        console.error("[ws] getConversations FAILED", {
+            connectionId,
             error: (error as Error).message,
             stack: (error as Error).stack,
+            elapsedMs: Date.now() - started,
         });
         await send(connClient, connectionId, {
             type: "error",
@@ -798,69 +1090,152 @@ async function onGetConversations(event: WebSocketAPIGatewayEventV2): Promise<AP
     }
 }
 
-async function onGetHistory(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> { 
-    await validateToken(event);
+async function onGetHistory(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
+    const connectionId = event.requestContext.connectionId;
+    const claims = await validateToken(event);
     const body = JSON.parse(event.body || "{}");
-    const { clinicId, professionalSub, limit: bodyLimit, nextKey } = body as { 
-        clinicId: string, 
-        professionalSub: string, 
-        limit: string | number | undefined, 
-        nextKey: any 
+    const { clinicId, professionalSub, limit: bodyLimit, nextKey } = body as {
+        clinicId: string,
+        professionalSub: string,
+        limit: string | number | undefined,
+        nextKey: any
     };
-    
-    // Safety clamp the limit
-    const limit = Math.max(1, Math.min(200, Number(bodyLimit) || 50)); 
+
+    // Safety clamp the limit to the paginated default/max
+    const limit = Math.max(1, Math.min(MAX_HISTORY_PAGE, Number(bodyLimit) || DEFAULT_HISTORY_PAGE));
+
+    console.log("[ws] getHistory START", {
+        connectionId,
+        userType: claims.userType,
+        sub: claims.sub,
+        connectionClinicId: claims.clinicId,
+        bodyClinicId: clinicId,
+        bodyProfessionalSub: professionalSub,
+        limit,
+        hasNextKey: !!nextKey,
+    });
 
     if (!clinicId || !professionalSub) {
+        console.warn("[ws] getHistory 400 missing params", { clinicId, professionalSub });
         return { statusCode: 400, body: "Missing clinicId/professionalSub" };
     }
+
+    // --- Authorization: caller must be one of the two parties in this conversation ---
+    // Previously onGetHistory had NO auth check. Clinic users can belong to many
+    // clinics, so we verify via UserClinicAssignments when the body clinicId
+    // doesn't match the connection clinicId.
+    const clinicOk =
+        claims.userType === "Clinic" &&
+        !!claims.sub &&
+        (claims.isRoot === true ||
+            claims.clinicId === clinicId ||
+            await hasClinicAccess(claims.sub, clinicId));
+    const profOk = claims.userType === "Professional" && !!claims.sub && claims.sub === professionalSub;
+    const isAuthorized = claims.isRoot === true || clinicOk || profOk;
+
+    if (!isAuthorized) {
+        console.warn("[authz] onGetHistory REJECTED", {
+            userType: claims.userType,
+            sub: claims.sub,
+            connectionClinicId: claims.clinicId,
+            bodyClinicId: clinicId,
+            bodyProfessionalSub: professionalSub,
+            isRoot: claims.isRoot,
+        });
+        const connClient = wsClientFromEvent(event);
+        await send(connClient, event.requestContext.connectionId, {
+            type: "error",
+            error: "Not authorized to view this conversation's history",
+        });
+        return { statusCode: 403, body: "Forbidden" };
+    }
+
     const convoId = makeConversationId(clinicId, professionalSub);
 
-    const params: QueryCommand["input"] = {
+    // Fetch messages and conversation record in parallel
+    const msgParams: QueryCommand["input"] = {
         TableName: MESSAGES_TABLE,
         KeyConditionExpression: "conversationId = :cid",
         ExpressionAttributeValues: { ":cid": { S: convoId } },
         ScanIndexForward: false, // Newest messages first
-        Limit: limit, 
+        Limit: limit,
     };
-    if (nextKey) params.ExclusiveStartKey = nextKey as Record<string, AttributeValue>;
+    if (nextKey) msgParams.ExclusiveStartKey = nextKey as Record<string, AttributeValue>;
 
-    const out = await ddb.send(new QueryCommand(params));
+    const [out, convoRes, profName, clinicName] = await Promise.all([
+        ddb.send(new QueryCommand(msgParams)),
+        ddb.send(new GetItemCommand({
+            TableName: CONVOS_TABLE,
+            Key: { conversationId: { S: convoId } },
+            ProjectionExpression: "clinicUnread, profUnread",
+        })),
+        getCognitoNameBySub(professionalSub),
+        getClinicDisplayByKey(`clinic#${clinicId}`),
+    ]);
 
-    const profName = await getCognitoNameBySub(professionalSub);
-    // Note: getClinicDisplayByKey accepts 'clinic#<id>'
-    const clinicName = await getClinicDisplayByKey(`clinic#${clinicId}`);
+    // Determine unread counts for the OTHER side to figure out read status of my messages
+    const clinicUnread = Number(convoRes.Item?.clinicUnread?.N || 0);
+    const profUnread = Number(convoRes.Item?.profUnread?.N || 0);
+    const iAmClinic = claims.userType === "Clinic";
+    // If the other side has 0 unread, all my messages are "read"
+    const otherUnread = iAmClinic ? profUnread : clinicUnread;
+    const myKey = iAmClinic ? `clinic#${clinicId}` : `prof#${professionalSub}`;
 
     const connClient = wsClientFromEvent(event);
     await send(connClient, event.requestContext.connectionId, {
         type: "history",
         conversationId: convoId,
-        items: (out.Items || []).map((i) => { 
+        items: (out.Items || []).map((i) => {
             const senderKey = i.senderKey.S!;
             const senderName = senderKey.startsWith("clinic#") ? clinicName : profName;
+            const isMine = senderKey === myKey;
+            // My messages: "read" if other side has 0 unread, otherwise "delivered"
+            // Their messages: no status needed (frontend only shows ticks on mine)
+            const status = isMine ? (otherUnread === 0 ? "read" : "delivered") : undefined;
             return {
                 messageId: i.messageId.S,
                 timestamp: i.timestamp.S,
                 senderKey,
-                senderName, 
+                senderName,
                 content: i.content.S,
                 messageType: i.type.S,
+                ...(status ? { status } : {}),
             };
         }),
         nextKey: out.LastEvaluatedKey || null,
     });
 
+    console.log("[ws] getHistory DONE", {
+        connectionId,
+        conversationId: convoId,
+        items: (out.Items || []).length,
+        hasMore: !!out.LastEvaluatedKey,
+        totalMs: Date.now() - started,
+    });
     return { statusCode: 200, body: "OK" };
 }
 
 async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
+    const connectionId = event.requestContext.connectionId;
     try {
         const claims = await validateToken(event);
         const senderKey = userKeyFromClaims(claims);
         const body = JSON.parse(event.body || "{}");
         const { clinicId, professionalSub } = body;
 
+        console.log("[ws] markRead START", {
+            connectionId,
+            senderKey,
+            userType: claims.userType,
+            sub: claims.sub,
+            bodyClinicId: clinicId,
+            bodyProfessionalSub: professionalSub,
+        });
+
         if (!clinicId || !professionalSub) {
+            console.warn("[ws] markRead 400 missing params", { clinicId, professionalSub });
             const connClient = wsClientFromEvent(event);
             await send(connClient, event.requestContext.connectionId, {
                 type: "error",
@@ -869,15 +1244,26 @@ async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGateway
             return { statusCode: 400, body: "Missing clinicId or professionalSub" };
         }
 
-        const expectedSenderKey =
-            claims.userType === "Clinic" ? `clinic#${claims.clinicId}` : `prof#${claims.sub}`;
-        
-        // Authorization check: User must be one of the two parties in the conversation
-        const isUserAuthorized = 
-            (claims.userType === "Clinic" && claims.clinicId === clinicId) ||
-            (claims.userType === "Professional" && claims.sub === professionalSub);
+        // Authorization check: caller must be one of the two parties.
+        // For clinic users, the clinicId is checked against UserClinicAssignments
+        // so multi-clinic users can markRead on any of their assigned clinics.
+        const clinicOk =
+            claims.userType === "Clinic" && !!claims.sub &&
+            (claims.isRoot === true ||
+                claims.clinicId === clinicId ||
+                await hasClinicAccess(claims.sub, clinicId));
+        const profOk = claims.userType === "Professional" && !!claims.sub && claims.sub === professionalSub;
+        const isUserAuthorized = claims.isRoot === true || clinicOk || profOk;
 
         if (!isUserAuthorized) {
+            console.warn("[authz] onMarkRead REJECTED", {
+                userType: claims.userType,
+                sub: claims.sub,
+                connectionClinicId: claims.clinicId,
+                bodyClinicId: clinicId,
+                bodyProfessionalSub: professionalSub,
+                isRoot: claims.isRoot,
+            });
             const connClient = wsClientFromEvent(event);
             await send(connClient, event.requestContext.connectionId, {
                 type: "error",
@@ -908,11 +1294,44 @@ async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGateway
             action: "markRead",
         });
 
+        // Notify the OTHER party that their messages have been read
+        const otherKey = isSenderClinic ? `prof#${professionalSub}` : `clinic#${clinicId}`;
+        let receiptsSent = 0;
+        try {
+            const otherConns = await getConnections(otherKey);
+            await Promise.all(
+                otherConns.map(async (cid) => {
+                    try {
+                        await send(connClient, cid, {
+                            type: "readReceipt",
+                            conversationId,
+                            readBy: senderKey,
+                        });
+                        receiptsSent++;
+                    } catch (err) {
+                        console.warn("[ws] markRead readReceipt send failed", { cid, error: (err as Error).message });
+                    }
+                })
+            );
+        } catch (err) {
+            console.warn("[ws] markRead fan-out lookup failed", { otherKey, error: (err as Error).message });
+        }
+
+        console.log("[ws] markRead DONE", {
+            connectionId,
+            conversationId,
+            senderKey,
+            otherKey,
+            readReceiptsDelivered: receiptsSent,
+            totalMs: Date.now() - started,
+        });
         return { statusCode: 200, body: "Messages marked as read" };
     } catch (error) {
-        console.error("Error marking messages as read:", {
+        console.error("[ws] markRead FAILED", {
+            connectionId,
             error: (error as Error).message,
             stack: (error as Error).stack,
+            elapsedMs: Date.now() - started,
         });
         const connClient = wsClientFromEvent(event);
         await send(connClient, event.requestContext.connectionId, {
@@ -924,13 +1343,31 @@ async function onMarkRead(event: WebSocketAPIGatewayEventV2): Promise<APIGateway
 }
 
 async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const started = Date.now();
+    const connectionId = event.requestContext.connectionId;
     try {
         const claims = await validateToken(event);
         const senderKey = userKeyFromClaims(claims);
         const body = JSON.parse(event.body || "{}");
         const { clinicId, professionalSub, content, messageType = "text" } = body;
 
+        console.log("[ws] sendMessage START", {
+            connectionId,
+            senderKey,
+            userType: claims.userType,
+            sub: claims.sub,
+            bodyClinicId: clinicId,
+            bodyProfessionalSub: professionalSub,
+            messageType,
+            contentLen: typeof content === "string" ? content.length : 0,
+        });
+
         if (!clinicId || !professionalSub || !content || content.length > MAX_LEN) {
+            console.warn("[ws] sendMessage 400 invalid payload", {
+                hasClinicId: !!clinicId,
+                hasProfSub: !!professionalSub,
+                contentLen: typeof content === "string" ? content.length : 0,
+            });
             const connClient = wsClientFromEvent(event);
             await send(connClient, event.requestContext.connectionId, {
                 type: "error",
@@ -939,12 +1376,24 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
             return { statusCode: 400, body: "Missing or invalid data" };
         }
 
-        // Authorization check: User must be one of the two parties in the conversation
-        const isUserAuthorized = 
-            (claims.userType === "Clinic" && claims.clinicId === clinicId) ||
-            (claims.userType === "Professional" && claims.sub === professionalSub);
+        // Authorization check: caller must be one of the two parties in the conversation.
+        // Multi-clinic users are allowed if they have an assignment to the clinic.
+        // (Root cannot send on behalf of someone else — that would need an explicit senderKey contract.)
+        const clinicOk =
+            claims.userType === "Clinic" && !!claims.sub &&
+            (claims.clinicId === clinicId || await hasClinicAccess(claims.sub, clinicId));
+        const profOk = claims.userType === "Professional" && !!claims.sub && claims.sub === professionalSub;
+        const isUserAuthorized = clinicOk || profOk;
 
         if (!isUserAuthorized) {
+            console.warn("[authz] onSendMessage REJECTED", {
+                userType: claims.userType,
+                sub: claims.sub,
+                connectionClinicId: claims.clinicId,
+                bodyClinicId: clinicId,
+                bodyProfessionalSub: professionalSub,
+                isRoot: claims.isRoot,
+            });
             const connClient = wsClientFromEvent(event);
             await send(connClient, event.requestContext.connectionId, {
                 type: "error",
@@ -1041,10 +1490,12 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
         const payload = { ...flat, message: flat };
 
         // Push to all recipient connections
+        let delivered = false;
         await Promise.all(
             recipientConnections.map(async (connectionId) => {
                 try {
                     await send(connClient, connectionId, payload);
+                    delivered = true;
                 } catch (err) {
                     console.error("Failed to notify recipient:", {
                         connectionId,
@@ -1071,17 +1522,34 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
             );
         }
 
-        // Sender ack on the current connection
+        // Sender ack with delivery status
         await send(connClient, currentConnectionId, {
             type: "ack",
             messageId,
             conversationId,
             timestamp,
+            status: delivered ? "delivered" : "sent",
         });
 
+        console.log("[ws] sendMessage DONE", {
+            connectionId,
+            conversationId,
+            messageId,
+            senderKey,
+            recipientKey,
+            recipientConns: recipientConnections.length,
+            senderOtherConns: otherSenderConns.length,
+            delivered,
+            totalMs: Date.now() - started,
+        });
         return { statusCode: 200, body: "Message sent" };
     } catch (error) {
-        console.error("Error sending message:", { error: (error as Error).message, stack: (error as Error).stack });
+        console.error("[ws] sendMessage FAILED", {
+            connectionId,
+            error: (error as Error).message,
+            stack: (error as Error).stack,
+            elapsedMs: Date.now() - started,
+        });
         const connClient = wsClientFromEvent(event);
         await send(connClient, event.requestContext.connectionId, {
             type: "error",
@@ -1092,6 +1560,10 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
 }
 
 async function onDefault(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    console.warn("[ws] onDefault (unknown action)", {
+        connectionId: event.requestContext.connectionId,
+        body: event.body,
+    });
     const connClient = wsClientFromEvent(event);
     await send(connClient, event.requestContext.connectionId, {
         type: "error",
@@ -1102,23 +1574,31 @@ async function onDefault(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayP
 }
 
 // ============== MAIN HANDLER ==============
-export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => { 
+export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
     // Assert the event shape to include connectionId, as it must be present for WebSocket invocations
     const wsEvent = event as WebSocketAPIGatewayEventV2;
+    const handlerStarted = Date.now();
 
     try {
         const route = wsEvent.requestContext.routeKey;
         let action = route;
-        
+
         // Handle custom routes sent through the $default route by checking the body 'action' field
         if (route === "$default" && wsEvent.body) {
             try {
-                const body = JSON.parse(wsEvent.body) as { action?: string }; 
+                const body = JSON.parse(wsEvent.body) as { action?: string };
                 action = body.action || route;
             } catch (e) {
-                console.warn("Could not parse body for action:", (e as Error).message);
+                console.warn("[ws] handler body parse failed:", (e as Error).message);
             }
         }
+
+        console.log("[ws] handler INVOKE", {
+            connectionId: wsEvent.requestContext.connectionId,
+            route,
+            action,
+            bodyLen: wsEvent.body?.length || 0,
+        });
 
         if (action === "$connect") return await onConnect(wsEvent);
         if (action === "$disconnect") return await onDisconnect(wsEvent);
@@ -1130,7 +1610,12 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
         return await onDefault(wsEvent);
     } catch (err) {
-        console.error("WebSocket handler error:", { error: (err as Error).message, stack: (err as Error).stack });
+        console.error("[ws] handler UNCAUGHT", {
+            connectionId: wsEvent.requestContext.connectionId,
+            error: (err as Error).message,
+            stack: (err as Error).stack,
+            elapsedMs: Date.now() - handlerStarted,
+        });
         try {
             const connClient = wsClientFromEvent(wsEvent);
             await send(connClient, wsEvent.requestContext.connectionId, {
@@ -1138,7 +1623,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
                 error: (err as Error)?.message || "Internal error",
             });
         } catch (sendErr) {
-            console.error("Failed to send error response:", { error: (sendErr as Error).message });
+            console.error("[ws] handler error-frame send failed", { error: (sendErr as Error).message });
         }
         return { statusCode: 500, body: "Error" };
     }

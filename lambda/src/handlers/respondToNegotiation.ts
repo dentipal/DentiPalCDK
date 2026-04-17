@@ -162,6 +162,16 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     }
 
     const negotiationItem: DynamoDBItem = negotiationRes.Item;
+    const currentStatus: string | null = strFrom(negotiationItem.negotiationStatus);
+
+    // 3b. Validate state transition — terminal states cannot be changed
+    const TERMINAL_STATES = ["accepted", "declined"];
+    if (currentStatus && TERMINAL_STATES.includes(currentStatus)) {
+      return json(409, {
+        error: `Negotiation is already '${currentStatus}' and cannot be changed.`,
+      });
+    }
+
     const jobId: string | null = strFrom(negotiationItem.jobId);
 
     // 4. Load Job Item (to get job type and clinic owner)
@@ -297,21 +307,13 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
       updateExpr += ", #payType = :payType";
     }
 
-    // Attach counter rates to the negotiation item (store both legacy and generic field names)
+    // Attach counter rates — only write generic *Rate field names (no more *HourlyRate)
     if (typeof body.clinicCounterHourlyRate === "number") {
-      attrNames["#clinicCounterHourlyRate"] = "clinicCounterHourlyRate";
-      attrValues[":clinicCounterHourlyRate"] = { N: String(body.clinicCounterHourlyRate) };
-      updateExpr += ", #clinicCounterHourlyRate = :clinicCounterHourlyRate";
-      // Also store as generic clinicCounterRate
       attrNames["#clinicCounterRate"] = "clinicCounterRate";
       attrValues[":clinicCounterRate"] = { N: String(body.clinicCounterHourlyRate) };
       updateExpr += ", #clinicCounterRate = :clinicCounterRate";
     }
     if (typeof body.professionalCounterHourlyRate === "number") {
-      attrNames["#professionalCounterHourlyRate"] = "professionalCounterHourlyRate";
-      attrValues[":professionalCounterHourlyRate"] = { N: String(body.professionalCounterHourlyRate) };
-      updateExpr += ", #professionalCounterHourlyRate = :professionalCounterHourlyRate";
-      // Also store as generic professionalCounterRate
       attrNames["#professionalCounterRate"] = "professionalCounterRate";
       attrValues[":professionalCounterRate"] = { N: String(body.professionalCounterHourlyRate) };
       updateExpr += ", #professionalCounterRate = :professionalCounterRate";
@@ -328,26 +330,25 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
 
 
     // Determine final accepted rate (for temporary jobs - all pay types)
-    let finalAcceptedHourlyRate: number | null = null;
+    let finalAcceptedRate: number | null = null;
 
     if (isAccepted && (jobType || "").toLowerCase() !== "permanent") {
-      const clinicCounter = numFrom(negotiationItem.clinicCounterHourlyRate) ?? body.clinicCounterHourlyRate ?? null;
-      const professionalCounter = numFrom(negotiationItem.professionalCounterHourlyRate) ?? body.professionalCounterHourlyRate ?? null;
+      // Read counters from DB (prefer generic *Rate, fall back to legacy *HourlyRate for old records)
+      const clinicCounter = numFrom(negotiationItem.clinicCounterRate) ?? numFrom(negotiationItem.clinicCounterHourlyRate) ?? body.clinicCounterHourlyRate ?? null;
+      const professionalCounter = numFrom(negotiationItem.professionalCounterRate) ?? numFrom(negotiationItem.professionalCounterHourlyRate) ?? body.professionalCounterHourlyRate ?? null;
 
       if (actor === "professional") {
-        // Professional accepts -> agree to clinic's counter (if present)
         if (clinicCounter == null) {
           return json(400, { error: "Cannot accept: no clinic counter rate to accept." });
         }
-        finalAcceptedHourlyRate = clinicCounter;
-      } else { // actor === "clinic"
-        // Clinic accepts -> agree to professional's counter or original application proposal
+        finalAcceptedRate = clinicCounter;
+      } else {
         const appProposed = getAppProposedRate(appItem);
 
         if (professionalCounter != null) {
-          finalAcceptedHourlyRate = professionalCounter;
+          finalAcceptedRate = professionalCounter;
         } else if (appProposed != null) {
-          finalAcceptedHourlyRate = appProposed;
+          finalAcceptedRate = appProposed;
         } else {
           return json(400, {
             error: "Cannot accept: no professional counter rate or original proposed rate found.",
@@ -355,15 +356,10 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         }
       }
 
-      // Write a canonical agreed rate to negotiation row (keep agreedHourlyRate for backwards compatibility)
-      if (finalAcceptedHourlyRate != null) {
-        attrNames["#agreedHourlyRate"] = "agreedHourlyRate";
-        attrValues[":agreedHourlyRate"] = { N: String(finalAcceptedHourlyRate) };
-        updateExpr += ", #agreedHourlyRate = :agreedHourlyRate";
-
-        // Also store as agreedRate for pay-type-agnostic reads
+      // Write only the generic agreedRate field
+      if (finalAcceptedRate != null) {
         attrNames["#agreedRate"] = "agreedRate";
-        attrValues[":agreedRate"] = { N: String(finalAcceptedHourlyRate) };
+        attrValues[":agreedRate"] = { N: String(finalAcceptedRate) };
         updateExpr += ", #agreedRate = :agreedRate";
       }
     }
@@ -398,13 +394,10 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     };
     let appUpdateExpr: string = "SET #status = :status, #updatedAt = :updatedAt";
 
-    if (finalAcceptedHourlyRate != null) {
-      // Set both keys for compatibility with your FE/backends
-      appUpdateNames["#acceptedHourlyRate"] = "acceptedHourlyRate";
+    if (finalAcceptedRate != null) {
       appUpdateNames["#acceptedRate"] = "acceptedRate";
-      appUpdateValues[":acceptedHourlyRate"] = { N: String(finalAcceptedHourlyRate) };
-      appUpdateValues[":acceptedRate"] = { N: String(finalAcceptedHourlyRate) };
-      appUpdateExpr += ", #acceptedHourlyRate = :acceptedHourlyRate, #acceptedRate = :acceptedRate";
+      appUpdateValues[":acceptedRate"] = { N: String(finalAcceptedRate) };
+      appUpdateExpr += ", #acceptedRate = :acceptedRate";
     }
 
     // Final application update
@@ -433,7 +426,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
           const shiftDetails = {
             date: strFrom(jobItem.date) || strFrom(jobItem.shiftDate) || "TBD",
             role: strFrom(jobItem.role) || strFrom(jobItem.professionalRole) || strFrom(jobItem.jobTitle) || "Professional",
-            rate: finalAcceptedHourlyRate || 0,
+            rate: finalAcceptedRate || 0,
           };
 
           await eb.send(new PutEventsCommand({
@@ -467,7 +460,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
       response: body.response,
       applicationStatus,
       payType: payType ?? undefined,
-      acceptedHourlyRate: finalAcceptedHourlyRate ?? undefined,
+      acceptedRate: finalAcceptedRate ?? undefined,
       respondedAt: timestamp,
       nextSteps: isAccepted
         ? "Job has been scheduled with negotiated terms."

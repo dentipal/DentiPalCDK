@@ -8,15 +8,17 @@ import {
   QueryCommandOutput,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
+import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
+const USER_POOL_ID = process.env.USER_POOL_ID || "";
 
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE;
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
-const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE;
 
 // Optional envs (defaults provided)
 const JOB_APPLICATIONS_CLINIC_GSI =
@@ -94,24 +96,21 @@ function normalizeStatus(raw: any): string {
 
 /**
  * Resolve created_by to a display name:
+ *  - If it contains a space (already a name), return as-is
  *  - If it's an email (contains @), extract the part before @
- *  - If it's a userSub, look up clinic profiles table for first + last name
+ *  - If it's a userSub, look up Cognito for given_name + family_name
  */
-async function resolveCreatorName(createdBy: string, clinicId: string): Promise<string> {
+async function resolveCreatorName(createdBy: string): Promise<string> {
   if (!createdBy) return "";
-  if (createdBy.includes("@")) {
-    return createdBy.split("@")[0];
-  }
-  // It's a userSub — fetch from clinic profiles
-  if (!CLINIC_PROFILES_TABLE || !clinicId) return createdBy;
+  if (createdBy.includes(" ")) return createdBy;
+  if (createdBy.includes("@")) return createdBy.split("@")[0];
+  // Looks like a userSub — fetch from Cognito
+  if (!USER_POOL_ID) return createdBy;
   try {
-    const res = await dynamodb.send(new GetItemCommand({
-      TableName: CLINIC_PROFILES_TABLE,
-      Key: { clinicId: { S: clinicId }, userSub: { S: createdBy } },
-      ProjectionExpression: "primary_contact_first_name, primary_contact_last_name",
-    }));
-    const first = res.Item?.primary_contact_first_name?.S || "";
-    const last = res.Item?.primary_contact_last_name?.S || "";
+    const cognitoUser = await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: createdBy }));
+    const attrs = cognitoUser.UserAttributes || [];
+    const first = attrs.find(a => a.Name === "given_name")?.Value || "";
+    const last = attrs.find(a => a.Name === "family_name")?.Value || "";
     const name = `${first} ${last}`.trim();
     return name || createdBy;
   } catch {
@@ -212,8 +211,23 @@ export const handler = async (
       requirements: toStrArr(it.requirements),
       createdAt: s(it.createdAt),
       created_by: s(it.created_by) || s(it.createdBy),
-      creatorName: s(it.creatorName) || s(it.created_by) || s(it.createdBy),
+      creatorName: s(it.creatorName),
     }));
+
+    // Resolve creator names for records without creatorName (old records with userSub)
+    const creatorCache = new Map<string, string>();
+    for (const shift of allShifts) {
+      if (shift.creatorName) continue;
+      const raw = shift.created_by;
+      if (!raw || creatorCache.has(raw)) continue;
+      const name = await resolveCreatorName(raw);
+      creatorCache.set(raw, name);
+    }
+    for (const shift of allShifts) {
+      if (!shift.creatorName) {
+        shift.creatorName = creatorCache.get(shift.created_by) || shift.created_by;
+      }
+    }
 
     const jobMap = new Map<string, any>();
     allShifts.forEach((sh) => {

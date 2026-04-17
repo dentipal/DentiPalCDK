@@ -1,5 +1,6 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken } from "./utils";
@@ -8,6 +9,7 @@ import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- 1. Configuration ---
 const REGION: string = process.env.REGION || process.env.AWS_REGION || "us-east-1";
+const USER_POOL_ID = process.env.USER_POOL_ID || "";
 const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-ClinicProfiles";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
@@ -15,6 +17,7 @@ const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostin
 // Initialize V3 Client and Document Client
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
+const cognito = new CognitoIdentityProviderClient({ region: REGION });
 
 // --- 2. Helpers ---
 const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
@@ -126,8 +129,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
         const userInfo = extractUserFromBearerToken(authHeader);
         const userSub = userInfo.sub;
-        const userEmail = userInfo.email || "";
+        let userEmail = userInfo.email || "";
         const groups = userInfo.groups || [];
+
+        // 2b. Fetch user's first/last name from Cognito
+        let cognitoFirstName = "";
+        let cognitoLastName = "";
+        if (USER_POOL_ID && userSub) {
+            try {
+                const cognitoUser = await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: userSub }));
+                const attrs = cognitoUser.UserAttributes || [];
+                cognitoFirstName = attrs.find(a => a.Name === "given_name")?.Value || "";
+                cognitoLastName = attrs.find(a => a.Name === "family_name")?.Value || "";
+                if (!userEmail) userEmail = attrs.find(a => a.Name === "email")?.Value || "";
+            } catch { /* ignore */ }
+        }
 
         // 3. Group Authorization
         const normalizeGroup = (g: string) => g.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -344,7 +360,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 status: "active",
                 createdAt: timestamp,
                 updatedAt: timestamp,
-                created_by: userEmail || userSub,
+                created_by: `${cognitoFirstName} ${cognitoLastName}`.trim() || (userEmail && userEmail.includes("@") ? userEmail.split("@")[0].toLowerCase() : userEmail.toLowerCase()) || "Unknown",
                 // Address
                 addressLine1: clinicAddress.addressLine1,
                 addressLine2: clinicAddress.addressLine2,

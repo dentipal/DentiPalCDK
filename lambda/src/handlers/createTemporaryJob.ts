@@ -1,13 +1,15 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
-import { extractUserFromBearerToken } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
+const USER_POOL_ID = process.env.USER_POOL_ID || "";
 const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-Clinics";
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-ClinicProfiles";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
@@ -15,6 +17,7 @@ const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostin
 // --- Initialization ---
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
+const cognito = new CognitoIdentityProviderClient({ region: REGION });
 
 // --- Type Definitions ---
 
@@ -109,6 +112,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         } catch (authError: any) {
             console.error("Auth Error:", authError.message);
             return json(401, { error: authError.message || "Invalid access token" });
+        }
+
+        // 1b. Fetch user's first/last name from Cognito
+        let cognitoFirstName = "";
+        let cognitoLastName = "";
+        if (USER_POOL_ID && userSub) {
+            try {
+                const cognitoUser = await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: userSub }));
+                const attrs = cognitoUser.UserAttributes || [];
+                cognitoFirstName = attrs.find(a => a.Name === "given_name")?.Value || "";
+                cognitoLastName = attrs.find(a => a.Name === "family_name")?.Value || "";
+                if (!userEmail) userEmail = attrs.find(a => a.Name === "email")?.Value || "";
+            } catch { /* ignore */ }
         }
 
         // ---- Group Authorization ----
@@ -347,7 +363,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 status: "active",
                 createdAt: timestamp,
                 updatedAt: timestamp,
-                created_by: userEmail || userSub,
+                created_by: `${cognitoFirstName} ${cognitoLastName}`.trim() || (userEmail && userEmail.includes("@") ? userEmail.split("@")[0].toLowerCase() : userEmail.toLowerCase()) || "Unknown",
             };
 
             // Optional fields
@@ -367,20 +383,43 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }));
         });
 
-        await Promise.all(postJobsPromises);
+        const results = await Promise.allSettled(postJobsPromises);
+
+        const succeeded: string[] = [];
+        const failed: { clinicId: string; error: string }[] = [];
+        results.forEach((result, idx) => {
+            const clinicId = jobData.clinicIds[idx];
+            if (result.status === "fulfilled") {
+                succeeded.push(jobIds[idx]);
+            } else {
+                failed.push({ clinicId, error: result.reason?.message || "Unknown error" });
+            }
+        });
+
+        if (succeeded.length === 0) {
+            return json(500, {
+                error: "Internal Server Error",
+                message: "Failed to create any temporary job postings",
+                details: { failed },
+            });
+        }
 
         // 6. Response
-        return json(201, {
-            status: "success",
-            message: "Temporary job postings created successfully",
+        const statusCode = failed.length > 0 ? 207 : 201;
+        return json(statusCode, {
+            status: failed.length > 0 ? "partial_success" : "success",
+            message: failed.length > 0
+                ? `Created ${succeeded.length} of ${jobData.clinicIds.length} job postings`
+                : "Temporary job postings created successfully",
             data: {
-                jobIds,
+                jobIds: succeeded,
                 jobType: "temporary",
                 professionalRole: jobData.professional_role,
                 date: jobData.date,
                 hours: jobData.hours,
                 payType: payType,
                 rate: jobData.rate,
+                ...(failed.length > 0 && { failed }),
             },
             timestamp: timestamp
         });

@@ -1003,6 +1003,12 @@ export class DentiPalCDKStack extends cdk.Stack {
             billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
         });
+        // NOTE (audit 2026-04-17): `ConversationIdIndex` has the same PK+SK as the base
+        // table above (conversationId + messageId) and is never queried — it is pure
+        // WCU and storage cost, duplicating every write. It is kept here for now because
+        // removing it requires a deployment against a live production table; see the
+        // inbox audit report for guidance. When you're ready to drop it, comment out
+        // this block and run `cdk deploy`; the GSI will be removed without touching data.
         messagesTable.addGlobalSecondaryIndex({
             indexName: 'ConversationIdIndex',
             partitionKey: { name: 'conversationId', type: dynamodb.AttributeType.STRING },
@@ -1071,6 +1077,29 @@ export class DentiPalCDKStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
         });
 
+        // 18. DentiPal-JobPromotions (LinkedIn-style job promotion/boosting)
+        const jobPromotionsTable = new dynamodb.Table(this, 'JobPromotionsTable', {
+            tableName: 'DentiPal-V5-JobPromotions',
+            partitionKey: { name: 'jobId', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'promotionId', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+        // GSI for querying promotions by clinic user (my promotions dashboard)
+        jobPromotionsTable.addGlobalSecondaryIndex({
+            indexName: 'clinicUserSub-index',
+            partitionKey: { name: 'clinicUserSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+        // GSI for expiry cron job (find active promotions that have expired)
+        jobPromotionsTable.addGlobalSecondaryIndex({
+            indexName: 'status-expiresAt-index',
+            partitionKey: { name: 'status', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'expiresAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
 
         // Collect all tables for the main REST handler
         const allTables = [
@@ -1078,7 +1107,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             conversationsTable, feedbackTable, jobApplicationsTable, jobInvitationsTable,
             jobNegotiationsTable, jobPostingsTable, messagesTable, notificationsTable,
             otpVerificationTable, professionalProfilesTable, referralsTable, userAddressesTable,
-            userClinicAssignmentsTable
+            userClinicAssignmentsTable, jobPromotionsTable
         ];
 
         // ========================================================================
@@ -1178,6 +1207,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 REFERRALS_TABLE: referralsTable.tableName,
                 USER_ADDRESSES_TABLE: userAddressesTable.tableName,
                 USER_CLINIC_ASSIGNMENTS_TABLE: userClinicAssignmentsTable.tableName,
+                JOB_PROMOTIONS_TABLE: jobPromotionsTable.tableName,
 
                 // Stats/Alias mappings for code compatibility
                 CLINIC_JOBS_POSTED_TABLE: jobPostingsTable.tableName,
@@ -1322,6 +1352,8 @@ export class DentiPalCDKStack extends cdk.Stack {
             environment: {
                 REGION: this.region,
                 USER_POOL_ID: userPool.userPoolId,
+                CLIENT_ID: client.userPoolClientId,
+                USER_CLINIC_ASSIGNMENTS_TABLE: userClinicAssignmentsTable.tableName,
                 MESSAGES_TABLE: messagesTable.tableName, // DentiPal-Messages
                 CONNS_TABLE: connectionsTable.tableName,   // DentiPal-Connections
                 CONVOS_TABLE: conversationsTable.tableName, // DentiPal-Conversations
@@ -1329,9 +1361,10 @@ export class DentiPalCDKStack extends cdk.Stack {
                 PROFESSIONAL_PROFILES_TABLE: professionalProfilesTable.tableName, // for avatar lookup
                 CLINIC_PROFILES_TABLE: clinicProfilesTable.tableName,             // for avatar lookup
                 PROFILE_IMAGES_BUCKET: profileImagesBucket.bucketName,            // for presigned URLs
+                CLINIC_OFFICE_IMAGES_BUCKET: clinicOfficeImagesBucket.bucketName, // for clinic office image presigned URLs
             },
             timeout: cdk.Duration.seconds(30),
-            memorySize: 256,
+            memorySize: 512,
         });
 
         // --- WebSocket IAM Role Permissions ---
@@ -1345,8 +1378,12 @@ export class DentiPalCDKStack extends cdk.Stack {
         professionalProfilesTable.grantReadData(webSocketChatHandler);
         clinicProfilesTable.grantReadData(webSocketChatHandler);
 
+        // 1b². Read access on user-clinic assignments (multi-clinic authorization check)
+        userClinicAssignmentsTable.grantReadData(webSocketChatHandler);
+
         // 1c. S3 read access for presigning profile image URLs
         profileImagesBucket.grantRead(webSocketChatHandler);
+        clinicOfficeImagesBucket.grantRead(webSocketChatHandler);
 
         // 2. Cognito Permissions (AdminGetUser for display name lookup)
         webSocketChatHandler.addToRolePolicy(new iam.PolicyStatement({

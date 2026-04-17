@@ -209,6 +209,10 @@ interface ShiftDetails {
   role?: string;
   date?: string;
   rate?: number;
+  startTime?: string;
+  endTime?: string;
+  location?: string;
+  jobType?: string;
 }
 
 // Define the structure expected from EventBridge 'detail'
@@ -261,35 +265,46 @@ export const handler = async (event: EventBridgeEvent): Promise<{ statusCode: nu
     const role = shiftDetails.role || "Professional";
     const date = shiftDetails.date || "TBD";
     const rate = shiftDetails.rate ? `$${shiftDetails.rate}/hr` : "";
-    const extras = rate ? ` at ${rate}` : "";
+    const time = shiftDetails.startTime && shiftDetails.endTime
+      ? `${shiftDetails.startTime} - ${shiftDetails.endTime}`
+      : shiftDetails.startTime || "";
+    const location = shiftDetails.location || "";
+
+    // Build detail lines
+    const details: string[] = [];
+    details.push(`📋 Role: ${role}`);
+    details.push(`📅 Date: ${date}`);
+    if (time) details.push(`🕐 Time: ${time}`);
+    if (rate) details.push(`💰 Rate: ${rate}`);
+    if (location) details.push(`📍 Location: ${location}`);
 
     switch (eventType) {
       case "shift-applied":
         senderKey = `prof#${professionalSub}`;
         senderName = profName;
         fromClinic = false;
-        content = `Shift applied: ${role} on ${date}${extras}. Confirm?`;
+        content = `Shift Applied!\n${details.join("\n")}\n\nPlease confirm this application.`;
         break;
 
       case "invite-accepted":
         senderKey = `prof#${professionalSub}`;
         senderName = profName;
         fromClinic = false;
-        content = `Invite accepted: ${role} on ${date}${extras}.`;
+        content = `Invite Accepted!\n${details.join("\n")}`;
         break;
 
       case "shift-cancelled":
         senderKey = `clinic#${clinicId}`;
         senderName = clinicName;
         fromClinic = true;
-        content = `Shift cancelled: ${role} on ${date}.`;
+        content = `Shift Cancelled\n${details.join("\n")}`;
         break;
 
       case "shift-scheduled":
         senderKey = `clinic#${clinicId}`;
         senderName = clinicName;
         fromClinic = true;
-        content = `Shift scheduled: ${role} on ${date}${extras}. Questions? Reply here!`;
+        content = `Shift Scheduled! ✅\n${details.join("\n")}\n\nQuestions? Reply here!`;
         break;
 
       default:

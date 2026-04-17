@@ -1,8 +1,8 @@
 import {
     DynamoDBClient,
-    GetItemCommand,
+    QueryCommand,
+    QueryCommandInput,
     UpdateItemCommand,
-    GetItemCommandInput,
     UpdateItemCommandInput,
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
@@ -72,30 +72,35 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
                         continue; 
                     }
 
-                    // 2. Query Referrals Table to find who referred this professional
-                    // Assuming the 'REFERRALS_TABLE' stores the referral link: PK = friendEmail (or sub)
-                    const referralQueryInput: GetItemCommandInput = {
+                    // 2. Query Referrals Table GSI to find who referred this professional
+                    // Table PK: referralId, GSI: ReferredUserSubIndex (referredUserSub)
+                    const referralQueryInput: QueryCommandInput = {
                         TableName: process.env.REFERRALS_TABLE,
-                        Key: { friendEmail: { S: professionalUserSub } }
+                        IndexName: "ReferredUserSubIndex",
+                        KeyConditionExpression: "referredUserSub = :sub",
+                        ExpressionAttributeValues: {
+                            ":sub": { S: professionalUserSub },
+                        },
+                        Limit: 1,
                     };
 
-                    const referralQueryCommand = new GetItemCommand(referralQueryInput);
-                    const referralResult = await dynamodb.send(referralQueryCommand);
+                    const referralResult = await dynamodb.send(new QueryCommand(referralQueryInput));
 
-                    if (!referralResult.Item || !referralResult.Item.referrerUserSub?.S) {
+                    const referralItem = referralResult.Items?.[0];
+                    if (!referralItem || !referralItem.referrerUserSub?.S || !referralItem.referralId?.S) {
                         console.log("No referral record found for this user, skipping bonus award.");
                         continue;
                     }
 
                     // 3. Get referrer info
-                    const referrerUserSub: string = referralResult.Item.referrerUserSub.S;
-                    const referralBonus: number = 50; 
+                    const referrerUserSub: string = referralItem.referrerUserSub.S;
+                    const referralId: string = referralItem.referralId.S;
+                    const referralBonus: number = 50;
 
-                    // 4. Update Bonus for the Referrer
-                    // This assumes the REFERRALS_TABLE (or a shared table) also holds a record for the referrer's balance
+                    // 4. Update Bonus on the referral record using actual table PK (referralId)
                     const bonusUpdateInput: UpdateItemCommandInput = {
                         TableName: process.env.REFERRALS_TABLE,
-                        Key: { referrerUserSub: { S: referrerUserSub } },
+                        Key: { referralId: { S: referralId } },
                         UpdateExpression: "SET referralBonus = if_not_exists(referralBonus, :start) + :bonusAmount",
                         ExpressionAttributeValues: {
                             ":bonusAmount": { N: referralBonus.toString() },
@@ -103,9 +108,8 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
                         } as Record<string, AttributeValue>
                     };
 
-                    const bonusUpdateCommand = new UpdateItemCommand(bonusUpdateInput);
-                    await dynamodb.send(bonusUpdateCommand);
-                    console.log(`Bonus awarded to referrer: ${referrerUserSub}`);
+                    await dynamodb.send(new UpdateItemCommand(bonusUpdateInput));
+                    console.log(`Bonus awarded to referrer: ${referrerUserSub} on referral: ${referralId}`);
                 }
             } catch (recordError) {
                 // Log individual record error but continue processing others in the batch

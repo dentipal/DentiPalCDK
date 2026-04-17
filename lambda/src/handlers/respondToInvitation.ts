@@ -303,13 +303,13 @@ export const handler = async (
       }
 
       // --- Publish EventBridge event to trigger inbox conversation ---
-      try {
-        const shiftDetails = {
-          date: job.date?.S || job.shiftDate?.S || "TBD",
-          role: job.role?.S || job.professionalRole?.S || job.jobTitle?.S || "Professional",
-          rate: job.rate?.N ? Number(job.rate.N) : (job.hourlyRate?.N ? Number(job.hourlyRate.N) : (job.proposedRate?.N ? Number(job.proposedRate.N) : 0)),
-        };
+      const shiftDetails = {
+        date: job.date?.S || job.shiftDate?.S || "TBD",
+        role: job.role?.S || job.professionalRole?.S || job.professional_role?.S || job.jobTitle?.S || "Professional",
+        rate: job.rate?.N ? Number(job.rate.N) : (job.hourlyRate?.N ? Number(job.hourlyRate.N) : (job.proposedRate?.N ? Number(job.proposedRate.N) : 0)),
+      };
 
+      try {
         await eb.send(new PutEventsCommand({
           Entries: [{
             Source: "denti-pal.api",
@@ -324,7 +324,10 @@ export const handler = async (
         }));
         console.log("   -> EventBridge ShiftEvent (invite-accepted) published for inbox conversation.");
       } catch (ebError: any) {
-        console.error("   -> FAILED to publish EventBridge event (inbox conversation not created):", ebError.message);
+        console.error("   -> FAILED to publish EventBridge event:", ebError.message);
+        // Re-throw — if the inbox conversation can't be created, the clinic can't communicate with the hired professional.
+        // The invitation acceptance should be retried rather than silently losing the conversation.
+        throw ebError;
       }
     } else if (responseData.response === "negotiating") {
       // B. Negotiating Logic

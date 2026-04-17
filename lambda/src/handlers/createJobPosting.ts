@@ -112,6 +112,11 @@ const validateTemporaryJob = (jobData: TemporaryJobData): string | null => {
     if (isNaN(jobDate.getTime())) {
         return "Invalid date format. Use ISO date string.";
     }
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (jobDate < today) {
+        return "Job date must be in the future";
+    }
     if (jobData.hours < 1 || jobData.hours > 12) {
         return "Hours must be between 1 and 12";
     }
@@ -347,7 +352,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             status: jobData.status || 'active',
             createdAt: timestamp,
             updatedAt: timestamp,
-            created_by: `${cognitoFirstName} ${cognitoLastName}`.trim() || (userEmail && userEmail.includes("@") ? userEmail.split("@")[0] : userEmail) || "Unknown",
+            created_by: `${cognitoFirstName} ${cognitoLastName}`.trim() || (userEmail && userEmail.includes("@") ? userEmail.split("@")[0].toLowerCase() : userEmail.toLowerCase()) || "Unknown",
             creatorName: `${clinicProfile.primary_contact_first_name || ""} ${clinicProfile.primary_contact_last_name || ""}`.trim() || userEmail || userSub,
             // Address details
             addressLine1: clinicAddress.addressLine1,
