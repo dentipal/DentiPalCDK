@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { geocodeAddressParts } from "./geo";
 
 // --- 1. Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -314,13 +315,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const clinicAddress: ClinicAddress = {
             addressLine1: cItem.addressLine1,
-            addressLine2: cItem.addressLine2 ?? "", 
-            addressLine3: cItem.addressLine3 ?? "", 
+            addressLine2: cItem.addressLine2 ?? "",
+            addressLine3: cItem.addressLine3 ?? "",
             fullAddress: `${cItem.addressLine1} ${cItem.addressLine2 || ''} ${cItem.addressLine3 || ''}`.trim(),
             city: cItem.city,
             state: cItem.state,
             pincode: cItem.pincode
         };
+
+        // Geocode the clinic address — best-effort, non-fatal
+        const coords = await geocodeAddressParts({
+            addressLine1: clinicAddress.addressLine1,
+            city: clinicAddress.city,
+            state: clinicAddress.state,
+            pincode: clinicAddress.pincode,
+            country: cItem.country || "USA",
+        });
+        if (coords) {
+            console.log(`[createJobPosting] Geocoded address → (${coords.lat}, ${coords.lng})`);
+        } else {
+            console.warn(`[createJobPosting] Could not geocode address: ${clinicAddress.fullAddress}`);
+        }
 
         // 7. Fetch profile details
         // Note: We use composite key clinicId + userSub (owner's sub) to find the profile
@@ -369,6 +384,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             city: clinicAddress.city,
             state: clinicAddress.state,
             pincode: clinicAddress.pincode,
+            // Geocoded coordinates (null if geocoding failed — distance filter skips such jobs)
+            ...(coords && { lat: coords.lat, lng: coords.lng }),
             // Profile details
             bookingOutPeriod: profileDetails.bookingOutPeriod,
             clinicSoftware: profileDetails.clinicSoftware,

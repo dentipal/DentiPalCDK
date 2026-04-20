@@ -29,6 +29,17 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   body: JSON.stringify(bodyObj),
 });
 
+function isAuthError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : "";
+  return (
+    msg === "Authorization header missing" ||
+    msg.startsWith("Invalid authorization header") ||
+    msg === "Invalid access token format" ||
+    msg === "Failed to decode access token" ||
+    msg === "User sub not found in token claims"
+  );
+}
+
 // --- Type Definitions ---
 
 /* ------------------------------------------------------------------------- */
@@ -59,7 +70,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     if (!isAllowed) {
       return json(403, {
-        error: "Access denied: insufficient permissions to reject applications. Requires one of: root, clinicadmin, clinicmanager."
+        status: "error",
+        statusCode: 403,
+        error: "Forbidden",
+        message: "Insufficient permissions to reject applications",
       });
     }
 
@@ -81,17 +95,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     if (!clinicId || !jobId) {
       return json(400, {
-        error: "Both clinicId and jobId are required in the path (e.g., /123/reject/456)"
+        status: "error",
+        statusCode: 400,
+        error: "Bad Request",
+        message: "Both clinicId and jobId are required in the path (e.g., /123/reject/456)",
       });
     }
 
     // 3. Extract and Validate Body Parameter (professionalUserSub)
-    const body: { professionalUserSub?: string } = JSON.parse(event.body || "{}");
+    let body: { professionalUserSub?: string } = {};
+    if (event.body) {
+      let raw = event.body;
+      if (event.isBase64Encoded) raw = Buffer.from(raw, "base64").toString("utf-8");
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return json(400, {
+          status: "error",
+          statusCode: 400,
+          error: "Bad Request",
+          message: "Invalid JSON format in body",
+        });
+      }
+    }
     const professionalUserSub: string | undefined = body.professionalUserSub;
 
     if (!professionalUserSub) {
       return json(400, {
-        error: "professionalUserSub is required in the request body"
+        status: "error",
+        statusCode: 400,
+        error: "Bad Request",
+        message: "professionalUserSub is required in the request body",
       });
     }
 
@@ -115,29 +149,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // 5. Success Response
     return json(200, {
-      message: `Job application for job ${jobId} by professional ${professionalUserSub} has been rejected successfully`
+      status: "success",
+      statusCode: 200,
+      message: "Job application rejected successfully",
+      data: { jobId, professionalUserSub },
+      timestamp: new Date().toISOString(),
     });
 
-  } catch (error: any) {
+  } catch (error) {
     console.error("❌ Error rejecting job application:", error);
 
-    // ✅ Check for Auth errors and return 401
-    if (error.message === "Authorization header missing" || 
-        error.message?.startsWith("Invalid authorization header") ||
-        error.message === "Invalid access token format" ||
-        error.message === "Failed to decode access token" ||
-        error.message === "User sub not found in token claims") {
-        
-        return json(401, {
-            error: "Unauthorized",
-            details: error.message
-        });
+    if (isAuthError(error)) {
+      return json(401, {
+        status: "error",
+        statusCode: 401,
+        error: "Unauthorized",
+        message: "Authentication required",
+      });
     }
 
-    // 6. Error Response
     return json(500, {
-      error: "Failed to reject job application. Please try again.",
-      details: error.message || "An unknown error occurred"
+      status: "error",
+      statusCode: 500,
+      error: "Internal Server Error",
+      message: "Failed to reject job application",
     });
   }
 };

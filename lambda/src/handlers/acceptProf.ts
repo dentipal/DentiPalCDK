@@ -27,6 +27,17 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     body: JSON.stringify(bodyObj)
 });
 
+function isAuthError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : "";
+    return (
+        msg === "Authorization header missing" ||
+        msg.startsWith("Invalid authorization header") ||
+        msg === "Invalid access token format" ||
+        msg === "Failed to decode access token" ||
+        msg === "User sub not found in token claims"
+    );
+}
+
 function getClinicIdFromEvent(event: any): string | null {
     const claims = event?.requestContext?.authorizer?.claims || event?.requestContext?.authorizer?.jwt?.claims;
     if (claims && typeof claims["custom:clinicId"] === "string") {
@@ -61,17 +72,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const authHeader = event.headers?.Authorization || event.headers?.authorization;
             const userInfo = extractUserFromBearerToken(authHeader);
             clinicUserSub = userInfo.sub;
-            
+
             const groups: string[] = userInfo.groups || [];
             const ALLOWED = new Set(["root", "clinicadmin", "clinicmanager"]);
             const isAllowed = groups.some((g) => ALLOWED.has(g.toLowerCase()));
 
             if (!isAllowed) {
-                return json(403, { error: "Access denied: Unauthorized group." });
+                return json(403, { status: "error", statusCode: 403, error: "Forbidden", message: "Access denied: insufficient permissions" });
             }
-        } catch (authError: any) {
-            console.error("Authentication failed:", authError.message);
-            return json(401, { error: authError.message || "Invalid access token" });
+        } catch (authError) {
+            console.error("Authentication failed:", authError instanceof Error ? authError.message : authError);
+            return json(401, { status: "error", statusCode: 401, error: "Unauthorized", message: "Authentication required" });
         }
 
         // --- Step 2: Extract Job ID ---
@@ -243,8 +254,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             ...(inboxMessageSent ? {} : { warning: "clinicId not found — inbox conversation was not created. Provide clinicId in the request body or ensure it exists in the job application." }),
         });
 
-    } catch (error: any) {
+    } catch (error) {
         console.error("Error in handler:", error);
-        return json(500, { error: error.message || "Internal server error" });
+        if (isAuthError(error)) {
+            return json(401, { status: "error", statusCode: 401, error: "Unauthorized", message: "Authentication required" });
+        }
+        return json(500, { status: "error", statusCode: 500, error: "Internal Server Error", message: "Failed to accept applicant" });
     }
 };

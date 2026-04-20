@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, canWriteClinic, isRoot } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { geocodeAddressParts } from "./geo";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -503,6 +504,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     if (jobData.vacation_days !== undefined) item.vacation_days = jobData.vacation_days;
                     if (jobData.work_schedule) item.work_schedule = jobData.work_schedule;
                     if (jobData.start_date) item.start_date = jobData.start_date;
+                }
+
+                // Geocode the clinic address — best-effort, non-fatal
+                const coords = await geocodeAddressParts({
+                    addressLine1,
+                    city,
+                    state,
+                    pincode,
+                    country: "USA",
+                });
+                if (coords) {
+                    console.log(`[createPermanentJob] Geocoded ${city}, ${state} to (${coords.lat}, ${coords.lng})`);
+                    item.lat = coords.lat;
+                    item.lng = coords.lng;
+                } else {
+                    console.warn(`[createPermanentJob] Could not geocode: ${addressLine1}, ${city}, ${state} ${pincode}`);
                 }
 
                 // Insert the job into DynamoDB

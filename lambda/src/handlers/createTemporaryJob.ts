@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { geocodeAddressParts } from "./geo";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -384,6 +385,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
             if (jobData.requirements && jobData.requirements.length > 0) {
                 item.requirements = new Set(jobData.requirements); // Sets map to SS
+            }
+
+            // Geocode the clinic address — best-effort, non-fatal
+            const coords = await geocodeAddressParts({
+                addressLine1,
+                city,
+                state,
+                pincode,
+                country: "USA",
+            });
+            if (coords) {
+                console.log(`[createTemporaryJob] Geocoded ${city}, ${state} to (${coords.lat}, ${coords.lng})`);
+                item.lat = coords.lat;
+                item.lng = coords.lng;
+            } else {
+                console.warn(`[createTemporaryJob] Could not geocode: ${addressLine1}, ${city}, ${state} ${pincode}`);
             }
 
             // Save

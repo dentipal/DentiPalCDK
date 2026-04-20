@@ -12,6 +12,7 @@ import { extractUserFromBearerToken } from "./utils";
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { geocodeAddressParts } from "./geo";
 
 // --- 1. AWS and Environment Setup ---
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -113,9 +114,38 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (updatedFields.length === 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, 
+                headers: CORS_HEADERS,
                 body: JSON.stringify({ error: 'No valid fields provided for update after filtering' })
             };
+        }
+
+        // --- Re-geocode if any address component changed ---
+        const addressFieldsChanged = updatedFields.some((f) =>
+            ["addressLine1", "city", "state", "pincode", "country"].includes(f)
+        );
+        if (addressFieldsChanged) {
+            // Merge existing values with incoming updates to build the final address string
+            const existing = existingAddress.Item!;
+            const getStr = (field: string): string =>
+                (updateFields as any)[field] ?? existing[field]?.S ?? "";
+
+            const coords = await geocodeAddressParts({
+                addressLine1: getStr("addressLine1"),
+                city: getStr("city"),
+                state: getStr("state"),
+                pincode: getStr("pincode"),
+                country: getStr("country") || "USA",
+            });
+            if (coords) {
+                console.log(`[updateUserAddress] Re-geocoded → (${coords.lat}, ${coords.lng})`);
+                updatedFields.push("lat", "lng");
+                expressionAttributeNames["#lat"] = "lat";
+                expressionAttributeNames["#lng"] = "lng";
+                expressionAttributeValues[":lat"] = { N: String(coords.lat) };
+                expressionAttributeValues[":lng"] = { N: String(coords.lng) };
+            } else {
+                console.warn(`[updateUserAddress] Could not geocode updated address`);
+            }
         }
 
         // --- Step 3: Build update expression ---
@@ -145,8 +175,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (result.Attributes) {
              for (const key in result.Attributes) {
                  const val = result.Attributes[key];
-                 if (val.S) unmarshalledAttributes[key] = val.S;
-                 if (val.BOOL !== undefined) unmarshalledAttributes[key] = val.BOOL;
+                 if (val.S !== undefined) unmarshalledAttributes[key] = val.S;
+                 else if (val.N !== undefined) unmarshalledAttributes[key] = Number(val.N);
+                 else if (val.BOOL !== undefined) unmarshalledAttributes[key] = val.BOOL;
+                 else if (val.SS) unmarshalledAttributes[key] = val.SS;
+                 else if (val.L) unmarshalledAttributes[key] = val.L;
+                 else if (val.M) unmarshalledAttributes[key] = val.M;
              }
         }
 

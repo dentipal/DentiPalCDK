@@ -664,6 +664,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as location from 'aws-cdk-lib/aws-location';
 import * as path from 'path';
 
 export class DentiPalCDKStack extends cdk.Stack {
@@ -1222,7 +1223,9 @@ export class DentiPalCDKStack extends cdk.Stack {
                 CLINIC_OFFICE_IMAGES_BUCKET: clinicOfficeImagesBucket.bucketName,
             },
             timeout: cdk.Duration.seconds(60),
-            memorySize: 256,
+            // Lambda CPU scales with memory. The monolith init (imports every handler + AWS SDK v3)
+            // was running ~1.1s cold start on 256 MB; 1024 MB typically halves both cold init and warm duration.
+            memorySize: 1024,
         });
 
         // Grant the Lambda access to the S3 buckets and expose bucket names as env vars
@@ -1293,6 +1296,23 @@ export class DentiPalCDKStack extends cdk.Stack {
                 `arn:aws:dynamodb:${this.region}:${this.account}:table/DentiPal-JobPostings`,
             ],
         }));
+
+        // ─── Amazon Location Service: global geocoding Place Index ───
+        const placeIndex = new location.CfnPlaceIndex(this, 'DentiPalPlaceIndex', {
+            indexName: 'DentiPalGeocoder',
+            dataSource: 'Here',
+            pricingPlan: 'RequestBasedUsage',
+            description: 'Geocoding for DentiPal addresses (jobs, professionals, clinics)',
+        });
+
+        // Grant Lambda permission to search the Place Index
+        lambdaFunction.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['geo:SearchPlaceIndexForText', 'geo:SearchPlaceIndexForPosition'],
+            resources: [placeIndex.attrArn],
+        }));
+
+        // Expose the index name to Lambda code via env var
+        lambdaFunction.addEnvironment('PLACE_INDEX_NAME', 'DentiPalGeocoder');
         // ========================================================================
         // 5. REST API Gateway
         //    - Configuration updated to include CloudWatch Logging Role and Settings

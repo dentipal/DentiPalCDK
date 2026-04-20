@@ -184,10 +184,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const negotiations = await fetchNegotiationsForApplication(appId);
         appObj.negotiations = negotiations.map(itemToObject);
 
-        if (appStatus === "PENDING") {
+        const normalizedStatus = appStatus.toLowerCase();
+        if (normalizedStatus === "pending") {
           aggregated[cId].pendingApplications.push(appObj);
           aggregated[cId].totalPending += 1;
-        } else if (appStatus === "NEGOTIATE") {
+        } else if (normalizedStatus === "negotiate" || normalizedStatus === "negotiating") {
           aggregated[cId].negotiatingApplications.push(appObj);
           aggregated[cId].totalNegotiating += 1;
         }
