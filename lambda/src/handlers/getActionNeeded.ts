@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { DynamoDBClient, QueryCommand, ScanCommand } from "@aws-sdk/client-dynamodb";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canAccessClinic, isRoot, UserInfo } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
@@ -98,16 +98,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   if (method === "OPTIONS") return { statusCode: 204, headers: CORS_HEADERS, body: "" };
   if (method !== "GET") return json(405, { error: "Method not allowed" });
 
+  let userInfo: UserInfo;
   try {
     const authHeader = event.headers?.Authorization || event.headers?.authorization;
     if (!authHeader) return json(401, { error: "Unauthorized", reason: "Missing Authorization header" });
-    extractUserFromBearerToken(authHeader);
+    userInfo = extractUserFromBearerToken(authHeader);
   } catch (e: any) {
     return json(401, { error: "Unauthorized", reason: e?.message || "Invalid token" });
   }
 
+  const requesterSub = userInfo?.sub || "";
+  const groups: string[] = Array.isArray(userInfo?.groups) ? userInfo.groups : [];
+
   const clinicId = event.queryStringParameters?.clinicId || event.pathParameters?.clinicId || extractClinicIdFromPath((event as any).rawPath || event.path || "");
   const aggregateByClinic = event.queryStringParameters?.aggregate === "true";
+
+  // Authorization: scoped reads require clinic membership; cross-clinic aggregation is Root only.
+  if (clinicId) {
+    if (!(await canAccessClinic(requesterSub, groups, clinicId))) {
+      console.warn(`[getActionNeeded] Access denied: sub=${requesterSub} clinicId=${clinicId}`);
+      return json(403, { error: "Forbidden: you are not a member of this clinic" });
+    }
+  } else if (aggregateByClinic && !isRoot(groups)) {
+    return json(403, { error: "Forbidden: aggregate view is Root-only" });
+  }
 
   const statusesParam = event.queryStringParameters?.statuses;
   const statuses = (statusesParam ? statusesParam.split(",") : DEFAULT_ACTION_NEEDED_STATUSES)
