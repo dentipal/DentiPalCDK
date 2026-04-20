@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dyn
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
@@ -158,6 +158,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 4. Parse Body
+        // (Per-clinic RBAC gate applied after body parse once clinicIds are known — see below.)
         const jobData: JobData = JSON.parse(event.body || "{}");
 
         // 5. Required fields validation
@@ -180,6 +181,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     requiredFields: ["clinicIds", "professional_role", "dates", "shift_speciality", "hours_per_day", "total_days", "start_time", "end_time"]
                 }
             });
+        }
+
+        // 5b. Per-clinic RBAC gate — requester must be a member of every clinicId they're posting to.
+        //     Group check above ensures role is Root/ClinicAdmin/ClinicManager; this loop blocks
+        //     cross-clinic escalation (e.g. manager at Clinic A posting for Clinic B).
+        for (const cid of jobData.clinicIds) {
+            if (!(await canWriteClinic(userSub, groups, cid, "manageJobs"))) {
+                console.warn(`[createMultiDayConsulting] Write denied: sub=${userSub} clinicId=${cid}`);
+                return json(403, { error: `Forbidden: you cannot create jobs for clinic ${cid}` });
+            }
         }
 
         // Support multi-role: accept professional_roles (array) or professional_role (string)

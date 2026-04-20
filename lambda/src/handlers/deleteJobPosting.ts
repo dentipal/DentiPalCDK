@@ -8,7 +8,7 @@ import {
     BatchWriteCommandInput
 } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Configuration ---
@@ -51,14 +51,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     try {
         // 2. Authentication (Access Token)
         let userSub: string;
+        let userGroups: string[] = [];
         try {
             const authHeader = event.headers?.Authorization || event.headers?.authorization;
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
+            userGroups = userInfo.groups || [];
         } catch (authError: any) {
-            return json(401, { 
-                error: "Unauthorized", 
-                message: authError.message || "Invalid access token" 
+            return json(401, {
+                error: "Unauthorized",
+                message: authError.message || "Invalid access token"
             });
         }
 
@@ -82,12 +84,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const clinicUserSub = job.clinicUserSub;
         const currentStatus = job.status || 'active';
 
-        // 5. Security check
+        // 5. Security check (existing: creator-only)
         if (userSub !== clinicUserSub) {
-            return json(403, { 
-                error: "Forbidden", 
+            return json(403, {
+                error: "Forbidden",
                 message: "Only job owner can delete this job",
-                details: { requiredOwner: clinicUserSub } 
+                details: { requiredOwner: clinicUserSub }
+            });
+        }
+
+        // Additional role gate: ensure requester still holds a write role for this clinic.
+        // Blocks a creator whose role was later downgraded to ClinicViewer.
+        const jobClinicId = job.clinicId;
+        if (jobClinicId && !(await canWriteClinic(userSub, userGroups, jobClinicId, "manageJobs"))) {
+            return json(403, {
+                error: "Forbidden",
+                message: "Your current role cannot delete jobs for this clinic"
             });
         }
 

@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, UpdateCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, isRoot, canWriteClinic } from "./utils";
 
 const REGION: string = process.env.REGION || "us-east-1";
 const CLINIC_PROFILES_TABLE: string = process.env.CLINIC_PROFILES_TABLE!; 
@@ -131,9 +131,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const dbUserSub = existingProfile.userSub;
 
         // --- 2. AUTH CHECK ---
-        const isRootUser = groups.includes("Root");
-        if (loggedInUserSub !== dbUserSub && !isRootUser) {
-            return json(403, { error: "Access denied." });
+        // Root bypasses; anyone else must hold a write role (Admin/Manager) AND be a member
+        // of this clinic. Previously only the profile creator could edit, which blocked
+        // Admin/Manager from updating profiles they didn't originally create.
+        const isRootUser = isRoot(groups);
+        if (!isRootUser) {
+            const allowed = await canWriteClinic(loggedInUserSub, groups, clinicIdFromPath, "manageClinic");
+            if (!allowed) {
+                return json(403, { error: "Access denied." });
+            }
         }
 
         // --- 3. TRANSFORM & UPDATE ---

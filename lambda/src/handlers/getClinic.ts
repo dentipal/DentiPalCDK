@@ -5,7 +5,7 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { isRoot, hasClinicAccess, extractUserFromBearerToken } from "./utils"; 
+import { isRoot, canAccessClinic, extractUserFromBearerToken } from "./utils";
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
@@ -95,8 +95,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 3. Access Control Check
-        // Root users can access any clinic, others need specific access checked via utility function.
-        if (!isRoot(groups) && !(await hasClinicAccess(userSub, clinicId))) {
+        // Root users can access any clinic; others must be a member of this clinic
+        // (Clinics.AssociatedUsers or createdBy), checked via canAccessClinic.
+        if (!(await canAccessClinic(userSub, groups, clinicId))) {
             return { 
                 statusCode: 403, 
                 headers: CORS_HEADERS,

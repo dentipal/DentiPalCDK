@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dyn
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
@@ -223,6 +223,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 4. Validate common required fields
         if (!jobData.job_type || !jobData.professional_role || !jobData.shift_speciality || !jobData.clinicId) {
             return json(400, { error: "Required fields: clinicId, job_type, professional_role, shift_speciality" });
+        }
+
+        // 4b. Per-clinic RBAC gate — requester must belong to this clinic and hold a write role
+        //     (Root / ClinicAdmin / ClinicManager; ClinicViewer is blocked by canWriteClinic).
+        if (!(await canWriteClinic(userSub, userInfo.groups || [], jobData.clinicId, "manageJobs"))) {
+            console.warn(`[createJobPosting] Write denied: sub=${userSub} clinicId=${jobData.clinicId}`);
+            return json(403, { error: "Forbidden: you cannot create jobs for this clinic" });
         }
 
         // Validate job type

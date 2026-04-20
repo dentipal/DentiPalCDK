@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, UpdateCommand, UpdateCommandInput }
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -90,6 +90,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
         const userInfo = extractUserFromBearerToken(authHeader);
         const userSub = userInfo.sub;
+        const userGroups = userInfo.groups || [];
 
         // 🔍 JOB ID EXTRACTION (Fixed)
         // 1. Try direct path parameter (Standard API Gateway)
@@ -163,13 +164,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
              });
         }
 
-        // Security check: Only clinic owner can update their jobs
+        // Security check: Only clinic owner can update their jobs (existing composite-key gate).
         if (userSub !== clinicUserSub) {
             return json(403, {
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Access denied",
                 details: { reason: "Only job creator can update" },
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        // Additional role gate: ensure requester still holds a write role for this clinic.
+        // Blocks a user whose role was downgraded to ClinicViewer from editing past creations.
+        const jobClinicId = (existingItem as any).clinicId;
+        if (jobClinicId && !(await canWriteClinic(userSub, userGroups, jobClinicId, "manageJobs"))) {
+            return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Access denied",
+                details: { reason: "Your current role cannot update jobs for this clinic" },
                 timestamp: new Date().toISOString()
             });
         }

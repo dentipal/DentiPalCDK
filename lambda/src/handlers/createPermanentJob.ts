@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dyn
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
-import { extractUserFromBearerToken, hasClinicAccess, isRoot } from "./utils";
+import { extractUserFromBearerToken, canWriteClinic, isRoot } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
@@ -367,20 +367,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        // ✅ FIX: Verify user has access to all clinics BEFORE creating jobs
+        // Verify user has membership + write role for every clinic they're posting to.
+        // Root bypasses (handled inside canWriteClinic). ClinicViewer is blocked (read-only role).
         console.log('=== CLINIC ACCESS VERIFICATION START ===');
         const isRootUser = isRoot(userGroups);
-        
+
         if (!isRootUser) {
-            // Non-root users must have access to each clinic
             for (const clinicId of jobData.clinicIds) {
-                const hasAccess = await hasClinicAccess(userSub, clinicId);
+                const hasAccess = await canWriteClinic(userSub, userGroups, clinicId, "manageJobs");
                 if (!hasAccess) {
-                    console.warn(`User ${userSub} denied access to clinic ${clinicId}`);
+                    console.warn(`User ${userSub} denied write access to clinic ${clinicId}`);
                     return json(403, {
                         error: "Forbidden",
                         message: `Access denied to clinic ${clinicId}`,
-                        details: { 
+                        details: {
                             reason: "You can only create jobs for clinics you manage",
                             deniedClinicId: clinicId
                         }

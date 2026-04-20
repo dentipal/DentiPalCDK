@@ -7,7 +7,7 @@ import {
     DeleteCommand 
 } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils"; 
+import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Configuration ---
@@ -36,10 +36,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     try {
         // 1. Authentication
         let userSub: string;
+        let userGroups: string[] = [];
         try {
             const authHeader = event.headers?.Authorization || event.headers?.authorization;
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
+            userGroups = userInfo.groups || [];
         } catch (authError: any) {
             return json(401, { error: authError.message || "Invalid access token" });
         }
@@ -76,6 +78,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Not Found",
                 message: "Temporary job not found",
                 details: { jobId: jobId }
+            });
+        }
+
+        // 3b. Additional role gate: ensure requester still holds a write role for this clinic.
+        //     Blocks a creator whose role was later downgraded to ClinicViewer.
+        const jobClinicId = (job as any).clinicId;
+        if (jobClinicId && !(await canWriteClinic(userSub, userGroups, jobClinicId, "manageJobs"))) {
+            return json(403, {
+                error: "Forbidden",
+                message: "Your current role cannot delete jobs for this clinic"
             });
         }
 

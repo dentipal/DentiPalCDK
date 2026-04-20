@@ -8,7 +8,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 // ✅ UPDATE: Added extractUserFromBearerToken
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, isRoot } from "./utils";
 
 // --- Type Definitions ---
 
@@ -95,9 +95,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(401, { error: "Missing clinicId or userSub" });
         }
 
-        // Step 3: Verify user is clinic or Root
-        const isClinicUser = userType.toLowerCase() === "clinic" || groups.includes("clinic");
-        const isRootUser = groups.includes("Root");
+        // Step 3: Verify user is clinic or Root (case-insensitive)
+        const isClinicUser = userType.toLowerCase() === "clinic" || groups.some(g => g?.toLowerCase() === "clinic");
+        const isRootUser = isRoot(groups);
 
         if (!isClinicUser && !isRootUser) {
             console.warn("🚫 Unauthorized userType for profile update:", userType);

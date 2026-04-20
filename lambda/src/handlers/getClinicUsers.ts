@@ -12,7 +12,7 @@ import {
 } from "aws-lambda";
 
 // IMPORTANT: Use .js because Lambda runs JS, not TS
-import { extractUserFromBearerToken } from "./utils.js";
+import { extractUserFromBearerToken, canAccessClinic } from "./utils.js";
 // Import shared CORS headers
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
@@ -70,9 +70,13 @@ export const handler = async (
 
   try {
     // Validate Auth Token - Extract access token
+    let requesterSub = "";
+    let requesterGroups: string[] = [];
     try {
       const authHeader = event.headers?.Authorization || event.headers?.authorization;
-      extractUserFromBearerToken(authHeader);
+      const userInfo = extractUserFromBearerToken(authHeader);
+      requesterSub = userInfo.sub;
+      requesterGroups = userInfo.groups || [];
     } catch (authError: any) {
       return json(401, { error: authError.message || "Invalid access token" });
     }
@@ -84,6 +88,12 @@ export const handler = async (
       return json(400, {
         error: "clinicId is required in the path (/clinics/{clinicId}/users)",
       });
+    }
+
+    // Membership gate — only clinic members (or Root) may list this clinic's users.
+    // Previously auth-only: any logged-in user could list any clinic's roster.
+    if (!(await canAccessClinic(requesterSub, requesterGroups, clinicId))) {
+      return json(403, { error: "Forbidden: you are not a member of this clinic" });
     }
 
     // Query DynamoDB

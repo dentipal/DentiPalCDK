@@ -1,7 +1,7 @@
 import { DynamoDBClient, UpdateItemCommand, AttributeValue } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Added extractUserFromBearerToken
-import { hasClinicAccess, buildAddress, AccessLevel, extractUserFromBearerToken } from "./utils"; 
+import { canAccessClinic, buildAddress, extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
@@ -43,8 +43,9 @@ const getMethod = (e: APIGatewayProxyEvent): string =>
 /** Normalizes a group string for comparison (lowercase, remove non-alphanumeric) */
 const normalize = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, "");
 
-/** Set of normalized group names allowed to perform updates */
-const ALLOWED_UPDATERS: ReadonlySet<string> = new Set(["root", "clinicadmin"]);
+/** Set of normalized group names allowed to perform updates. ClinicManager included
+ *  per the capability matrix: manager can edit clinic info (same as admin) but not manage users. */
+const ALLOWED_UPDATERS: ReadonlySet<string> = new Set(["root", "clinicadmin", "clinicmanager"]);
 
 /** ----------------------------------------------------------------------- */
 
@@ -75,7 +76,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Access denied to update clinics",
-                details: { requiredGroups: ["root", "clinicadmin"] },
+                details: { requiredGroups: ["root", "clinicadmin", "clinicmanager"] },
                 timestamp: new Date().toISOString()
             });
         }
@@ -104,10 +105,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 5. Clinic-Scoped Access Check
-        // Root bypasses clinic-scoped check; ClinicAdmin must have clinic access
+        // Root bypasses clinic-scoped check; ClinicAdmin must be a member of this clinic
+        // (Clinics.AssociatedUsers or createdBy). Group-level gate (Root/ClinicAdmin) was already
+        // enforced above via ALLOWED_UPDATERS, so this is just the per-clinic membership check.
         if (!isRootGroup) {
-            const hasAccess: boolean = await hasClinicAccess(userSub, clinicId, "ClinicAdmin" as AccessLevel);
-            
+            const hasAccess: boolean = await canAccessClinic(userSub, groups, clinicId);
+
             if (!hasAccess) {
                 return json(403, {
                     error: "Forbidden",

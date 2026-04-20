@@ -19,7 +19,7 @@ import {
     SendEmailCommandInput 
 } from "@aws-sdk/client-ses";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, isRoot } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // --- Initialization (using V3 clients) ---
@@ -77,8 +77,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
         
-        // strict check for Root group
-        if (!userGroups.includes("Root")) {
+        // strict check for Root group (case-insensitive via isRoot helper)
+        if (!isRoot(userGroups)) {
             console.warn("Unauthorized user tried to add new user. Groups:", userGroups);
             return json(403, {
                 error: "Forbidden",

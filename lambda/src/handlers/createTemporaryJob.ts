@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dyn
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
@@ -162,6 +162,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     requiredFields: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "start_time", "end_time"]
                 }
             });
+        }
+
+        // 3b. Per-clinic RBAC gate — requester must be a member of every clinicId they're posting to.
+        //     Group-level check above ensures role is Root/ClinicAdmin/ClinicManager;
+        //     this loop ensures the user isn't targeting clinics outside their membership.
+        for (const cid of jobData.clinicIds) {
+            if (!(await canWriteClinic(userSub, userGroups, cid, "manageJobs"))) {
+                console.warn(`[createTemporaryJob] Write denied: sub=${userSub} clinicId=${cid}`);
+                return json(403, { error: `Forbidden: you cannot create jobs for clinic ${cid}` });
+            }
         }
 
         // 4. Validate Data Integrity
