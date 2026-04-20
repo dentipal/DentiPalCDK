@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Added extractUserFromBearerToken
-import { extractUserFromBearerToken } from "./utils"; 
+import { extractUserFromBearerToken, isRoot, listAccessibleClinicIds } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
@@ -146,21 +146,47 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
         const userInfo = extractUserFromBearerToken(authHeader);
         const userSub = userInfo.sub;
+        const userGroups = userInfo.groups || [];
 
         console.log("Extracted userSub:", userSub);
 
-        // Step 2: Fetch clinic profiles
-        const queryParams: QueryCommandInput = {
-            TableName: CLINIC_PROFILES_TABLE,
-            IndexName: "userSub-index", // Assumed GSI
-            KeyConditionExpression: "userSub = :userSub",
-            ExpressionAttributeValues: {
-                ":userSub": { S: userSub },
-            },
-        };
-        const result: QueryCommandOutput = await dynamodb.send(new QueryCommand(queryParams));
+        // Step 2: Fetch clinic profiles for every clinic the user can access.
+        // Previously this queried `userSub-index` which scopes to profiles the user
+        // personally CREATED — ClinicAdmins/Managers/Viewers added to a clinic later
+        // got zero rows → 404 on a page they should be allowed to read.
+        let items: DynamoDBItem[] = [];
 
-        if (!result.Items || result.Items.length === 0) {
+        if (isRoot(userGroups)) {
+            // Root preserves existing behavior: profiles they created themselves.
+            // (A full-system scan would be expensive and isn't the usual "my profiles" intent.)
+            const rootResult: QueryCommandOutput = await dynamodb.send(new QueryCommand({
+                TableName: CLINIC_PROFILES_TABLE,
+                IndexName: "userSub-index",
+                KeyConditionExpression: "userSub = :userSub",
+                ExpressionAttributeValues: { ":userSub": { S: userSub } },
+            }));
+            items = (rootResult.Items as DynamoDBItem[]) || [];
+        } else {
+            const accessibleClinicIds = await listAccessibleClinicIds(userSub, userGroups);
+            if (accessibleClinicIds && accessibleClinicIds.length > 0) {
+                const profileResponses = await Promise.all(
+                    accessibleClinicIds.map((cid) =>
+                        dynamodb.send(new QueryCommand({
+                            TableName: CLINIC_PROFILES_TABLE,
+                            KeyConditionExpression: "clinicId = :cid",
+                            ExpressionAttributeValues: { ":cid": { S: cid } },
+                            Limit: 1,
+                        })).catch((err) => {
+                            console.warn(`[getClinicProfile] Profile query failed for ${cid}:`, err);
+                            return { Items: [], $metadata: {} } as unknown as QueryCommandOutput;
+                        })
+                    )
+                );
+                items = profileResponses.flatMap((r) => (r.Items as DynamoDBItem[]) || []);
+            }
+        }
+
+        if (items.length === 0) {
             return json(404, {
                 error: "Not Found",
                 statusCode: 404,
@@ -171,7 +197,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Unmarshal the main clinic profiles (full version)
-        const clinicProfiles: ClinicProfileBase[] = (result.Items as DynamoDBItem[]).map((clinic) => {
+        const clinicProfiles: ClinicProfileBase[] = items.map((clinic) => {
 
             // Helper to safely parse int, defaulting to 0
             const parseNum = (attr: AttributeValue | undefined): number =>
