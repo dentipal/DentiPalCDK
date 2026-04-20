@@ -10,7 +10,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canAccessClinic } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -23,6 +23,7 @@ const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
 // Optional envs (defaults provided)
 const JOB_APPLICATIONS_CLINIC_GSI =
   process.env.JOB_APPLICATIONS_CLINIC_GSI || "clinicId-jobId-index";
+const JOB_POSTINGS_CLINIC_GSI = process.env.JOB_POSTINGS_CLINIC_GSI || "ClinicIdIndex";
 
 // --- Status Configurations ---
 const SCHEDULED_STATUSES = (process.env.SCHEDULED_STATUSES || "scheduled,accepted,booked")
@@ -137,7 +138,8 @@ export const handler = async (
     const authHeader = event.headers?.Authorization || event.headers?.authorization;
     const userInfo = extractUserFromBearerToken(authHeader);
     const requesterSub = userInfo?.sub || "";
-    
+    const groups: string[] = Array.isArray(userInfo?.groups) ? userInfo.groups : [];
+
     // 2. Extract clinicId from path parameters
     const proxy = event.pathParameters?.proxy || "";
     const pathParts = proxy.split('/');
@@ -150,6 +152,12 @@ export const handler = async (
       return json(400, { error: "clinicId is required in the path" });
     }
 
+    // 3. Authorization — user must be Root or a member of this clinic (Clinics.AssociatedUsers / createdBy).
+    if (!(await canAccessClinic(requesterSub, groups, targetClinicId))) {
+      console.warn(`[getClinicShifts] Access denied: sub=${requesterSub} clinicId=${targetClinicId}`);
+      return json(403, { error: "Forbidden: you are not a member of this clinic" });
+    }
+
     // Identify which dataset to return
     const isActionNeeded = proxy.includes('action-needed');
     const isScheduled = proxy.includes('scheduled-shifts');
@@ -157,23 +165,21 @@ export const handler = async (
     const isInvites = proxy.includes('invites');
     const isOpen = proxy.includes('open-shifts');
 
-    // 3. Fetch shifts for the owner's sub, we will filter for the specific clinicId
-    // We assume the user owns the clinic, so clinicUserSub = requesterSub.
-    const clinicUserSub = requesterSub;
-    
+    // 4. Fetch all job postings for this clinicId via the ClinicIdIndex GSI.
+    //    Previously keyed by clinicUserSub (= requester), which only worked for the clinic owner —
+    //    non-owner admins/managers/viewers got zero rows.
     const shiftsItems = await queryAll({
       TableName: JOB_POSTINGS_TABLE,
-      KeyConditionExpression: "clinicUserSub = :cus",
+      IndexName: JOB_POSTINGS_CLINIC_GSI,
+      KeyConditionExpression: "clinicId = :cid",
       ExpressionAttributeValues: {
-        ":cus": { S: clinicUserSub },
+        ":cid": { S: targetClinicId },
       },
     });
 
-    // Filter shifts for this particular clinicId early
     const allShifts = shiftsItems
-      .filter(it => s(it.clinicId) === targetClinicId)
       .map((it) => ({
-      clinicUserSub,
+      clinicUserSub: s(it.clinicUserSub),
       clinicId: s(it.clinicId),
       jobId: s(it.jobId),
       jobTitle: s(it.professional_role) || s(it.jobTitle),

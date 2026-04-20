@@ -1,8 +1,10 @@
-import { 
-    DynamoDBClient, 
-    GetItemCommand, 
-    GetItemCommandInput, 
+import {
+    DynamoDBClient,
+    GetItemCommand,
+    GetItemCommandInput,
     GetItemCommandOutput,
+    ScanCommand,
+    ScanCommandInput,
     AttributeValue
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent } from "aws-lambda";
@@ -11,6 +13,7 @@ import { APIGatewayProxyEvent } from "aws-lambda";
 const REGION: string = process.env.REGION || 'us-east-1';
 const dynamoClient: DynamoDBClient = new DynamoDBClient({ region: REGION });
 const USER_CLINIC_ASSIGNMENTS_TABLE: string = process.env.USER_CLINIC_ASSIGNMENTS_TABLE!;
+const CLINICS_TABLE: string = process.env.CLINICS_TABLE!;
 
 // --- 2. Type Definitions ---
 
@@ -33,7 +36,26 @@ export interface UserInfo {
     [key: string]: any;
 }
 
-/** Access level constants */
+/**
+ * Clinic-side Cognito group names, normalized to lowercase.
+ * Cognito group names come in mixed case (e.g. "ClinicAdmin", "Root") depending on where they're set;
+ * always compare case-insensitively using the helpers below.
+ */
+export const CLINIC_ROLES = ["root", "clinicadmin", "clinicmanager", "clinicviewer"] as const;
+export type ClinicRole = typeof CLINIC_ROLES[number];
+
+/** Mutating actions that need a role gate. Read actions don't go through canWriteClinic. */
+export type ClinicWriteAction =
+    | "manageJobs"       // create / edit / delete job postings, shifts
+    | "manageApplicants" // accept / reject / negotiate applications
+    | "manageClinic"     // edit clinic profile, settings
+    | "manageUsers";     // add / remove / update clinic users
+
+/**
+ * @deprecated Legacy access level used by hasClinicAccess() against UserClinicAssignments.
+ * The Add User flow does not populate UserClinicAssignments, so these labels are effectively dead.
+ * New code should use ClinicRole + canAccessClinic / canWriteClinic.
+ */
 export type AccessLevel = "ClinicAdmin" | "Doctor" | "Receptionist";
 
 // --- 3. Exported Utility Functions ---
@@ -55,41 +77,172 @@ export const buildAddress = (parts: AddressParts): string => {
 };
 
 /**
- * Checks if a user belongs to the 'Root' group.
- * @param groups - Array of Cognito group names.
- * @returns True if the user is a Root user.
+ * Case-insensitive check for the Root Cognito group.
+ * Cognito group names can arrive as "Root" or "root" depending on how they're set/fetched,
+ * so always compare case-insensitively.
  */
-export const isRoot = (groups: string[]): boolean => groups.includes('Root');
+export const isRoot = (groups: string[] | undefined | null): boolean =>
+    (groups ?? []).some(g => typeof g === "string" && g.toLowerCase() === "root");
 
 /**
- * Checks if a user has access to a specific clinic and optionally verifies the required access level.
- * Access is granted if the user is 'Root' or if an entry exists in the USER_CLINIC_ASSIGNMENTS_TABLE.
- * * @param userSub - The user's unique identifier.
- * @param clinicId - The clinic's unique identifier.
- * @param requiredAccess - Optional access level (e.g., 'ClinicAdmin').
- * @returns True if access is granted.
+ * Normalize a raw Cognito group list to the single highest-privilege ClinicRole the user holds.
+ * Returns null if the user has no clinic-side role.
+ */
+export const getClinicRole = (groups: string[] | undefined | null): ClinicRole | null => {
+    const normalized = new Set(
+        (groups ?? [])
+            .filter((g): g is string => typeof g === "string")
+            .map(g => g.toLowerCase())
+    );
+    // Priority order: root > admin > manager > viewer.
+    for (const role of CLINIC_ROLES) {
+        if (normalized.has(role)) return role;
+    }
+    return null;
+};
+
+/**
+ * Extract the list of user subs from a DynamoDB `AssociatedUsers` attribute on the Clinics table.
+ * The attribute has been stored historically as StringSet (SS), List of {S} (L), or a single String (S);
+ * we accept any of those shapes.
+ */
+const extractAssociatedUsers = (attr: AttributeValue | undefined): string[] => {
+    if (!attr) return [];
+    if ((attr as any).SS && Array.isArray((attr as any).SS)) return (attr as any).SS as string[];
+    if ((attr as any).L && Array.isArray((attr as any).L)) {
+        return ((attr as any).L as any[])
+            .map(v => (v && typeof v.S === "string" ? v.S : null))
+            .filter((v): v is string => !!v);
+    }
+    if (typeof (attr as any).S === "string") return [(attr as any).S];
+    return [];
+};
+
+/**
+ * READ gate: may this user read data for the given clinicId?
+ * Root → always true.
+ * Otherwise → the user's sub must appear in Clinics.AssociatedUsers OR equal Clinics.createdBy.
+ * One GetItem on the Clinics table; no UserClinicAssignments lookup.
+ */
+export const canAccessClinic = async (
+    userSub: string,
+    groups: string[] | undefined | null,
+    clinicId: string
+): Promise<boolean> => {
+    if (!userSub || !clinicId) return false;
+    if (isRoot(groups)) return true;
+    if (!CLINICS_TABLE) {
+        console.error("[canAccessClinic] CLINICS_TABLE env var is not set");
+        return false;
+    }
+
+    try {
+        const response: GetItemCommandOutput = await dynamoClient.send(new GetItemCommand({
+            TableName: CLINICS_TABLE,
+            Key: { clinicId: { S: clinicId } },
+            ProjectionExpression: "AssociatedUsers, createdBy",
+        }));
+        if (!response.Item) return false;
+
+        const createdBy = response.Item.createdBy?.S;
+        if (createdBy && createdBy === userSub) return true;
+
+        const associated = extractAssociatedUsers(response.Item.AssociatedUsers);
+        return associated.includes(userSub);
+    } catch (error) {
+        console.error(`[canAccessClinic] Error checking access for sub=${userSub} clinicId=${clinicId}:`, error);
+        return false;
+    }
+};
+
+/**
+ * WRITE gate: may this user perform `action` on the given clinic?
+ * Same membership check as canAccessClinic, plus a role → capability matrix:
+ *   root       → every action
+ *   clinicadmin / clinicmanager → every write action
+ *   clinicviewer → no write actions
+ * Helpers land here for follow-up enforcement on mutating endpoints; this PR wires reads only.
+ */
+export const canWriteClinic = async (
+    userSub: string,
+    groups: string[] | undefined | null,
+    clinicId: string,
+    _action: ClinicWriteAction
+): Promise<boolean> => {
+    if (isRoot(groups)) return true;
+    const role = getClinicRole(groups);
+    if (!role || role === "clinicviewer") return false;
+    return canAccessClinic(userSub, groups, clinicId);
+};
+
+/**
+ * List every clinicId the user is allowed to read.
+ * Root → null, signalling "all clinics" so the caller can take its broad-scan path.
+ * Non-root → scans Clinics with `contains(AssociatedUsers, :sub) OR createdBy = :sub`,
+ * the same membership definition used by loginUser.ts and canAccessClinic.
+ */
+export const listAccessibleClinicIds = async (
+    userSub: string,
+    groups: string[] | undefined | null
+): Promise<string[] | null> => {
+    if (isRoot(groups)) return null;
+    if (!userSub) return [];
+    if (!CLINICS_TABLE) {
+        console.error("[listAccessibleClinicIds] CLINICS_TABLE env var is not set");
+        return [];
+    }
+
+    const clinicIds: string[] = [];
+    let ExclusiveStartKey: Record<string, AttributeValue> | undefined = undefined;
+    try {
+        do {
+            const input: ScanCommandInput = {
+                TableName: CLINICS_TABLE,
+                FilterExpression: "contains(AssociatedUsers, :sub) OR createdBy = :sub",
+                ExpressionAttributeValues: { ":sub": { S: userSub } },
+                ProjectionExpression: "clinicId",
+                ExclusiveStartKey,
+            };
+            const resp = await dynamoClient.send(new ScanCommand(input));
+            for (const item of resp.Items || []) {
+                const id = item.clinicId?.S;
+                if (id) clinicIds.push(id);
+            }
+            ExclusiveStartKey = resp.LastEvaluatedKey;
+        } while (ExclusiveStartKey);
+    } catch (error) {
+        console.error(`[listAccessibleClinicIds] Error scanning clinics for sub=${userSub}:`, error);
+        return [];
+    }
+    return clinicIds;
+};
+
+/**
+ * @deprecated Reads the UserClinicAssignments table, which is not populated by the Add User flow.
+ * New code should use `canAccessClinic` (reads) or `canWriteClinic` (writes) instead.
+ * Retained as a thin legacy helper so any existing callers keep compiling.
  */
 export const hasClinicAccess = async (userSub: string, clinicId: string, requiredAccess: AccessLevel | null = null): Promise<boolean> => {
     const command: GetItemCommandInput = {
         TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
-        Key: { 
-            userSub: { S: userSub }, 
-            clinicId: { S: clinicId } 
+        Key: {
+            userSub: { S: userSub },
+            clinicId: { S: clinicId }
         },
         ProjectionExpression: requiredAccess ? "accessLevel" : undefined
     };
 
     try {
         const response: GetItemCommandOutput = await dynamoClient.send(new GetItemCommand(command));
-        
+
         if (!response.Item) {
             return false;
         }
-        
+
         if (!requiredAccess) {
             return true; // Item exists, access granted
         }
-        
+
         const accessLevel: string | undefined = response.Item.accessLevel?.S;
         return accessLevel === requiredAccess;
     } catch (error) {

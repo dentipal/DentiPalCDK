@@ -10,7 +10,8 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, isRoot, listAccessibleClinicIds } from "./utils";
+import { ScanCommand } from "@aws-sdk/client-dynamodb";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -23,6 +24,8 @@ const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
 // Optional envs (defaults provided)
 const JOB_APPLICATIONS_CLINIC_GSI =
   process.env.JOB_APPLICATIONS_CLINIC_GSI || "clinicId-jobId-index";
+const JOB_POSTINGS_CLINIC_GSI = process.env.JOB_POSTINGS_CLINIC_GSI || "ClinicIdIndex";
+const CLINICS_TABLE = process.env.CLINICS_TABLE;
 
 // --- Status Configurations ---
 
@@ -100,19 +103,26 @@ async function queryAll(input: QueryCommandInput): Promise<any[]> {
   return items;
 }
 
-function extractClinicUserSub(event: APIGatewayProxyEvent): string {
-  // Support: /clinic/<sub/..., /dashboard/<sub>, /<sub>
-  // Uses existing proxy logic so no stack changes are needed
-  const proxy = event.pathParameters?.proxy || "";
-  const segments = proxy.split("/").filter(Boolean);
-
-  const clinicIdx = segments.indexOf("clinic");
-  if (clinicIdx >= 0 && segments[clinicIdx + 1]) return segments[clinicIdx + 1];
-
-  if (segments[0] === "dashboard" && segments[1]) return segments[1];
-
-  // fallback
-  return segments[0] || "";
+async function scanAllClinicIds(): Promise<string[]> {
+  if (!CLINICS_TABLE) {
+    console.error("[getAllClinicsShifts] CLINICS_TABLE env var is not set; cannot enumerate clinics for Root.");
+    return [];
+  }
+  const clinicIds: string[] = [];
+  let ExclusiveStartKey: Record<string, AttributeValue> | undefined = undefined;
+  do {
+    const resp: any = await dynamodb.send(new ScanCommand({
+      TableName: CLINICS_TABLE,
+      ProjectionExpression: "clinicId",
+      ExclusiveStartKey,
+    }));
+    for (const item of resp.Items || []) {
+      const id = item.clinicId?.S;
+      if (id) clinicIds.push(id);
+    }
+    ExclusiveStartKey = resp.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return clinicIds;
 }
 
 function normalizeStatus(raw: any): string {
@@ -161,42 +171,45 @@ export const handler = async (
     const authHeader = event.headers?.Authorization || event.headers?.authorization;
     const userInfo = extractUserFromBearerToken(authHeader);
     const requesterSub = userInfo?.sub || "";
-    console.log(`[getAllClinicsShifts] Executing data fetch for userSub requests: ${requesterSub}`);
+    const groups: string[] = Array.isArray(userInfo?.groups) ? userInfo.groups : [];
+    console.log(`[getAllClinicsShifts] Executing data fetch for userSub: ${requesterSub}`);
 
-    let clinicUserSub = extractClinicUserSub(event);
-    if (!clinicUserSub) {
-      console.warn(`[getAllClinicsShifts] Execution halted: Missing clinicUserSub from URL mapping`);
-      return json(400, { error: "clinicUserSub is required in the path" });
+    // Determine which clinics this user may read across.
+    // Root → every clinic in the system. Non-root → only clinics they appear in
+    // (Clinics.AssociatedUsers or createdBy). Shared membership check with canAccessClinic.
+    let targetClinicIds: string[];
+    if (isRoot(groups)) {
+      targetClinicIds = await scanAllClinicIds();
+      console.log(`[getAllClinicsShifts] Root user; enumerated ${targetClinicIds.length} clinics.`);
+    } else {
+      const accessible = await listAccessibleClinicIds(requesterSub, groups);
+      targetClinicIds = accessible ?? [];
+      console.log(`[getAllClinicsShifts] Non-root user; ${targetClinicIds.length} accessible clinics.`);
     }
 
-    // FIX: If the path is /dashboard/all/..., the extracted sub evaluates to "all".
-    // Since the user is fetching their own clinics, we override it to their token's sub.
-    if (clinicUserSub === "all") {
-      clinicUserSub = requesterSub;
+    if (targetClinicIds.length === 0) {
+      return json(200, {
+        message: "No clinics accessible for this user.",
+        data: {},
+      });
     }
 
-    console.log(`[getAllClinicsShifts] Target clinic owner Sub parsed: ${clinicUserSub}`);
-
-    const groups: string[] = (userInfo?.groups || userInfo?.["cognito:groups"] || []) as string[];
-    const isRoot = Array.isArray(groups) && groups.includes("Root");
-
-    if (!isRoot && requesterSub && requesterSub !== clinicUserSub) {
-      console.warn(`[getAllClinicsShifts] Security Block: User ${requesterSub} attempted to fetch foreign data map for ${clinicUserSub}`);
-      return json(403, { error: "Forbidden: You can only access your own clinic data" });
-    }
-
-    // 2. Fetch All Shifts (Postings) for this Clinic User
-    console.log(`[getAllClinicsShifts] Initiating DynamoDB query sweep on JOB_POSTINGS_TABLE for clinicUserSub...`);
-    const shiftsItems = await queryAll({
-      TableName: JOB_POSTINGS_TABLE,
-      KeyConditionExpression: "clinicUserSub = :cus",
-      ExpressionAttributeValues: {
-        ":cus": { S: clinicUserSub },
-      },
-    });
+    // 2. Fetch Shifts (Postings) for every accessible clinic via the ClinicIdIndex GSI.
+    //    Previously we queried JobPostings by clinicUserSub == requester, which only matched
+    //    the clinic owner — non-owner admins/managers/viewers got an empty dashboard.
+    console.log(`[getAllClinicsShifts] Querying JOB_POSTINGS_TABLE via ${JOB_POSTINGS_CLINIC_GSI} for ${targetClinicIds.length} clinics...`);
+    const shiftsItemsGrouped = await Promise.all(
+      targetClinicIds.map((cid) => queryAll({
+        TableName: JOB_POSTINGS_TABLE,
+        IndexName: JOB_POSTINGS_CLINIC_GSI,
+        KeyConditionExpression: "clinicId = :cid",
+        ExpressionAttributeValues: { ":cid": { S: cid } },
+      }))
+    );
+    const shiftsItems = shiftsItemsGrouped.flat();
 
     const allShifts = shiftsItems.map((it) => ({
-      clinicUserSub,
+      clinicUserSub: s(it.clinicUserSub),
       clinicId: s(it.clinicId),
       jobId: s(it.jobId),
       jobTitle: s(it.professional_role) || s(it.jobTitle),
