@@ -1,13 +1,13 @@
 import {
     DynamoDBClient,
     GetItemCommand,
+    QueryCommand,
+    QueryCommandInput,
     AttributeValue,
-    GetItemCommandOutput,
-    GetItemCommandInput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
-import { extractUserFromBearerToken } from "./utils"; 
+import { extractUserFromBearerToken, canAccessClinic } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
@@ -192,10 +192,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     try {
         // 1. Authentication - Extract access token
         let userSub: string;
+        let userGroups: string[] = [];
         try {
             const authHeader = event.headers?.Authorization || event.headers?.authorization;
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
+            userGroups = userInfo.groups || [];
         } catch (authError: any) {
             return json(401, { error: authError.message || "Invalid access token" });
         }
@@ -210,32 +212,31 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(400, { error: "Clinic ID missing in request path." });
         }
 
-        // 3. Fetch Item (using composite key for strict ownership check)
-        // Key: { clinicId (SK), userSub (PK) } OR { clinicId (PK), userSub (SK) }
-        // Based on your code, assuming: Key: { clinicId: { S: clinicId }, userSub: { S: userSub } }
-        const getItemParams: GetItemCommandInput = {
-            TableName: CLINIC_PROFILES_TABLE,
-            Key: {
-                clinicId: { S: clinicId },
-                userSub: { S: userSub }, 
-            },
-        };
-
-        const result: GetItemCommandOutput = await dynamodb.send(new GetItemCommand(getItemParams));
-        const item = result.Item as DynamoDBClinicItem | undefined;
-
-        // 4. Check Existence
-        if (!item) {
-            console.error(`❌ No profile found for clinicId ${clinicId} and userSub ${userSub}`);
-            return json(404, { error: `Clinic profile not found` });
+        // 3. Authorization — any clinic member can READ the profile (Root bypasses).
+        //    Previously this handler required the requester to BE the profile's creator
+        //    (composite key {clinicId, userSub: requester}), which 404'd every user who
+        //    was added to the clinic later — including all ClinicViewers.
+        if (!(await canAccessClinic(userSub, userGroups, clinicId))) {
+            console.warn(`[getClinicProfileDetails] Access denied: sub=${userSub} clinicId=${clinicId}`);
+            return json(403, { error: "Forbidden: you are not a member of this clinic" });
         }
 
-        // 5. Authorization Check (already implicitly performed by GetItem's use of userSub as key)
-        // However, explicit check safeguards against Schema changes where userSub might not be part of the key.
-        const fetchedUserSub = item.userSub?.S;
-        if (fetchedUserSub !== userSub) {
-            console.error(`Authorization failed: Clinic userSub (${fetchedUserSub}) does not match token userSub (${userSub})`);
-            return json(403, { error: "Forbidden: You do not own this clinic profile." });
+        // 4. Query by clinicId only — profile is stored once per clinic (PK=clinicId, SK=userSub).
+        //    Take the first row that comes back for this clinic.
+        const queryParams: QueryCommandInput = {
+            TableName: CLINIC_PROFILES_TABLE,
+            KeyConditionExpression: "clinicId = :cid",
+            ExpressionAttributeValues: { ":cid": { S: clinicId } },
+            Limit: 1,
+        };
+
+        const result = await dynamodb.send(new QueryCommand(queryParams));
+        const item = result.Items?.[0] as DynamoDBClinicItem | undefined;
+
+        // 5. Check Existence
+        if (!item) {
+            console.warn(`No profile row exists for clinicId=${clinicId}`);
+            return json(404, { error: `Clinic profile not found` });
         }
 
         // 6. Format Data and Respond
