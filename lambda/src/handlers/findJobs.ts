@@ -8,6 +8,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { fireAndForgetIncrement } from "./promotionCounters";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
 
 // --- Interfaces ---
@@ -52,6 +53,7 @@ interface JobPosting {
 
   // Promotion fields
   isPromoted?: boolean;
+  promotionId?: string;
   promotionPlanId?: string;
   promotionExpiresAt?: string;
 
@@ -167,6 +169,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const expiresAt = item.promotionExpiresAt?.S;
             if (expiresAt && new Date(expiresAt) > new Date()) {
               job.isPromoted = true;
+              job.promotionId = item.promotionId?.S;
               job.promotionPlanId = item.promotionPlanId?.S;
               job.promotionExpiresAt = expiresAt;
             } else {
@@ -200,6 +203,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       const tb = new Date(b.createdAt).getTime() || 0;
       return tb - ta; // Then newest first
     });
+
+    for (const j of jobPostings) {
+      if (j.isPromoted && j.promotionId) {
+        fireAndForgetIncrement(j.jobId, j.promotionId, "impressions");
+      }
+    }
 
     return {
       statusCode: 200,

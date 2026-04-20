@@ -1,17 +1,20 @@
 import {
   DynamoDBClient,
   QueryCommand,
+  BatchGetItemCommand,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 import { haversineDistance, type Coordinates } from "./geo";
+import { fireAndForgetIncrement, PROMOTION_TIER_WEIGHT } from "./promotionCounters";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-V5-JobApplications";
 const USER_ADDRESSES_TABLE = process.env.USER_ADDRESSES_TABLE || "DentiPal-V5-UserAddresses";
+const JOB_PROMOTIONS_TABLE = process.env.JOB_PROMOTIONS_TABLE || "DentiPal-V5-JobPromotions";
 
 const ddb = new DynamoDBClient({ region: REGION });
 
@@ -115,6 +118,71 @@ async function getProfessionalCoords(userSub: string): Promise<Coordinates | nul
 }
 
 /**
+ * Fetch the raw job rows for every currently-active promotion.
+ * Uses the status-expiresAt-index GSI so we never miss a boosted job
+ * just because it falls outside the organic scan cap.
+ *
+ * The caller is still responsible for applying filters, radius, and dedupe.
+ */
+async function getActivePromotedJobItems(): Promise<Record<string, AttributeValue>[]> {
+  const nowIso = new Date().toISOString();
+  const promotions: Record<string, AttributeValue>[] = [];
+  let lastKey: Record<string, AttributeValue> | undefined;
+
+  do {
+    const resp = await ddb.send(
+      new QueryCommand({
+        TableName: JOB_PROMOTIONS_TABLE,
+        IndexName: "status-expiresAt-index",
+        KeyConditionExpression: "#s = :active AND expiresAt > :now",
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: {
+          ":active": { S: "active" },
+          ":now": { S: nowIso },
+        },
+        ExclusiveStartKey: lastKey,
+      })
+    );
+    if (resp.Items) promotions.push(...resp.Items);
+    lastKey = resp.LastEvaluatedKey;
+  } while (lastKey);
+
+  if (promotions.length === 0) return [];
+
+  // Batch-get the underlying job rows. JobPostings PK is {clinicUserSub, jobId} —
+  // both are stored on the promotion row so no secondary lookup is needed.
+  const seen = new Set<string>();
+  const keys: Record<string, AttributeValue>[] = [];
+  for (const p of promotions) {
+    const clinicUserSub = str(p.clinicUserSub);
+    const jobId = str(p.jobId);
+    if (!clinicUserSub || !jobId) continue;
+    const k = `${clinicUserSub}#${jobId}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    keys.push({
+      clinicUserSub: { S: clinicUserSub },
+      jobId: { S: jobId },
+    });
+  }
+
+  const jobs: Record<string, AttributeValue>[] = [];
+  // BatchGetItem accepts up to 100 keys per call.
+  for (let i = 0; i < keys.length; i += 100) {
+    const chunk = keys.slice(i, i + 100);
+    const resp = await ddb.send(
+      new BatchGetItemCommand({
+        RequestItems: { [JOB_POSTINGS_TABLE]: { Keys: chunk } },
+      })
+    );
+    const rows = resp.Responses?.[JOB_POSTINGS_TABLE];
+    if (rows) jobs.push(...rows);
+  }
+
+  return jobs;
+}
+
+/**
  * Read stored lat/lng from a job item. Returns null if not geocoded.
  */
 function getJobCoords(item: Record<string, AttributeValue>): Coordinates | null {
@@ -126,7 +194,7 @@ function getJobCoords(item: Record<string, AttributeValue>): Coordinates | null 
 
 /**
  * Compute a relevance score for a job based on available signals.
- * Higher = more relevant. Score range: 0-125 (with all bonuses).
+ * Higher = more relevant. Score range: 0-140 (with all bonuses).
  */
 function computeRelevanceScore(job: Record<string, AttributeValue>, params: {
   role?: string;
@@ -184,6 +252,14 @@ function computeRelevanceScore(job: Record<string, AttributeValue>, params: {
     if (jobClinicId && params.appliedClinicIds.has(jobClinicId)) {
       score += 15;
     }
+  }
+
+  // Popularity (0-15): lifetime applicationsCount on a log scale so a single
+  // viral job doesn't dominate. Old popular jobs still fade out via the
+  // recency term above, so no rolling window is needed here.
+  const apps = num(job.applicationsCount) ?? 0;
+  if (apps > 0) {
+    score += Math.min(15, Math.log(1 + apps) * 5);
   }
 
   return Math.round(score * 100) / 100;
@@ -309,6 +385,14 @@ export const handler = async (
 
   const radiusMiles = qs.radius ? Number(qs.radius) : undefined;
 
+  // Sort mode (Mercor-style dropdown): defaults to "trending" (current behavior).
+  // "highestPay" sorts only the current page (cursor is keyed on createdAt).
+  type SortMode = "trending" | "newest" | "highestPay" | "priority";
+  const ALLOWED_SORTS: SortMode[] = ["trending", "newest", "highestPay", "priority"];
+  const sort: SortMode = ALLOWED_SORTS.includes(qs.sort as SortMode)
+    ? (qs.sort as SortMode)
+    : "trending";
+
   // Live user location override (from browser geolocation on the frontend).
   // If provided, we use these coords instead of looking up the stored profile address.
   const userLatNum = qs.userLat ? Number(qs.userLat) : NaN;
@@ -331,12 +415,17 @@ export const handler = async (
   };
 
   try {
-    // 1) Get applied job/clinic info
-    // + resolve professional's coordinates (prefer live browser coords over stored profile)
+    // 1) Get applied job/clinic info + resolve coords + fetch active promoted jobs.
+    // Promoted jobs are fetched up-front so they're never dropped by the organic
+    // scan cap — paid placement must always reach the pro.
+    // Only include promoted jobs on the first page; cursor-paged requests are
+    // organic-only so the same boosts don't follow the pro as they scroll.
     const needStoredCoords = radiusMiles && !liveUserCoords;
-    const [appliedInfo, storedCoords] = await Promise.all([
+    const isFirstPage = !cursor;
+    const [appliedInfo, storedCoords, promotedItems] = await Promise.all([
       getAppliedJobInfo(userSub),
       needStoredCoords ? getProfessionalCoords(userSub) : Promise.resolve(null as Coordinates | null),
+      isFirstPage ? getActivePromotedJobItems() : Promise.resolve([] as Record<string, AttributeValue>[]),
     ]);
 
     const appliedJobIds = appliedInfo.jobIds;
@@ -407,14 +496,16 @@ export const handler = async (
             }
           }
 
-          // Compute relevance score
-          const score = computeRelevanceScore(item, {
-            role: filters.role,
-            location: filters.location,
-            distanceMi,
-            radiusMiles,
-            appliedClinicIds,
-          });
+          // Relevance score is only used for "trending"; skip the work otherwise.
+          const score = sort === "trending"
+            ? computeRelevanceScore(item, {
+                role: filters.role,
+                location: filters.location,
+                distanceMi,
+                radiusMiles,
+                appliedClinicIds,
+              })
+            : 0;
           matchedJobs.push({ item, score, distanceMi });
         }
 
@@ -428,12 +519,104 @@ export const handler = async (
       if (matchedJobs.length >= fetchLimit || totalScanned >= MAX_SCAN) break;
     }
 
-    // 3) Sort by relevance score (descending), then by createdAt as tiebreaker
+    // 2b) Score promoted jobs through the same filter/radius pipeline and merge.
+    //     Promoted entries take priority over organic ones on jobId collision
+    //     (the organic scan may surface the same job independently).
+    if (promotedItems.length > 0) {
+      const organicIds = new Set(matchedJobs.map((m) => str(m.item.jobId)));
+      const promotedMatched: { item: Record<string, AttributeValue>; score: number; distanceMi?: number | null }[] = [];
+
+      for (const item of promotedItems) {
+        const jobId = str(item.jobId);
+        if (!jobId || appliedJobIds.has(jobId)) continue;
+
+        // Only surface jobs that are still open/active (promotion may outlive the job).
+        const jobStatus = str(item.status);
+        if (jobStatus !== "open" && jobStatus !== "active") continue;
+
+        if (!matchesFilters(item, filters)) continue;
+
+        let distanceMi: number | null = null;
+        if (radiusMiles && profCoords) {
+          const jobCoords = getJobCoords(item);
+          if (jobCoords) {
+            distanceMi = haversineDistance(profCoords.lat, profCoords.lng, jobCoords.lat, jobCoords.lng);
+            if (distanceMi > radiusMiles) continue;
+          } else {
+            continue;
+          }
+        }
+
+        const score = sort === "trending"
+          ? computeRelevanceScore(item, {
+              role: filters.role,
+              location: filters.location,
+              distanceMi,
+              radiusMiles,
+              appliedClinicIds,
+            })
+          : 0;
+        promotedMatched.push({ item, score, distanceMi });
+      }
+
+      // Prepend promoted matches and drop organic duplicates — the sort will re-order,
+      // but the dedupe prevents the same job from appearing twice in matchedJobs.
+      if (promotedMatched.length > 0) {
+        const promotedIds = new Set(promotedMatched.map((m) => str(m.item.jobId)));
+        matchedJobs = matchedJobs.filter((m) => !promotedIds.has(str(m.item.jobId)));
+        matchedJobs.unshift(...promotedMatched);
+
+        console.log(`[Promotions] Surfaced ${promotedMatched.length} boosted jobs (organic had ${organicIds.size} candidates).`);
+      }
+    }
+
+    // 3) Sort jobs based on the requested mode.
+    //    "trending"  → promotion tier → relevance score → newest (legacy default)
+    //    "newest"    → newest first
+    //    "highestPay"→ highest rate first (cursor-paged within current page only)
+    //    "priority"  → promoted first (by tier weight) → newest
+    //    Expired promotions get weight 0 so they mix back into organic results.
+    const activeTierWeight = (item: Record<string, AttributeValue>): number => {
+      if (!item.isPromoted?.BOOL) return 0;
+      const expiresAt = str(item.promotionExpiresAt);
+      if (!expiresAt || new Date(expiresAt) <= new Date()) return 0;
+      return PROMOTION_TIER_WEIGHT[str(item.promotionPlanId)] || 0;
+    };
+
+    const createdAtMs = (item: Record<string, AttributeValue>): number =>
+      new Date(str(item.createdAt) || "0").getTime();
+
+    const rateOf = (item: Record<string, AttributeValue>): number =>
+      num(item.rate) ?? num(item.hourly_rate) ?? num(item.hourlyRate) ?? -1;
+
     matchedJobs.sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      const dateA = new Date(str(a.item.createdAt) || "0").getTime();
-      const dateB = new Date(str(b.item.createdAt) || "0").getTime();
-      return dateB - dateA;
+      switch (sort) {
+        case "newest":
+          return createdAtMs(b.item) - createdAtMs(a.item);
+
+        case "highestPay": {
+          const ra = rateOf(a.item);
+          const rb = rateOf(b.item);
+          if (rb !== ra) return rb - ra;
+          return createdAtMs(b.item) - createdAtMs(a.item);
+        }
+
+        case "priority": {
+          const wa = activeTierWeight(a.item);
+          const wb = activeTierWeight(b.item);
+          if (wa !== wb) return wb - wa;
+          return createdAtMs(b.item) - createdAtMs(a.item);
+        }
+
+        case "trending":
+        default: {
+          const wa = activeTierWeight(a.item);
+          const wb = activeTierWeight(b.item);
+          if (wa !== wb) return wb - wa;
+          if (b.score !== a.score) return b.score - a.score;
+          return createdAtMs(b.item) - createdAtMs(a.item);
+        }
+      }
     });
 
     // 4) Slice to requested page size
@@ -446,12 +629,31 @@ export const handler = async (
       nextCursor = Buffer.from(JSON.stringify(nextKey)).toString("base64");
     }
 
-    // 6) Convert to plain objects and attach relevance score + distance
-    const jobs = pageJobs.map(({ item, score, distanceMi }) => ({
-      ...itemToObject(item),
-      _relevanceScore: score,
-      ...(distanceMi != null && { _distanceMiles: Math.round(distanceMi * 10) / 10 }),
-    }));
+    // 6) Convert to plain objects and attach relevance score + distance.
+    //    Mask expired promotions at read time so clients never see stale boosts.
+    const jobs = pageJobs.map(({ item, score, distanceMi }) => {
+      const obj: any = {
+        ...itemToObject(item),
+        _relevanceScore: score,
+        ...(distanceMi != null && { _distanceMiles: Math.round(distanceMi * 10) / 10 }),
+      };
+      if (obj.isPromoted) {
+        const stillActive = obj.promotionExpiresAt && new Date(obj.promotionExpiresAt) > new Date();
+        if (!stillActive) {
+          obj.isPromoted = false;
+          delete obj.promotionId;
+          delete obj.promotionPlanId;
+          delete obj.promotionExpiresAt;
+        }
+      }
+      return obj;
+    });
+
+    for (const j of jobs) {
+      if (j.isPromoted && j.jobId && j.promotionId) {
+        fireAndForgetIncrement(j.jobId, j.promotionId, "impressions");
+      }
+    }
 
     return json(200, {
       totalJobs: jobs.length,

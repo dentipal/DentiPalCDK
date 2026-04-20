@@ -4,6 +4,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { fireAndForgetJobApplicationIncrement } from "./jobPostingCounters";
 
 // --- 1. Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -155,6 +156,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }));
 
         console.log("Job application saved successfully.");
+
+        // Bump the lifetime applicationsCount on the job posting (non-blocking).
+        // Feeds the popularity term in computeRelevanceScore for the "Trending" sort.
+        fireAndForgetJobApplicationIncrement(jobItem);
 
         // 8. Construct Response
         const jobInfo = {

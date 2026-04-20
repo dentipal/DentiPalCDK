@@ -140,6 +140,7 @@ import { handler as getPromotionsHandler } from "./handlers/getPromotions";
 import { handler as getPromotionHandler } from "./handlers/getPromotion";
 import { handler as cancelPromotionHandler } from "./handlers/cancelPromotion";
 import { handler as activatePromotionHandler } from "./handlers/activatePromotion";
+import { handler as trackPromotionClickHandler } from "./handlers/trackPromotionClick";
 
 // --- TYPE DEFINITIONS ---
 
@@ -351,6 +352,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/promotions/{promotionId}": getPromotionHandler,
         "PUT:/promotions/{promotionId}/cancel": cancelPromotionHandler,
         "PUT:/promotions/{promotionId}/activate": activatePromotionHandler,
+        "POST:/promotions/track-click": trackPromotionClickHandler,
 
     };
 

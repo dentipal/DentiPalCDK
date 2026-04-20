@@ -13,7 +13,10 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 const REGION = process.env.REGION || process.env.AWS_REGION || "us-east-1";
 const APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-JobApplications";
 const POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
-const PROFILES_TABLE = process.env.PROFILES_TABLE || "DentiPal-ProfessionalProfiles";
+// The CDK stack sets PROFESSIONAL_PROFILES_TABLE; keep PROFILES_TABLE as a legacy alias in case
+// an older deployment env still uses the short name. Default matches the currently-provisioned
+// V5 table so a missing env var doesn't silently hit a non-existent (and un-IAM-granted) table.
+const PROFILES_TABLE = process.env.PROFESSIONAL_PROFILES_TABLE || process.env.PROFILES_TABLE || "DentiPal-V5-ProfessionalProfiles";
 const NEGOTIATIONS_TABLE = process.env.JOB_NEGOTIATIONS_TABLE || "DentiPal-JobNegotiations";
 
 const NEGOTIATION_GSI = "applicationId-index";
