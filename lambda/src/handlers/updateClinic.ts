@@ -2,6 +2,7 @@ import { DynamoDBClient, UpdateItemCommand, AttributeValue } from "@aws-sdk/clie
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { canAccessClinic, buildAddress, extractUserFromBearerToken } from "./utils";
+import { geocodeAddressParts } from "./geo";
 // Import shared CORS headers
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
@@ -166,6 +167,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (pincode) {
                 updateExpression.push("pincode = :pincode");
                 expressionAttributeValues[":pincode"] = { S: pincode };
+            }
+
+            // Re-geocode — best effort. Keeps the clinic's coords fresh so the
+            // Find Shifts "Near me" radius filter remains accurate after edits.
+            const coords = await geocodeAddressParts({
+                addressLine1: addressLine1 || "",
+                city: city || "",
+                state: state || "",
+                pincode: pincode || "",
+            });
+            if (coords) {
+                console.log(`[updateClinic] Re-geocoded ${clinicId} → (${coords.lat}, ${coords.lng})`);
+                updateExpression.push("lat = :lat");
+                updateExpression.push("lng = :lng");
+                expressionAttributeValues[":lat"] = { N: String(coords.lat) };
+                expressionAttributeValues[":lng"] = { N: String(coords.lng) };
+            } else {
+                console.warn(`[updateClinic] Could not geocode updated address for ${clinicId}`);
             }
         }
 

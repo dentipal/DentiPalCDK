@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from "uuid";
 
 // Assuming utils.ts contains definitions for extractUserFromBearerToken, verifyToken and buildAddress
 import { extractUserFromBearerToken, buildAddress, verifyToken } from "./utils";
+import { geocodeAddressParts } from "./geo";
 
 // ✅ ADDED THIS LINE:
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
@@ -192,6 +193,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             AssociatedUsers = { L: [{ S: userSub }] }; 
         }
 
+        // Geocode on create — best-effort, non-fatal. Powers the frontend's
+        // "Near me" radius filter on Find Shifts; absence just means jobs for
+        // this clinic won't appear when a radius is set until the next geocode.
+        const coords = await geocodeAddressParts({
+            addressLine1,
+            city,
+            state,
+            pincode,
+        });
+        if (coords) {
+            console.log(`[createClinic] Geocoded ${clinicId} → (${coords.lat}, ${coords.lng})`);
+        } else {
+            console.warn(`[createClinic] Could not geocode ${addressLine1}, ${city} for ${clinicId}`);
+        }
+
         // Build the DynamoDB Item
         const item: Record<string, AttributeValue> = {
             clinicId:      { S: clinicId },
@@ -208,6 +224,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             updatedAt:     { S: timestamp },
             AssociatedUsers, // <- ensure creator is included on create
         };
+
+        // Attach geocoded coordinates (if available)
+        if (coords) {
+            item.lat = { N: String(coords.lat) };
+            item.lng = { N: String(coords.lng) };
+        }
 
         console.log("[create-clinic] PutItem item:", JSON.stringify(item, null, 2));
 
