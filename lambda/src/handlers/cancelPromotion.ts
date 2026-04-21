@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
@@ -30,14 +30,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "promotionId is required" }) };
     }
 
-    // Find the promotion by querying the user's promotions
+    const clinicId = event.queryStringParameters?.clinicId;
+    if (!clinicId) {
+      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "clinicId query parameter is required" }) };
+    }
+
+    const allowed = await canWriteClinic(user.sub, user.groups, clinicId, "manageJobs");
+    if (!allowed) {
+      return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: "You do not have permission to cancel this clinic's promotions" }) };
+    }
+
+    // Find the promotion within the clinic's partition on the clinicId GSI.
     const result = await ddbDoc.send(new QueryCommand({
       TableName: JOB_PROMOTIONS_TABLE,
-      IndexName: "clinicUserSub-index",
-      KeyConditionExpression: "clinicUserSub = :sub",
+      IndexName: "clinicId-createdAt-index",
+      KeyConditionExpression: "clinicId = :cid",
       FilterExpression: "promotionId = :pid",
       ExpressionAttributeValues: {
-        ":sub": user.sub,
+        ":cid": clinicId,
         ":pid": promotionId,
       },
     }));

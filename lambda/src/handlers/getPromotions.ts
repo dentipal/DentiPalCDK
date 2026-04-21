@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, QueryCommand, BatchGetCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, QueryCommand, BatchGetCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canAccessClinic, listAccessibleClinicIds } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
@@ -20,16 +20,61 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return { statusCode: 401, headers: CORS_HEADERS, body: JSON.stringify({ error: "Unauthorized" }) };
     }
 
-    // Query promotions for this clinic user via GSI
-    const result = await ddbDoc.send(new QueryCommand({
-      TableName: JOB_PROMOTIONS_TABLE,
-      IndexName: "clinicUserSub-index",
-      KeyConditionExpression: "clinicUserSub = :sub",
-      ExpressionAttributeValues: { ":sub": user.sub },
-      ScanIndexForward: false, // newest first
-    }));
+    const clinicId = event.queryStringParameters?.clinicId;
+    console.log("[getPromotions] sub=", user.sub, "groups=", user.groups, "clinicId=", clinicId);
+    if (!clinicId) {
+      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "clinicId query parameter is required" }) };
+    }
 
-    const promotions = result.Items || [];
+    // Resolve which clinics to query. "all" is the frontend sentinel for the
+    // aggregated "All Clinics" view in the header; fan out across every clinic
+    // the user can read. For a specific clinicId, gate on canAccessClinic.
+    let promotions: Record<string, any>[];
+    if (clinicId === "all") {
+      const accessible = await listAccessibleClinicIds(user.sub, user.groups);
+      if (accessible === null) {
+        // Root user — listAccessibleClinicIds returns null meaning "every clinic".
+        // Paginate a Scan of the promotions table; the admin "all" view is rare.
+        console.log("[getPromotions] clinicId=all, root user — scanning full table");
+        promotions = [];
+        let ExclusiveStartKey: Record<string, any> | undefined;
+        do {
+          const resp: any = await ddbDoc.send(new ScanCommand({
+            TableName: JOB_PROMOTIONS_TABLE,
+            ExclusiveStartKey,
+          }));
+          promotions.push(...(resp.Items || []));
+          ExclusiveStartKey = resp.LastEvaluatedKey;
+        } while (ExclusiveStartKey);
+      } else {
+        console.log("[getPromotions] clinicId=all resolved to", accessible.length, "accessible clinics:", accessible);
+        const queryResults = await Promise.all(accessible.map((cid) =>
+          ddbDoc.send(new QueryCommand({
+            TableName: JOB_PROMOTIONS_TABLE,
+            IndexName: "clinicId-createdAt-index",
+            KeyConditionExpression: "clinicId = :cid",
+            ExpressionAttributeValues: { ":cid": cid },
+            ScanIndexForward: false,
+          }))
+        ));
+        promotions = queryResults.flatMap((r) => r.Items || []);
+      }
+    } else {
+      const allowed = await canAccessClinic(user.sub, user.groups, clinicId);
+      if (!allowed) {
+        return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: "You do not have access to this clinic" }) };
+      }
+      const result = await ddbDoc.send(new QueryCommand({
+        TableName: JOB_PROMOTIONS_TABLE,
+        IndexName: "clinicId-createdAt-index",
+        KeyConditionExpression: "clinicId = :cid",
+        ExpressionAttributeValues: { ":cid": clinicId },
+        ScanIndexForward: false,
+      }));
+      promotions = result.Items || [];
+    }
+    // Sort newest first across the fanned-out result sets.
+    promotions.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
 
     // Enrich each promotion with its job's display fields (title, role, type)
     // so the clinic sees "Associate Dentist at Main St" instead of a raw jobId.

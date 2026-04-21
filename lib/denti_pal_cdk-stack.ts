@@ -1086,10 +1086,21 @@ export class DentiPalCDKStack extends cdk.Stack {
             billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
         });
-        // GSI for querying promotions by clinic user (my promotions dashboard)
+        // Legacy GSI — no longer queried by any handler, kept in this deploy so the
+        // DynamoDB "one GSI change per update" rule is respected while the new
+        // clinicId-keyed index is being added. Remove in a follow-up deploy.
         jobPromotionsTable.addGlobalSecondaryIndex({
             indexName: 'clinicUserSub-index',
             partitionKey: { name: 'clinicUserSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+        // GSI for querying promotions by clinic (my promotions dashboard).
+        // Keyed on clinicId so multi-clinic owners see promotions scoped to the
+        // currently-selected clinic rather than every clinic they own.
+        jobPromotionsTable.addGlobalSecondaryIndex({
+            indexName: 'clinicId-createdAt-index',
+            partitionKey: { name: 'clinicId', type: dynamodb.AttributeType.STRING },
             sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
             projectionType: dynamodb.ProjectionType.ALL,
         });
