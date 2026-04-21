@@ -23,7 +23,12 @@ interface ProfessionalProfileItem {
   full_name?: { S?: string };
   last_name?: { S?: string };
   role?: { S?: string };
+  /** Written by `ProfessionalProfileFormPage.tsx` (older form). */
   specialties?: any;
+  /** Written by the `useSpecializations` hook / `SpecializationsSection` — the
+   *  form currently rendered on the Professional profile page. Different column
+   *  name, same semantic field. We must read both and merge. */
+  specializations?: any;
   years_of_experience?: { N?: string };
 }
 
@@ -129,6 +134,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           }
         }
 
+        // Merge `specialties` + `specializations` — two profile forms write to
+        // different column names (see the ProfessionalProfileItem comment).
+        // Dedupe case-insensitively so the Find Professionals filter always sees
+        // something regardless of which form the pro used.
+        const mergedSpecialties = (() => {
+          const all = [
+            ...parseStringArrayAttr(professionalItem.specialties),
+            ...parseStringArrayAttr(professionalItem.specializations),
+          ];
+          const seen = new Set<string>();
+          const out: string[] = [];
+          for (const s of all) {
+            const key = s.trim().toLowerCase();
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            out.push(s.trim());
+          }
+          return out;
+        })();
+
         return {
           userSub,
           // Accept SS, L, or S storage shapes — see parseStringArrayAttr for why.
@@ -136,7 +161,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           firstName: professionalItem.first_name?.S || professionalItem.full_name?.S || "",
           lastName: professionalItem.last_name?.S || "",
           role: professionalItem.role?.S || "",
-          specialties: parseStringArrayAttr(professionalItem.specialties),
+          specialties: mergedSpecialties,
           yearsOfExperience: professionalItem.years_of_experience?.N
             ? parseInt(professionalItem.years_of_experience.N)
             : 0,
