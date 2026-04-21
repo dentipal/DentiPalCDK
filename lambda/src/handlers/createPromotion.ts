@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
@@ -49,8 +49,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return { statusCode: 404, headers: CORS_HEADERS, body: JSON.stringify({ error: "Job not found" }) };
     }
 
-    if (job.clinicUserSub !== user.sub) {
-      return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: "You can only promote your own jobs" }) };
+    // The job must belong to a clinic; promotions are queried by clinicId so an
+    // empty partition would hide the record from the dashboard forever.
+    if (!job.clinicId) {
+      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Job has no clinicId and cannot be promoted" }) };
+    }
+
+    const allowed = await canWriteClinic(user.sub, user.groups, job.clinicId, "manageJobs");
+    if (!allowed) {
+      return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: "You do not have permission to promote this clinic's jobs" }) };
     }
 
     // Check if job is already promoted
@@ -67,8 +74,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const promotionItem = {
       jobId,
       promotionId,
-      clinicUserSub: user.sub,
-      clinicId: job.clinicId || "",
+      clinicUserSub: job.clinicUserSub,
+      clinicId: job.clinicId,
       planId,
       status: "pending_payment",
       createdAt: now,
