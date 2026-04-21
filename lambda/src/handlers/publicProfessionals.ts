@@ -18,19 +18,40 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
 
 interface ProfessionalProfileItem {
   userSub?: { S?: string };
-  dental_software_experience?: { SS?: string[] };
+  dental_software_experience?: any;
   first_name?: { S?: string };
   full_name?: { S?: string };
   last_name?: { S?: string };
   role?: { S?: string };
-  specialties?: { SS?: string[] };
+  specialties?: any;
   years_of_experience?: { N?: string };
+}
+
+/**
+ * Normalize a DynamoDB attribute that may be stored as SS (String Set),
+ * L (List of {S}), or a single S (String), into a plain string[].
+ * Older profile rows sometimes write specialties/software as L; if the
+ * reader only accepts SS, those values silently disappear and downstream
+ * filters match nothing. This helper makes the reader forgiving.
+ */
+function parseStringArrayAttr(attr: any): string[] {
+  if (!attr) return [];
+  if (Array.isArray(attr.SS)) return attr.SS.filter((v: unknown): v is string => typeof v === "string");
+  if (Array.isArray(attr.L)) {
+    return attr.L
+      .map((v: any) => (typeof v?.S === "string" ? v.S : null))
+      .filter((v: string | null): v is string => v !== null && v.length > 0);
+  }
+  if (typeof attr.S === "string" && attr.S.length > 0) return [attr.S];
+  return [];
 }
 
 interface AddressItem {
   city?: { S?: string };
   state?: { S?: string };
   pincode?: { S?: string };
+  lat?: { N?: string };
+  lng?: { N?: string };
 }
 
 interface Profile {
@@ -44,6 +65,10 @@ interface Profile {
   city: string;
   state: string;
   zipcode: string;
+  // Coordinates come from UserAddresses, populated on create/update by geocodeAddressParts.
+  // Null when the pro's address couldn't be geocoded — client should exclude these from distance filtering.
+  lat: number | null;
+  lng: number | null;
 }
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -70,6 +95,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         let city = "";
         let state = "";
         let zipcode = "";
+        let lat: number | null = null;
+        let lng: number | null = null;
 
         // Fetch address for this user
         if (userSub) {
@@ -88,6 +115,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             city = addressItem.city?.S || "";
             state = addressItem.state?.S || "";
             zipcode = addressItem.pincode?.S || "";
+            // lat/lng are stored as DynamoDB Number attributes; parse to float or leave null.
+            if (addressItem.lat?.N) {
+              const v = parseFloat(addressItem.lat.N);
+              if (Number.isFinite(v)) lat = v;
+            }
+            if (addressItem.lng?.N) {
+              const v = parseFloat(addressItem.lng.N);
+              if (Number.isFinite(v)) lng = v;
+            }
           } catch (addrError) {
             console.warn(`Failed to fetch address for userSub: ${userSub}`, addrError);
           }
@@ -95,17 +131,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
           userSub,
-          dentalSoftwareExperience: professionalItem.dental_software_experience?.SS || [],
+          // Accept SS, L, or S storage shapes — see parseStringArrayAttr for why.
+          dentalSoftwareExperience: parseStringArrayAttr(professionalItem.dental_software_experience),
           firstName: professionalItem.first_name?.S || professionalItem.full_name?.S || "",
           lastName: professionalItem.last_name?.S || "",
           role: professionalItem.role?.S || "",
-          specialties: professionalItem.specialties?.SS || [],
+          specialties: parseStringArrayAttr(professionalItem.specialties),
           yearsOfExperience: professionalItem.years_of_experience?.N
             ? parseInt(professionalItem.years_of_experience.N)
             : 0,
           city,
           state,
           zipcode,
+          lat,
+          lng,
         };
       })
     );
