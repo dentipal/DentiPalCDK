@@ -61,7 +61,7 @@ interface AppliedInfo {
   clinicIds: Set<string>;
 }
 
-async function getAppliedJobInfo(userSub: string): Promise<AppliedInfo> {
+export async function getAppliedJobInfo(userSub: string): Promise<AppliedInfo> {
   const jobIds = new Set<string>();
   const clinicIds = new Set<string>();
   let lastKey: Record<string, AttributeValue> | undefined;
@@ -95,7 +95,7 @@ async function getAppliedJobInfo(userSub: string): Promise<AppliedInfo> {
  * Look up the professional's stored coordinates from the user-addresses table.
  * Returns null if the user has no address or no coordinates.
  */
-async function getProfessionalCoords(userSub: string): Promise<Coordinates | null> {
+export async function getProfessionalCoords(userSub: string): Promise<Coordinates | null> {
   try {
     const resp = await ddb.send(
       new QueryCommand({
@@ -185,7 +185,7 @@ async function getActivePromotedJobItems(): Promise<Record<string, AttributeValu
 /**
  * Read stored lat/lng from a job item. Returns null if not geocoded.
  */
-function getJobCoords(item: Record<string, AttributeValue>): Coordinates | null {
+export function getJobCoords(item: Record<string, AttributeValue>): Coordinates | null {
   const lat = num(item.lat);
   const lng = num(item.lng);
   if (lat === null || lng === null) return null;
@@ -269,7 +269,7 @@ function computeRelevanceScore(job: Record<string, AttributeValue>, params: {
  * Check if a DynamoDB item matches the given filters.
  * Returns false if any active filter doesn't match.
  */
-function matchesFilters(item: Record<string, AttributeValue>, filters: {
+export function matchesFilters(item: Record<string, AttributeValue>, filters: {
   role?: string;
   jobType?: string;
   location?: string;
@@ -440,24 +440,64 @@ export const handler = async (
     let matchedJobs: { item: Record<string, AttributeValue>; score: number; distanceMi?: number | null }[] = [];
     let nextKey: Record<string, AttributeValue> | undefined;
 
-    // Decode incoming cursor
+    // Decode incoming cursor. Two shapes are supported:
+    //   1. A DynamoDB LastEvaluatedKey (resume a paused DDB scan).
+    //   2. A synthetic { __overflowOffset: N } marker when the previous page returned
+    //      overflow matches that didn't fit after slicing — we re-scan and slice from N.
+    //      Needed because matchedJobs can exceed `limit` even after DDB is fully scanned
+    //      (e.g., 80 rows in DDB, 60 match, page size 20 → 40 would otherwise be lost).
     let exclusiveStartKey: Record<string, AttributeValue> | undefined;
+    let overflowOffset = 0;
     if (cursor) {
       try {
-        exclusiveStartKey = JSON.parse(Buffer.from(cursor, "base64").toString("utf-8"));
+        const decoded = JSON.parse(Buffer.from(cursor, "base64").toString("utf-8"));
+        if (decoded && typeof decoded === "object" && decoded.__overflowOffset != null) {
+          overflowOffset = Number(decoded.__overflowOffset) || 0;
+        } else {
+          exclusiveStartKey = decoded;
+        }
       } catch {
         return json(400, { error: "Invalid cursor" });
       }
     }
 
-    // We need to over-fetch because we filter out applied jobs and non-matching filters
-    // Fetch up to 5x the limit to have enough after filtering
-    const fetchLimit = limit * 5;
+    // The cursor is a DynamoDB LastEvaluatedKey from the status-createdAt-index GSI.
+    // Its `status` attribute is the GSI partition key — DynamoDB will reject the query
+    // if we hand this key to a KeyConditionExpression whose status doesn't match.
+    // So: figure out which status the cursor came from, and resume iteration there.
+    const cursorStatus = exclusiveStartKey?.status?.S;
+    if (cursorStatus && !statusesToQuery.includes(cursorStatus)) {
+      return json(400, { error: "Invalid cursor" });
+    }
+    const resumeStatuses = cursorStatus
+      ? statusesToQuery.slice(statusesToQuery.indexOf(cursorStatus))
+      : statusesToQuery;
+
     let totalScanned = 0;
     const MAX_SCAN = 500; // safety cap to prevent runaway queries
 
-    for (const status of statusesToQuery) {
-      let statusStartKey = status === statusesToQuery[0] ? exclusiveStartKey : undefined;
+    // Split jobType out of the filter set so we can do two-phase matching:
+    // phase 1 (non-jobType filters + radius) decides whether a row is in the
+    // "filter-matching pool"; we bucket that pool by job_type into `counts`
+    // and only then check jobType to decide whether the row enters the
+    // page's matchedJobs. That way the header's per-type count reflects the
+    // full pool instead of only the currently selected tab.
+    const { jobType: selectedJobType, ...filtersSansJobType } = filters;
+    const itemMatchesSelectedType = (jt: string): boolean => {
+      if (!selectedJobType) return true;
+      if (selectedJobType === "consulting") {
+        return jt === "consulting" || jt === "multi_day_consulting";
+      }
+      return jt === selectedJobType;
+    };
+
+    const counts = { temporary: 0, multiday: 0, permanent: 0 };
+    // Only populated on fresh scans — a mid-scan DDB-cursor resume would give
+    // partial bucket counts (the skipped prefix wouldn't be counted).
+    const computeCounts = !exclusiveStartKey;
+
+    for (const status of resumeStatuses) {
+      let statusStartKey = status === resumeStatuses[0] ? exclusiveStartKey : undefined;
 
       do {
         const resp = await ddb.send(
@@ -480,8 +520,8 @@ export const handler = async (
           // Skip already-applied jobs
           if (appliedJobIds.has(jobId)) continue;
 
-          // Apply server-side filters
-          if (!matchesFilters(item, filters)) continue;
+          // Phase 1: everything except jobType
+          if (!matchesFilters(item, filtersSansJobType)) continue;
 
           // Radius filter: skip jobs outside the professional's travel radius
           let distanceMi: number | null = null;
@@ -495,6 +535,17 @@ export const handler = async (
               continue;
             }
           }
+
+          // Bucket into counts (regardless of which jobType tab is selected).
+          const jt = (str(item.job_type) || str(item.jobType)).toLowerCase();
+          if (computeCounts) {
+            if (jt === "temporary") counts.temporary++;
+            else if (jt === "permanent") counts.permanent++;
+            else if (jt === "consulting" || jt === "multi_day_consulting") counts.multiday++;
+          }
+
+          // Phase 2: jobType gate for list inclusion.
+          if (!itemMatchesSelectedType(jt)) continue;
 
           // Relevance score is only used for "trending"; skip the work otherwise.
           const score = sort === "trending"
@@ -512,11 +563,13 @@ export const handler = async (
         statusStartKey = resp.LastEvaluatedKey;
         nextKey = resp.LastEvaluatedKey;
 
-        // Stop if we have enough results or hit safety cap
-        if (matchedJobs.length >= fetchLimit || totalScanned >= MAX_SCAN) break;
+        // Only MAX_SCAN gates the loop now — the previous `matchedJobs.length >=
+        // fetchLimit` short-circuit would cut counts short by aborting the scan
+        // as soon as the page-sized matched buffer filled up.
+        if (totalScanned >= MAX_SCAN) break;
       } while (statusStartKey);
 
-      if (matchedJobs.length >= fetchLimit || totalScanned >= MAX_SCAN) break;
+      if (totalScanned >= MAX_SCAN) break;
     }
 
     // 2b) Score promoted jobs through the same filter/radius pipeline and merge.
@@ -534,7 +587,8 @@ export const handler = async (
         const jobStatus = str(item.status);
         if (jobStatus !== "open" && jobStatus !== "active") continue;
 
-        if (!matchesFilters(item, filters)) continue;
+        // Two-phase: gate by non-jobType filters first, bucket, then jobType.
+        if (!matchesFilters(item, filtersSansJobType)) continue;
 
         let distanceMi: number | null = null;
         if (radiusMiles && profCoords) {
@@ -546,6 +600,15 @@ export const handler = async (
             continue;
           }
         }
+
+        const jt = (str(item.job_type) || str(item.jobType)).toLowerCase();
+        if (computeCounts) {
+          if (jt === "temporary") counts.temporary++;
+          else if (jt === "permanent") counts.permanent++;
+          else if (jt === "consulting" || jt === "multi_day_consulting") counts.multiday++;
+        }
+
+        if (!itemMatchesSelectedType(jt)) continue;
 
         const score = sort === "trending"
           ? computeRelevanceScore(item, {
@@ -619,15 +682,34 @@ export const handler = async (
       }
     });
 
-    // 4) Slice to requested page size
-    const pageJobs = matchedJobs.slice(0, limit);
-    const hasMore = matchedJobs.length > limit || !!nextKey;
+    // 4) Slice to requested page size, honoring any in-memory offset from an
+    //    earlier overflow page.
+    const pageJobs = matchedJobs.slice(overflowOffset, overflowOffset + limit);
 
-    // 5) Build next cursor from the DynamoDB LastEvaluatedKey
+    // Two independent sources of "more":
+    //   - DDB still has unseen rows (nextKey set).
+    //   - We have overflow matches left over after slicing this page.
+    // If both are true, prefer the overflow cursor — the DDB cursor would jump
+    // past the leftover matches and the client would never see them.
+    const hasDDBMore = !!nextKey;
+    const hasOverflowMore = matchedJobs.length > overflowOffset + limit;
+    const hasMore = hasDDBMore || hasOverflowMore;
+
+    // 5) Build next cursor. Emit the DDB key only when there are no overflow
+    //    matches still pending in the current matched set.
     let nextCursor: string | null = null;
-    if (hasMore && nextKey) {
+    if (hasOverflowMore) {
+      nextCursor = Buffer.from(
+        JSON.stringify({ __overflowOffset: overflowOffset + limit })
+      ).toString("base64");
+    } else if (hasDDBMore && nextKey) {
       nextCursor = Buffer.from(JSON.stringify(nextKey)).toString("base64");
     }
+
+    // When DDB is fully scanned, the matched set is the exact universe for
+    // these filters — expose it so the UI can show "Showing X of N jobs".
+    // When DDB still has more, the total is unknown.
+    const totalMatched = hasDDBMore ? null : matchedJobs.length;
 
     // 6) Convert to plain objects and attach relevance score + distance.
     //    Mask expired promotions at read time so clients never see stale boosts.
@@ -657,9 +739,17 @@ export const handler = async (
 
     return json(200, {
       totalJobs: jobs.length,
+      totalMatched,
       hasMore,
       nextCursor,
       jobs,
+      // Per-type counts of the full filter-matched pool (non-jobType filters
+      // only). Populated on fresh scans; omitted on DDB-cursor resumes since
+      // those only see a suffix of the pool.
+      counts: computeCounts ? counts : null,
+      // True if MAX_SCAN capped us before DDB exhausted — counts are then
+      // lower-bound approximations. Negligible at current data volumes.
+      countsTruncated: computeCounts && hasDDBMore && totalScanned >= MAX_SCAN,
     });
 
   } catch (err: any) {
