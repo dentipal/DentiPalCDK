@@ -134,6 +134,9 @@ import { handler as publicProfessionalsHandler } from "./handlers/publicProfessi
 import { handler as publicClinicsHandler } from "./handlers/findJobs";
 import { handler as getProfessionalFilteredJobsHandler } from "./handlers/getProfessionalFilteredJobs";
 
+// Geocoding (AWS Location Service)
+import { handler as geocodePostalHandler } from "./handlers/geocodePostal";
+
 // Job Promotions
 import { handler as getPromotionPlansHandler } from "./handlers/getPromotionPlans";
 import { handler as createPromotionHandler } from "./handlers/createPromotion";
@@ -346,6 +349,9 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/public/publicprofessionals": publicProfessionalsHandler,
         "GET:/public/publicJobs": publicClinicsHandler,
         "GET:/clinics/{clinicId}/address": getClinicAddressHandler,
+
+        // Geocoding — postal code → city/state (Amazon Location Service)
+        "GET:/geocode/postal": geocodePostalHandler,
 
         // Job Promotions
         "GET:/promotions/plans": getPromotionPlansHandler,
