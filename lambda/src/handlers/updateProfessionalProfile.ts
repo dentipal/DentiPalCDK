@@ -23,6 +23,11 @@ const PROFESSIONAL_PROFILES_TABLE: string = process.env.PROFESSIONAL_PROFILES_TA
 
 // --- 2. Constants and Type Definitions ---
 
+// Years-of-experience allowed range. MUST match the frontend constant
+// YEARS_MAX in src/schemas/profileValidation.ts so the UI slider/input
+// caps at the same value the server accepts. Bumping this from 60 to 70.
+const YEARS_MIN = 0;
+const YEARS_MAX = 70;
 
 /** Interface for the data expected in the request body */
 interface UpdateProfileBody {
@@ -31,7 +36,8 @@ interface UpdateProfileBody {
     email?: string;
     is_active?: boolean;
     hourly_rate?: number;
-    [key: string]: any; 
+    yearsExperience?: number | string;
+    [key: string]: any;
 }
 
 // --- 3. Handler Function ---
@@ -60,7 +66,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const validDisplayRoles = VALID_ROLE_VALUES.map(
                 role => DB_TO_DISPLAY_MAPPING[role] || role
             ).join(', ');
-            
+
             return {
                 statusCode: 400,
                 headers: CORS_HEADERS, // ✅ Uses imported headers
@@ -68,6 +74,36 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     error: `Invalid role value provided. Valid options: ${validDisplayRoles}`
                 })
             };
+        }
+
+        // Validate yearsExperience if provided. Accepts either a number or a
+        // numeric string (the frontend sends a JS number but older clients
+        // may send a string). Range: 0–70 inclusive, must be a finite number.
+        if (updateData.yearsExperience !== undefined && updateData.yearsExperience !== null && updateData.yearsExperience !== "") {
+            const years = typeof updateData.yearsExperience === "number"
+                ? updateData.yearsExperience
+                : Number(updateData.yearsExperience);
+
+            const isInvalid =
+                !Number.isFinite(years) ||
+                years < YEARS_MIN ||
+                years > YEARS_MAX;
+
+            if (isInvalid) {
+                return {
+                    statusCode: 400,
+                    headers: CORS_HEADERS,
+                    body: JSON.stringify({
+                        error: "Validation failed",
+                        fieldErrors: {
+                            yearsExperience: `Must be between ${YEARS_MIN} and ${YEARS_MAX}`,
+                        },
+                    }),
+                };
+            }
+
+            // Normalize to a number so DynamoDB writes a Number attribute.
+            updateData.yearsExperience = years;
         }
 
         // --- Step 1: Check if profile exists ---
