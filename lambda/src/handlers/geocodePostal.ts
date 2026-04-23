@@ -1,146 +1,155 @@
+// geocodePostal.ts — Look up city/state/country for a postal code using
+// Amazon Location Service (replaces the public Zippopotam.us dependency).
+//
+// Route: GET /geocode/postal?country=<ISO2>&postalCode=<code>
+// Returns: { city, state, stateAbbreviation, country, postalCode, label, coordinates }
+
+import {
+  LocationClient,
+  SearchPlaceIndexForTextCommand,
+} from "@aws-sdk/client-location";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { LocationClient, SearchPlaceIndexForTextCommand } from "@aws-sdk/client-location";
-import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
-const REGION: string = process.env.REGION || "us-east-1";
-const PLACE_INDEX_NAME: string | undefined = process.env.PLACE_INDEX_NAME;
-const locationClient = new LocationClient({ region: REGION });
+const REGION = process.env.REGION || "us-east-1";
+const PLACE_INDEX_NAME = process.env.PLACE_INDEX_NAME || "DentiPalGeocoder";
 
-const json = (statusCode: number, body: object): APIGatewayProxyResult => ({
-    statusCode,
-    headers: CORS_HEADERS,
-    body: JSON.stringify(body),
+const locClient = new LocationClient({ region: REGION });
+
+// Amazon Location Service's `FilterCountries` parameter expects ISO 3166-1
+// alpha-3 codes, but users / clients commonly deal in alpha-2. This map
+// covers every country listed in the frontend's Country dropdown.
+const ISO2_TO_ISO3: Record<string, string> = {
+  US: "USA",
+  CA: "CAN",
+  GB: "GBR",
+  IN: "IND",
+  AU: "AUS",
+  DE: "DEU",
+  FR: "FRA",
+  ES: "ESP",
+  IT: "ITA",
+  NL: "NLD",
+  BR: "BRA",
+  MX: "MEX",
+  JP: "JPN",
+  CH: "CHE",
+  SE: "SWE",
+  NO: "NOR",
+  DK: "DNK",
+  FI: "FIN",
+  BE: "BEL",
+  AT: "AUT",
+  PL: "POL",
+  PT: "PRT",
+  NZ: "NZL",
+};
+
+// Best-effort map US state names → 2-letter abbreviation so the form shows
+// "SC" (what US users expect) rather than "South Carolina". Location Service's
+// `Region` field returns the full name.
+const US_STATE_ABBR: Record<string, string> = {
+  alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA",
+  colorado: "CO", connecticut: "CT", delaware: "DE", florida: "FL", georgia: "GA",
+  hawaii: "HI", idaho: "ID", illinois: "IL", indiana: "IN", iowa: "IA",
+  kansas: "KS", kentucky: "KY", louisiana: "LA", maine: "ME", maryland: "MD",
+  massachusetts: "MA", michigan: "MI", minnesota: "MN", mississippi: "MS",
+  missouri: "MO", montana: "MT", nebraska: "NE", nevada: "NV",
+  "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+  "north carolina": "NC", "north dakota": "ND", ohio: "OH", oklahoma: "OK",
+  oregon: "OR", pennsylvania: "PA", "rhode island": "RI", "south carolina": "SC",
+  "south dakota": "SD", tennessee: "TN", texas: "TX", utah: "UT", vermont: "VT",
+  virginia: "VA", washington: "WA", "west virginia": "WV", wisconsin: "WI",
+  wyoming: "WY", "district of columbia": "DC",
+};
+
+const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: JSON.stringify(bodyObj),
 });
 
-// AWS Location's FilterCountries expects ISO 3166-1 alpha-3 codes (e.g. "USA").
-// The frontend sends alpha-2 ("US") or full names ("United States"); normalize here.
-const ISO2_TO_ISO3: Record<string, string> = {
-    US: "USA", IN: "IND", GB: "GBR", UK: "GBR", CA: "CAN", AU: "AUS",
-    DE: "DEU", FR: "FRA", NL: "NLD", IE: "IRL", NZ: "NZL", SG: "SGP",
-    JP: "JPN", CN: "CHN", BR: "BRA", MX: "MEX", ZA: "ZAF", AE: "ARE",
-    SA: "SAU", KR: "KOR", IT: "ITA", ES: "ESP", PT: "PRT", SE: "SWE",
-    NO: "NOR", FI: "FIN", DK: "DNK", CH: "CHE", AT: "AUT", BE: "BEL",
-    PL: "POL", TR: "TUR", ID: "IDN", PH: "PHL", MY: "MYS", TH: "THA",
-    VN: "VNM",
-};
+export const handler = async (
+  event: APIGatewayProxyEvent
+): Promise<APIGatewayProxyResult> => {
+  setOriginFromEvent(event);
 
-const NAME_TO_ISO3: Record<string, string> = {
-    "united states": "USA", "usa": "USA",
-    "india": "IND",
-    "united kingdom": "GBR", "uk": "GBR", "great britain": "GBR", "england": "GBR",
-    "canada": "CAN",
-    "australia": "AUS",
-    "germany": "DEU",
-    "france": "FRA",
-    "netherlands": "NLD",
-    "ireland": "IRL",
-    "new zealand": "NZL",
-    "singapore": "SGP",
-    "japan": "JPN",
-};
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
+  }
 
-const normalizeCountry = (raw: string | undefined): string => {
-    const v = (raw || "").trim();
-    if (!v) return "USA";
-    const upper = v.toUpperCase();
-    if (upper.length === 3) return upper;
-    if (upper.length === 2 && ISO2_TO_ISO3[upper]) return ISO2_TO_ISO3[upper];
-    return NAME_TO_ISO3[v.toLowerCase()] || "USA";
-};
+  const params = event.queryStringParameters || {};
+  const postalCode = (params.postalCode || params.postal_code || "").trim();
+  const countryRaw = (params.country || "").trim().toUpperCase();
 
-// US state full-name -> 2-letter abbreviation (for HERE data which returns full names).
-const US_STATE_ABBR: Record<string, string> = {
-    alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA",
-    colorado: "CO", connecticut: "CT", delaware: "DE", "district of columbia": "DC",
-    florida: "FL", georgia: "GA", hawaii: "HI", idaho: "ID", illinois: "IL",
-    indiana: "IN", iowa: "IA", kansas: "KS", kentucky: "KY", louisiana: "LA",
-    maine: "ME", maryland: "MD", massachusetts: "MA", michigan: "MI", minnesota: "MN",
-    mississippi: "MS", missouri: "MO", montana: "MT", nebraska: "NE", nevada: "NV",
-    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
-    "north carolina": "NC", "north dakota": "ND", ohio: "OH", oklahoma: "OK",
-    oregon: "OR", pennsylvania: "PA", "rhode island": "RI", "south carolina": "SC",
-    "south dakota": "SD", tennessee: "TN", texas: "TX", utah: "UT", vermont: "VT",
-    virginia: "VA", washington: "WA", "west virginia": "WV", wisconsin: "WI",
-    wyoming: "WY", "puerto rico": "PR",
-};
+  if (!postalCode) {
+    return json(400, {
+      error: "Bad Request",
+      message: "postalCode query parameter is required",
+    });
+  }
+  if (postalCode.length > 12) {
+    return json(400, {
+      error: "Bad Request",
+      message: "postalCode is too long",
+    });
+  }
 
-const deriveStateAbbr = (region: string | undefined, country: string): string => {
-    if (!region) return "";
-    if (region.length <= 3) return region.toUpperCase();
-    if (country === "USA") {
-        const abbr = US_STATE_ABBR[region.toLowerCase()];
-        if (abbr) return abbr;
-    }
-    return "";
-};
+  // If a country is provided we narrow the search; if not, we let Location
+  // Service figure it out (useful when the frontend hasn't chosen yet).
+  const iso3 = countryRaw ? ISO2_TO_ISO3[countryRaw] : undefined;
 
-// GET /location/lookup?postalCode=90210&country=us&limit=10
-// Response: { places: NormalizedAddress[] } matching dentipal/src/utils/awsLocation.ts
-export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
-    const method = (event.requestContext as any).http?.method || event.httpMethod || "GET";
+  try {
+    const resp = await locClient.send(
+      new SearchPlaceIndexForTextCommand({
+        IndexName: PLACE_INDEX_NAME,
+        Text: postalCode,
+        MaxResults: 1,
+        // Only filter when we know the ISO3 — otherwise we'd reject countries
+        // outside our map even if the user typed a valid code.
+        ...(iso3 ? { FilterCountries: [iso3] } : {}),
+      })
+    );
 
-    if (method === "OPTIONS") {
-        return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+    const place = resp.Results?.[0]?.Place;
+    if (!place) {
+      return json(404, {
+        error: "Not Found",
+        message: "No location found for that postal code",
+      });
     }
 
-    if (!PLACE_INDEX_NAME) {
-        console.error("[location/lookup] PLACE_INDEX_NAME env var is not set");
-        return json(500, { places: [], error: "Geocoding is not configured." });
-    }
+    const city = place.Municipality || place.SubRegion || "";
+    const regionFull = place.Region || "";
+    const stateAbbr =
+      countryRaw === "US"
+        ? US_STATE_ABBR[regionFull.toLowerCase()] || regionFull
+        : regionFull;
 
-    try {
-        const authHeader = event.headers?.Authorization || event.headers?.authorization;
-        if (!authHeader) throw new Error("Authorization header is missing");
-        extractUserFromBearerToken(authHeader);
-    } catch (authError: any) {
-        return json(401, { places: [], error: authError?.message || "Unauthorized" });
-    }
+    const point = place.Geometry?.Point;
+    const coordinates =
+      point && point.length === 2
+        ? { lng: point[0], lat: point[1] }
+        : null;
 
-    const params = event.queryStringParameters || {};
-    const postal = (params.postalCode || params.postal || "").trim();
-    const country = normalizeCountry(params.country);
-    const rawLimit = Number(params.limit || 10);
-    const maxResults = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 20) : 10;
-
-    if (!postal) {
-        return json(400, { places: [], error: "Query param 'postalCode' is required." });
-    }
-    if (!/^[A-Za-z0-9][A-Za-z0-9\s\-]{1,11}$/.test(postal)) {
-        return json(400, { places: [], error: "Invalid postal code format." });
-    }
-
-    try {
-        const resp = await locationClient.send(new SearchPlaceIndexForTextCommand({
-            IndexName: PLACE_INDEX_NAME,
-            Text: postal,
-            FilterCountries: [country],
-            MaxResults: maxResults,
-        }));
-
-        const places = (resp.Results || [])
-            .map((r) => r.Place)
-            .filter((p): p is NonNullable<typeof p> => !!p)
-            .map((p) => {
-                const state = p.Region || "";
-                const placeName = p.Municipality || p.SubRegion || p.Neighborhood || "";
-                return {
-                    placeName,
-                    state,
-                    stateAbbreviation: deriveStateAbbr(state, country),
-                    country: p.Country || country,
-                    municipality: p.Municipality || undefined,
-                    postalCode: p.PostalCode || postal,
-                    label: p.Label || undefined,
-                };
-            })
-            // Drop rows with no usable locality so the UI doesn't render blanks.
-            .filter((place) => place.placeName || place.state);
-
-        return json(200, { places, source: "aws-location" });
-    } catch (err: any) {
-        console.error("[location/lookup] AWS Location error:", err?.name, err?.message);
-        return json(502, { places: [], error: "Geocoding upstream failed. Please try again." });
-    }
+    return json(200, {
+      status: "success",
+      data: {
+        city,
+        state: stateAbbr,
+        stateFull: regionFull,
+        country: place.Country || iso3 || countryRaw || "",
+        postalCode: place.PostalCode || postalCode,
+        label: place.Label || "",
+        coordinates,
+      },
+    });
+  } catch (err) {
+    const error = err as Error;
+    console.error("[geocodePostal] Error:", error.name, error.message);
+    return json(500, {
+      error: "Internal Server Error",
+      message: "Failed to look up postal code",
+    });
+  }
 };

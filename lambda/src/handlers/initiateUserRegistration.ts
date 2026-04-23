@@ -255,7 +255,7 @@ export const handler = async (
     console.error("Error initiating user registration:", error);
     
     let statusCode = 500;
-    let message = "Failed to initiate registration";
+    let message = "Failed to   ";
     let details: Record<string, any> = { errorType: error.name, reason: error.message };
 
     if (error.name === "UsernameExistsException") {
