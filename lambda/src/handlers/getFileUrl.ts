@@ -25,6 +25,13 @@ const generateFileUrl = async (
   event: APIGatewayProxyEvent,
   fileType: string
 ): Promise<APIGatewayProxyResult> => {
+  // IMPORTANT: call this FIRST on every entry point. `CORS_HEADERS` is backed
+  // by a module-level `_currentOrigin` that Lambda warm-start containers share
+  // across invocations. Without this, a previous request from one origin
+  // leaks its Access-Control-Allow-Origin into the next request from another
+  // origin — which is exactly what caused the CORS error for localhost:5173.
+  setOriginFromEvent(event);
+
   let objectKeyToUse: string | undefined;
   try {
     // CORS Preflight
@@ -98,9 +105,15 @@ const generateFileUrl = async (
         return json(403, { error: "Access denied - file not owned by specified user" });
       }
 
-      // Generate presigned URL
+      // Generate presigned URL. Use a 24h lifetime so users scrolling through
+      // their own profile don't hit AccessDenied on URLs that expired while
+      // the tab was open. The frontend still re-fetches on-demand for the
+      // belt-and-suspenders case (see useDocuments.downloadDocument).
+      const PRESIGN_TTL_SECONDS = 24 * 60 * 60;
       const getCommand = new GetObjectCommand({ Bucket: bucket, Key: objectKeyToUse });
-      const presignedUrl = await getSignedUrl(s3Client, getCommand, { expiresIn: 3600 });
+      const presignedUrl = await getSignedUrl(s3Client, getCommand, {
+        expiresIn: PRESIGN_TTL_SECONDS,
+      });
 
       return json(200, {
         message: "File URL retrieved successfully",
@@ -116,7 +129,7 @@ const generateFileUrl = async (
           originalFilename: headResponse.Metadata?.["original-filename"],
           uploadTimestamp: headResponse.Metadata?.["upload-timestamp"],
         },
-        expiresIn: 3600,
+        expiresIn: PRESIGN_TTL_SECONDS,
       });
     } catch (error: any) {
       if (error.name === "NoSuchKey" || error.name === "NotFound") {
