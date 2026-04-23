@@ -66,10 +66,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const userSub = userInfo.sub;
         const groups = userInfo.groups || [];
 
-        // 3. Group Authorization Check (Root, ClinicAdmin)
+        // 3. Group Authorization Check (Root, ClinicAdmin, ClinicManager)
         const normalized: string[] = groups.map(normalize);
-        const isRootGroup: boolean = normalized.includes("root");
-        
         const isAllowedGroup: boolean = normalized.some(g => ALLOWED_UPDATERS.has(g));
         
         if (!isAllowedGroup) {
@@ -106,21 +104,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 5. Clinic-Scoped Access Check
-        // Root bypasses clinic-scoped check; ClinicAdmin must be a member of this clinic
-        // (Clinics.AssociatedUsers or createdBy). Group-level gate (Root/ClinicAdmin) was already
-        // enforced above via ALLOWED_UPDATERS, so this is just the per-clinic membership check.
-        if (!isRootGroup) {
-            const hasAccess: boolean = await canAccessClinic(userSub, groups, clinicId);
+        // Every role — including Root — must be a member of this clinic
+        // (Clinics.AssociatedUsers or createdBy). Group-level gate (Root/ClinicAdmin)
+        // was already enforced above via ALLOWED_UPDATERS, so this is the per-clinic
+        // membership check applied uniformly.
+        const hasAccess: boolean = await canAccessClinic(userSub, groups, clinicId);
 
-            if (!hasAccess) {
-                return json(403, {
-                    error: "Forbidden",
-                    statusCode: 403,
-                    message: "Access denied to update this clinic",
-                    details: { clinicId: clinicId },
-                    timestamp: new Date().toISOString()
-                });
-            }
+        if (!hasAccess) {
+            return json(403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message: "Access denied to update this clinic",
+                details: { clinicId: clinicId },
+                timestamp: new Date().toISOString()
+            });
         }
 
         // 6. Parse and Prepare Update Data

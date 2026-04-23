@@ -6,7 +6,7 @@ import {
     ScanCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken, isRoot } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils"; 
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
@@ -99,21 +99,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             expressionAttributeNames["#name_attr"] = "name";
         }
 
-        // 3. Core Logic for User Type Filtering
-        const isRootUser: boolean = isRoot(groups);
-
-        if (isRootUser) {
-            // Root user: filter clinics by 'createdBy' attribute (PK of the clinic should be userSub)
-            filterExpressions.push("createdBy = :userSub");
-            expressionAttributeValues[":userSub"] = { S: userSub };
-            console.log(`🔒 Root user (${userSub}): Filtering clinics by 'createdBy'.`);
-        } else {
-            // Non-root users: filter by 'AssociatedUsers' attribute (must contain userSub)
-            // NOTE: This requires 'AssociatedUsers' to be indexed or uses an inefficient Scan/Filter.
-            filterExpressions.push("contains(AssociatedUsers, :userSub)");
-            expressionAttributeValues[":userSub"] = { S: userSub };
-            console.log(`🔒 Non-root user (${userSub}): Filtering clinics by 'AssociatedUsers'.`);
-        }
+        // 3. Membership scoping — every user (including Root) sees only clinics
+        //    they created OR are associated with. Same rule as canAccessClinic.
+        void groups;
+        filterExpressions.push("(createdBy = :userSub OR contains(AssociatedUsers, :userSub))");
+        expressionAttributeValues[":userSub"] = { S: userSub };
+        console.log(`[getAllClinics] Scoping to createdBy/AssociatedUsers for user ${userSub}.`);
         
         // 4. Create DynamoDB Scan Command Input
         const scanCommand: ScanCommandInput = {

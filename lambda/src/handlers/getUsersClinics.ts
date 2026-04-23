@@ -116,21 +116,17 @@ export const handler = async (
       };
     });
 
-    let accessibleClinics = clinics;
+    // Every user — including Root — is scoped to clinics they own (createdBy)
+    // or are associated with. No platform-wide "see everything" tier.
+    const accessibleClinics = clinics.filter(
+      clinic =>
+        clinic.createdBy === userSub ||
+        clinic.associatedUsers.includes(userSub)
+    );
 
-    if (!isRoot(groups)) {
-      accessibleClinics = clinics.filter(
-        clinic =>
-          clinic.createdBy === userSub ||
-          clinic.associatedUsers.includes(userSub)
-      );
-
-      console.log(
-        `🔒 Non-root user: Filtering clinics for associated user ${userSub}`
-      );
-    } else {
-      console.log("✅ Root user: Accessing all clinics");
-    }
+    console.log(
+      `[getUsersClinics] Scoped to ${accessibleClinics.length} accessible clinics for user ${userSub}`
+    );
 
     return json(200, {
       status: "success",

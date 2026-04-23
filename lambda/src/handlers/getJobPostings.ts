@@ -7,7 +7,7 @@ import {
   AttributeValue
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken, isRoot } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
@@ -29,23 +29,7 @@ interface DynamoItem {
 }
 
 // -------------------------
-// Function: Get all clinic userSubs (Root only)
-// -------------------------
-async function getAllClinicUserSubs(): Promise<string[]> {
-  const command = new ScanCommand({
-    TableName: process.env.CLINIC_PROFILES_TABLE,
-    ProjectionExpression: "userSub",
-  });
-
-  const response = await dynamodb.send(command);
-
-  return (response.Items || []).map(
-    (item: DynamoItem) => item.userSub?.S || ""
-  );
-}
-
-// -------------------------
-// Handler: Retrieve job postings (clinic or root)
+// Handler: Retrieve job postings for the caller
 // -------------------------
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     setOriginFromEvent(event);
@@ -68,13 +52,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const userSub = userInfo.sub;
     const groups = userInfo.groups;
 
-    let clinicUserSubs: string[] = [];
-
-    if (isRoot(groups)) {
-      clinicUserSubs = await getAllClinicUserSubs();
-    } else {
-      clinicUserSubs = [userSub];
-    }
+    // Scope to the caller's own postings only. Root is a clinic-side role —
+    // it does not grant cross-tenant reads.
+    void groups;
+    const clinicUserSubs: string[] = [userSub];
 
     const jobPostings: any[] = [];
 

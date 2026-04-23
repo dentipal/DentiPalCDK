@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, canAccessClinic } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
@@ -78,6 +78,8 @@ export const handler = async (
     }
 
     // ---------------- AUTHORIZATION CHECK ----------------
+    // Canonical membership check via Clinics.AssociatedUsers / createdBy.
+    // Root has no bypass — it must pass the same membership gate as any other role.
     const groupsRaw =
       event.requestContext?.authorizer?.claims?.["cognito:groups"] || "";
 
@@ -85,32 +87,18 @@ export const handler = async (
       ? groupsRaw
       : groupsRaw
           .split(",")
-          .map((g: string) => g.trim()) // FIXED ERROR HERE
+          .map((g: string) => g.trim())
           .filter(Boolean);
 
-    const isRoot = groups.includes("root");
-
-    if (!isRoot) {
-      const authProfileCommand = new GetItemCommand({
-        TableName: process.env.CLINIC_PROFILES_TABLE as string,
-        Key: {
-          clinicId: { S: clinicId },
-          userSub: { S: userSub }
-        },
-        ProjectionExpression: "clinicId, userSub"
-      });
-
-      const authProfileResp = await dynamodb.send(authProfileCommand);
-
-      if (!authProfileResp.Item) {
-        return {
-          statusCode: 403,
-          headers: CORS_HEADERS,
-          body: JSON.stringify({
-            error: "Unauthorized: no access to this clinic's jobs"
-          })
-        };
-      }
+    const allowed = await canAccessClinic(userSub, groups, clinicId);
+    if (!allowed) {
+      return {
+        statusCode: 403,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          error: "Unauthorized: no access to this clinic's jobs"
+        })
+      };
     }
 
     // ---------------- QUERY JOBS ----------------

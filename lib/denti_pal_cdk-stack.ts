@@ -1286,6 +1286,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             actions: [
                 'cognito-idp:SignUp',
                 'cognito-idp:ConfirmSignUp',
+                'cognito-idp:ResendConfirmationCode',
                 'cognito-idp:AdminAddUserToGroup',
                 'cognito-idp:AdminGetUser',
                 'cognito-idp:AdminCreateUser',

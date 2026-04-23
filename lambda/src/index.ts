@@ -96,6 +96,7 @@ import { handler as removeClinicFavoriteHandler } from "./handlers/removeClinicF
 
 import { handler as initiateUserRegistrationHandler } from "./handlers/initiateUserRegistration";
 import { handler as verifyOTPAndCreateUserHandler } from "./handlers/verifyOTPAndCreateUser";
+import { handler as resendOtpHandler } from "./handlers/resendOtp";
 import { handler as loginUserHandler } from "./handlers/loginUser";
 import { handler as refreshTokenHandler } from "./handlers/refreshToken";
 import { handler as forgotPasswordHandler } from "./handlers/forgotPassword";
@@ -129,7 +130,7 @@ import {
     updateVideoResume,
 } from "./handlers/updateFile";
 
-import { handler as geocodePostalHandler } from "./handlers/geocodePostal";
+
 import { handler as publicProfessionalsHandler } from "./handlers/publicProfessionals";
 import { handler as publicClinicsHandler } from "./handlers/findJobs";
 import { handler as getProfessionalFilteredJobsHandler } from "./handlers/getProfessionalFilteredJobs";
@@ -313,6 +314,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         // OTP verification and user registration
         "POST:/auth/initiate-registration": initiateUserRegistrationHandler,
         "POST:/auth/verify-otp": verifyOTPAndCreateUserHandler,
+        "POST:/auth/resend-otp": resendOtpHandler,
 
         // Referral system
         "POST:/referrals/invite": sendReferralInviteHandler,
