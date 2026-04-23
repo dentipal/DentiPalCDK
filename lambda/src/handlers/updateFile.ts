@@ -32,6 +32,11 @@ interface UpdateFileBody {
 
 // Generic update implementation — updates the professional profile record for a given userSub
 const updateFileForType = async (event: APIGatewayProxyEvent, fileType: string): Promise<APIGatewayProxyResult> => {
+    // Must run before anything touches CORS_HEADERS. See getFileUrl.ts for
+    // the full explanation — warm Lambda containers share _currentOrigin,
+    // so skipping this call leaks a previous request's origin into this one.
+    setOriginFromEvent(event);
+
     console.info(`🔧 Starting updateFileMetadata handler for ${fileType}`);
 
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "POST";
