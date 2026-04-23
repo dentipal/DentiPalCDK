@@ -183,9 +183,10 @@ export const canWriteClinic = async (
  */
 export const listAccessibleClinicIds = async (
     userSub: string,
-    groups: string[] | undefined | null
+    groups: string[] | undefined | null,
+    { rootGetsAll = true }: { rootGetsAll?: boolean } = {}
 ): Promise<string[] | null> => {
-    if (isRoot(groups)) return null;
+    if (rootGetsAll && isRoot(groups)) return null;
     if (!userSub) return [];
     if (!CLINICS_TABLE) {
         console.error("[listAccessibleClinicIds] CLINICS_TABLE env var is not set");

@@ -15,6 +15,8 @@ import {
   CognitoIdentityProviderClient,
   SignUpCommand,
   AdminAddUserToGroupCommand,
+  AdminGetUserCommand,
+  AdminDeleteUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { VALID_ROLE_VALUES, getRoleByDbValue } from "./professionalRoles";
 // Import shared CORS headers
@@ -145,7 +147,37 @@ export const handler = async (
       UserAttributes: userAttributes,
     });
 
-    const signUpResult = await cognito.send(signUpCommand);
+    let signUpResult;
+    try {
+      signUpResult = await cognito.send(signUpCommand);
+    } catch (signUpError: any) {
+      if (signUpError.name !== "UsernameExistsException") {
+        throw signUpError;
+      }
+
+      // Email is already taken — check if it's a stale UNCONFIRMED signup the
+      // user abandoned before entering their OTP. If so, wipe it and retry so
+      // their new form data (password, name, role) wins.
+      const existing = await cognito.send(
+        new AdminGetUserCommand({
+          UserPoolId: process.env.USER_POOL_ID,
+          Username: email,
+        })
+      );
+
+      if (existing.UserStatus !== "UNCONFIRMED") {
+        throw signUpError;
+      }
+
+      console.log(`Replacing stale UNCONFIRMED signup for ${email}`);
+      await cognito.send(
+        new AdminDeleteUserCommand({
+          UserPoolId: process.env.USER_POOL_ID,
+          Username: email,
+        })
+      );
+      signUpResult = await cognito.send(signUpCommand);
+    }
 
     // --- NEW REFERRAL LOGIC STARTS HERE ---
     const newUserSub = signUpResult.UserSub;

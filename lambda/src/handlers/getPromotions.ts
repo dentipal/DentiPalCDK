@@ -1,5 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, QueryCommand, BatchGetCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, QueryCommand, BatchGetCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, canAccessClinic, listAccessibleClinicIds } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
@@ -31,34 +31,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // the user can read. For a specific clinicId, gate on canAccessClinic.
     let promotions: Record<string, any>[];
     if (clinicId === "all") {
-      const accessible = await listAccessibleClinicIds(user.sub, user.groups);
-      if (accessible === null) {
-        // Root user — listAccessibleClinicIds returns null meaning "every clinic".
-        // Paginate a Scan of the promotions table; the admin "all" view is rare.
-        console.log("[getPromotions] clinicId=all, root user — scanning full table");
-        promotions = [];
-        let ExclusiveStartKey: Record<string, any> | undefined;
-        do {
-          const resp: any = await ddbDoc.send(new ScanCommand({
-            TableName: JOB_PROMOTIONS_TABLE,
-            ExclusiveStartKey,
-          }));
-          promotions.push(...(resp.Items || []));
-          ExclusiveStartKey = resp.LastEvaluatedKey;
-        } while (ExclusiveStartKey);
-      } else {
-        console.log("[getPromotions] clinicId=all resolved to", accessible.length, "accessible clinics:", accessible);
-        const queryResults = await Promise.all(accessible.map((cid) =>
-          ddbDoc.send(new QueryCommand({
-            TableName: JOB_PROMOTIONS_TABLE,
-            IndexName: "clinicId-createdAt-index",
-            KeyConditionExpression: "clinicId = :cid",
-            ExpressionAttributeValues: { ":cid": cid },
-            ScanIndexForward: false,
-          }))
-        ));
-        promotions = queryResults.flatMap((r) => r.Items || []);
-      }
+      // Scope "My Promotions" to the caller's owned/associated clinics even
+      // for root users — they should not see every promotion in the system
+      // just because they haven't picked a clinic yet.
+      const accessible = (await listAccessibleClinicIds(user.sub, user.groups, { rootGetsAll: false })) ?? [];
+      console.log("[getPromotions] clinicId=all resolved to", accessible.length, "accessible clinics:", accessible);
+      const queryResults = await Promise.all(accessible.map((cid) =>
+        ddbDoc.send(new QueryCommand({
+          TableName: JOB_PROMOTIONS_TABLE,
+          IndexName: "clinicId-createdAt-index",
+          KeyConditionExpression: "clinicId = :cid",
+          ExpressionAttributeValues: { ":cid": cid },
+          ScanIndexForward: false,
+        }))
+      ));
+      promotions = queryResults.flatMap((r) => r.Items || []);
     } else {
       const allowed = await canAccessClinic(user.sub, user.groups, clinicId);
       if (!allowed) {
