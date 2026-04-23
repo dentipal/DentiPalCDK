@@ -123,45 +123,81 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const addressFieldsChanged = updatedFields.some((f) =>
             ["addressLine1", "city", "state", "pincode", "country"].includes(f)
         );
+        const removeFields: string[] = [];
+        let geocodeReport: {
+            attempted: boolean;
+            ok: boolean;
+            source: string | null;
+            lat: number | null;
+            lng: number | null;
+            reason?: string;
+        } = { attempted: false, ok: false, source: null, lat: null, lng: null };
+
         if (addressFieldsChanged) {
             // Merge existing values with incoming updates to build the final address string
             const existing = existingAddress.Item!;
-            const getStr = (field: string): string =>
-                (updateFields as any)[field] ?? existing[field]?.S ?? "";
+            const getStr = (field: string): string => {
+                const incoming = (updateFields as any)[field];
+                if (incoming !== undefined && incoming !== null) return String(incoming);
+                return existing[field]?.S ?? "";
+            };
 
-            const coords = await geocodeAddressParts({
+            const parts = {
                 addressLine1: getStr("addressLine1"),
                 city: getStr("city"),
                 state: getStr("state"),
                 pincode: getStr("pincode"),
                 country: getStr("country") || "USA",
-            });
+            };
+            const source = [parts.addressLine1, parts.city, parts.state, parts.pincode, parts.country]
+                .filter((p) => p && p.trim().length > 0)
+                .join(", ");
+            geocodeReport.attempted = true;
+            geocodeReport.source = source;
+            console.log(`[updateUserAddress] Geocoding: "${source}"`);
+
+            const coords = await geocodeAddressParts(parts);
             if (coords) {
                 console.log(`[updateUserAddress] Re-geocoded → (${coords.lat}, ${coords.lng})`);
+                geocodeReport.ok = true;
+                geocodeReport.lat = coords.lat;
+                geocodeReport.lng = coords.lng;
                 updatedFields.push("lat", "lng");
                 expressionAttributeNames["#lat"] = "lat";
                 expressionAttributeNames["#lng"] = "lng";
                 expressionAttributeValues[":lat"] = { N: String(coords.lat) };
                 expressionAttributeValues[":lng"] = { N: String(coords.lng) };
             } else {
-                console.warn(`[updateUserAddress] Could not geocode updated address`);
+                // Geocode failed. Don't keep stale lat/lng from the old address — remove them.
+                console.warn(`[updateUserAddress] Geocode returned null for "${source}" — removing any stale lat/lng`);
+                geocodeReport.reason = "geocode-null";
+                const existingItem = existingAddress.Item!;
+                if (existingItem.lat) {
+                    expressionAttributeNames["#lat"] = "lat";
+                    removeFields.push("#lat");
+                }
+                if (existingItem.lng) {
+                    expressionAttributeNames["#lng"] = "lng";
+                    removeFields.push("#lng");
+                }
             }
         }
 
         // --- Step 3: Build update expression ---
-        const updateExpression: string =
-            'SET ' + updatedFields.map(field => `#${field} = :${field}`).join(', ');
-        
-        // Add timestamp
         const nowIso: string = new Date().toISOString();
         expressionAttributeNames['#updatedAt'] = 'updatedAt';
         expressionAttributeValues[':updatedAt'] = { S: nowIso };
+
+        const setClause =
+            'SET ' +
+            [...updatedFields.map((field) => `#${field} = :${field}`), '#updatedAt = :updatedAt'].join(', ');
+        const removeClause = removeFields.length > 0 ? ' REMOVE ' + removeFields.join(', ') : '';
 
         // --- Step 4: Execute update ---
         const updateParams: UpdateItemCommandInput = {
             TableName: USER_ADDRESSES_TABLE,
             Key: { userSub: { S: userSub } },
-            UpdateExpression: updateExpression + ', #updatedAt = :updatedAt',
+            UpdateExpression: setClause + removeClause,
             ExpressionAttributeNames: expressionAttributeNames,
             ExpressionAttributeValues: expressionAttributeValues,
             ReturnValues: 'ALL_NEW'
@@ -186,11 +222,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS_HEADERS, 
+            headers: CORS_HEADERS,
             body: JSON.stringify({
                 message: 'Address updated successfully',
                 updatedFields,
+                removedFields: removeFields.map((n) => n.replace(/^#/, '')),
                 updatedAt: nowIso,
+                geocode: geocodeReport,
                 address: unmarshalledAttributes
             })
         };

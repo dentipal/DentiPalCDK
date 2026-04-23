@@ -10,8 +10,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken, isRoot, listAccessibleClinicIds } from "./utils";
-import { ScanCommand } from "@aws-sdk/client-dynamodb";
+import { extractUserFromBearerToken, listAccessibleClinicIds } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -25,7 +24,6 @@ const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
 const JOB_APPLICATIONS_CLINIC_GSI =
   process.env.JOB_APPLICATIONS_CLINIC_GSI || "clinicId-jobId-index";
 const JOB_POSTINGS_CLINIC_GSI = process.env.JOB_POSTINGS_CLINIC_GSI || "ClinicIdIndex";
-const CLINICS_TABLE = process.env.CLINICS_TABLE;
 
 // --- Status Configurations ---
 
@@ -103,28 +101,6 @@ async function queryAll(input: QueryCommandInput): Promise<any[]> {
   return items;
 }
 
-async function scanAllClinicIds(): Promise<string[]> {
-  if (!CLINICS_TABLE) {
-    console.error("[getAllClinicsShifts] CLINICS_TABLE env var is not set; cannot enumerate clinics for Root.");
-    return [];
-  }
-  const clinicIds: string[] = [];
-  let ExclusiveStartKey: Record<string, AttributeValue> | undefined = undefined;
-  do {
-    const resp: any = await dynamodb.send(new ScanCommand({
-      TableName: CLINICS_TABLE,
-      ProjectionExpression: "clinicId",
-      ExclusiveStartKey,
-    }));
-    for (const item of resp.Items || []) {
-      const id = item.clinicId?.S;
-      if (id) clinicIds.push(id);
-    }
-    ExclusiveStartKey = resp.LastEvaluatedKey;
-  } while (ExclusiveStartKey);
-  return clinicIds;
-}
-
 function normalizeStatus(raw: any): string {
   return (raw?.S || raw || "").toString().trim().toLowerCase();
 }
@@ -175,17 +151,11 @@ export const handler = async (
     console.log(`[getAllClinicsShifts] Executing data fetch for userSub: ${requesterSub}`);
 
     // Determine which clinics this user may read across.
-    // Root → every clinic in the system. Non-root → only clinics they appear in
-    // (Clinics.AssociatedUsers or createdBy). Shared membership check with canAccessClinic.
-    let targetClinicIds: string[];
-    if (isRoot(groups)) {
-      targetClinicIds = await scanAllClinicIds();
-      console.log(`[getAllClinicsShifts] Root user; enumerated ${targetClinicIds.length} clinics.`);
-    } else {
-      const accessible = await listAccessibleClinicIds(requesterSub, groups);
-      targetClinicIds = accessible ?? [];
-      console.log(`[getAllClinicsShifts] Non-root user; ${targetClinicIds.length} accessible clinics.`);
-    }
+    // Every user — including Root — is scoped to clinics they appear in
+    // (Clinics.AssociatedUsers or createdBy). Same membership rule as canAccessClinic.
+    const accessible = await listAccessibleClinicIds(requesterSub, groups);
+    const targetClinicIds: string[] = accessible ?? [];
+    console.log(`[getAllClinicsShifts] ${targetClinicIds.length} accessible clinics for user ${requesterSub}.`);
 
     if (targetClinicIds.length === 0) {
       return json(200, {

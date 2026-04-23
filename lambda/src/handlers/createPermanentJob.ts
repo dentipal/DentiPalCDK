@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dyn
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
-import { extractUserFromBearerToken, canWriteClinic, isRoot } from "./utils";
+import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 import { geocodeAddressParts } from "./geo";
@@ -369,24 +369,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Verify user has membership + write role for every clinic they're posting to.
-        // Root bypasses (handled inside canWriteClinic). ClinicViewer is blocked (read-only role).
+        // Every role — including Root — must pass the membership gate inside canWriteClinic.
+        // ClinicViewer is blocked (read-only role).
         console.log('=== CLINIC ACCESS VERIFICATION START ===');
-        const isRootUser = isRoot(userGroups);
-
-        if (!isRootUser) {
-            for (const clinicId of jobData.clinicIds) {
-                const hasAccess = await canWriteClinic(userSub, userGroups, clinicId, "manageJobs");
-                if (!hasAccess) {
-                    console.warn(`User ${userSub} denied write access to clinic ${clinicId}`);
-                    return json(403, {
-                        error: "Forbidden",
-                        message: `Access denied to clinic ${clinicId}`,
-                        details: {
-                            reason: "You can only create jobs for clinics you manage",
-                            deniedClinicId: clinicId
-                        }
-                    });
-                }
+        for (const clinicId of jobData.clinicIds) {
+            const hasAccess = await canWriteClinic(userSub, userGroups, clinicId, "manageJobs");
+            if (!hasAccess) {
+                console.warn(`User ${userSub} denied write access to clinic ${clinicId}`);
+                return json(403, {
+                    error: "Forbidden",
+                    message: `Access denied to clinic ${clinicId}`,
+                    details: {
+                        reason: "You can only create jobs for clinics you manage",
+                        deniedClinicId: clinicId
+                    }
+                });
             }
         }
         console.log('=== CLINIC ACCESS VERIFICATION END ===');

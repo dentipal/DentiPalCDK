@@ -120,9 +120,10 @@ const extractAssociatedUsers = (attr: AttributeValue | undefined): string[] => {
 
 /**
  * READ gate: may this user read data for the given clinicId?
- * Root → always true.
- * Otherwise → the user's sub must appear in Clinics.AssociatedUsers OR equal Clinics.createdBy.
+ * The user's sub must appear in Clinics.AssociatedUsers OR equal Clinics.createdBy.
  * One GetItem on the Clinics table; no UserClinicAssignments lookup.
+ * Note: Root is a clinic-side role, not a platform superuser — it does NOT bypass
+ * this membership check.
  */
 export const canAccessClinic = async (
     userSub: string,
@@ -130,7 +131,6 @@ export const canAccessClinic = async (
     clinicId: string
 ): Promise<boolean> => {
     if (!userSub || !clinicId) return false;
-    if (isRoot(groups)) return true;
     if (!CLINICS_TABLE) {
         console.error("[canAccessClinic] CLINICS_TABLE env var is not set");
         return false;
@@ -158,10 +158,10 @@ export const canAccessClinic = async (
 /**
  * WRITE gate: may this user perform `action` on the given clinic?
  * Same membership check as canAccessClinic, plus a role → capability matrix:
- *   root       → every action
- *   clinicadmin / clinicmanager → every write action
+ *   root / clinicadmin / clinicmanager → every write action
  *   clinicviewer → no write actions
- * Helpers land here for follow-up enforcement on mutating endpoints; this PR wires reads only.
+ * Root no longer bypasses the membership check: a Root user may only write to
+ * clinics they own (createdBy) or are associated with (AssociatedUsers).
  */
 export const canWriteClinic = async (
     userSub: string,
@@ -169,7 +169,6 @@ export const canWriteClinic = async (
     clinicId: string,
     _action: ClinicWriteAction
 ): Promise<boolean> => {
-    if (isRoot(groups)) return true;
     const role = getClinicRole(groups);
     if (!role || role === "clinicviewer") return false;
     return canAccessClinic(userSub, groups, clinicId);
@@ -177,16 +176,18 @@ export const canWriteClinic = async (
 
 /**
  * List every clinicId the user is allowed to read.
- * Root → null, signalling "all clinics" so the caller can take its broad-scan path.
- * Non-root → scans Clinics with `contains(AssociatedUsers, :sub) OR createdBy = :sub`,
+ * Scans Clinics with `contains(AssociatedUsers, :sub) OR createdBy = :sub`,
  * the same membership definition used by loginUser.ts and canAccessClinic.
+ * Every user — including Root — is scoped by membership; there is no platform-wide
+ * "see everything" tier.
+ * The legacy `rootGetsAll` option and the `null` ("all clinics") return value are
+ * retained for signature compatibility but no longer produce a broad scan.
  */
 export const listAccessibleClinicIds = async (
     userSub: string,
     groups: string[] | undefined | null,
-    { rootGetsAll = true }: { rootGetsAll?: boolean } = {}
+    _opts: { rootGetsAll?: boolean } = {}
 ): Promise<string[] | null> => {
-    if (rootGetsAll && isRoot(groups)) return null;
     if (!userSub) return [];
     if (!CLINICS_TABLE) {
         console.error("[listAccessibleClinicIds] CLINICS_TABLE env var is not set");

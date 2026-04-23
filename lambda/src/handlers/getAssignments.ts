@@ -5,7 +5,7 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { isRoot, extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken } from "./utils";
 import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
 
 // Initialize DynamoDB client (AWS SDK v3)
@@ -68,28 +68,19 @@ export const handler = async (
         const pathUserSub = event.pathParameters?.userSub;
 
         // --- STEP 3: Authorization / permission logic ---
-        let targetUserSub: string;
-
-        if (isRoot(groups)) {
-            // Root can query:
-            // - specific user via /assignments/{userSub}
-            // - self via /assignments (no path param)
-            targetUserSub = pathUserSub || callerSub;
-        } else {
-            // Non-root:
-            // - /assignments          → own assignments
-            // - /assignments/{userSub} → only allowed if {userSub} === callerSub
-            if (pathUserSub && pathUserSub !== callerSub) {
-                return json(403, {
-                    status: "error",
-                    statusCode: 403,
-                    error: "Forbidden",
-                    message:
-                        "You are not allowed to view assignments for this user",
-                });
-            }
-            targetUserSub = callerSub;
+        //   Every user — including Root — can only query their own assignments.
+        //   Root is a clinic-side role, not a platform superuser.
+        void groups;
+        if (pathUserSub && pathUserSub !== callerSub) {
+            return json(403, {
+                status: "error",
+                statusCode: 403,
+                error: "Forbidden",
+                message:
+                    "You are not allowed to view assignments for this user",
+            });
         }
+        const targetUserSub: string = callerSub;
 
         // --- STEP 4: Query DynamoDB for assignments of targetUserSub ---
         const command = new QueryCommand({
