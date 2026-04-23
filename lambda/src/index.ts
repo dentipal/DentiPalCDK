@@ -130,6 +130,7 @@ import {
     updateVideoResume,
 } from "./handlers/updateFile";
 
+import { handler as geocodePostalHandler } from "./handlers/geocodePostal";
 import { handler as publicProfessionalsHandler } from "./handlers/publicProfessionals";
 import { handler as publicClinicsHandler } from "./handlers/findJobs";
 import { handler as getProfessionalFilteredJobsHandler } from "./handlers/getProfessionalFilteredJobs";
@@ -338,6 +339,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "DELETE:/files/profile-images": deleteFileHandler,
         "DELETE:/files/certificates": deleteFileHandler,
         "DELETE:/files/video-resumes": deleteFileHandler,
+
+        // Geocoding (AWS Location Service) — postal-code lookup used by the
+        // Create Professional Profile form for address auto-fill.
+        "GET:/location/lookup": geocodePostalHandler,
 
         // User addresses routes
         "POST:/user-addresses": createUserAddressHandler,
