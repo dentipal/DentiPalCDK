@@ -1127,22 +1127,48 @@ export class DentiPalCDKStack extends cdk.Stack {
         // ========================================================================
         // Buckets are created without explicit physical names so CDK will generate
         // unique names. Use RemovalPolicy.RETAIN to avoid accidental data loss.
+        //
+        // CORS: the frontend uploads files directly to S3 via presigned POST, so
+        // the browser makes a cross-origin request from the frontend origin to
+        // `<bucket>.s3.<region>.amazonaws.com`. Without these rules S3 accepts
+        // the upload but omits Access-Control-Allow-Origin on the response,
+        // which causes `fetch()` to throw "Failed to fetch" in the browser even
+        // though the object was stored. Origins must match corsHeaders.ts.
+        const BUCKET_CORS: s3.CorsRule[] = [{
+            allowedOrigins: [
+                "http://localhost:5173",
+                "https://main.d3agcvis750ojb.amplifyapp.com",
+            ],
+            allowedMethods: [
+                s3.HttpMethods.POST,
+                s3.HttpMethods.PUT,
+                s3.HttpMethods.GET,
+                s3.HttpMethods.HEAD,
+            ],
+            allowedHeaders: ["*"],
+            exposedHeaders: ["ETag", "Location"],
+            maxAge: 3000,
+        }];
+
         const profileImagesBucket = new s3.Bucket(this, 'ProfileImagesBucket', {
             removalPolicy: cdk.RemovalPolicy.RETAIN,
             encryption: s3.BucketEncryption.S3_MANAGED,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            cors: BUCKET_CORS,
         });
 
         const certificatesBucket = new s3.Bucket(this, 'CertificatesBucket', {
             removalPolicy: cdk.RemovalPolicy.RETAIN,
             encryption: s3.BucketEncryption.S3_MANAGED,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            cors: BUCKET_CORS,
         });
 
         const videoResumesBucket = new s3.Bucket(this, 'VideoResumesBucket', {
             removalPolicy: cdk.RemovalPolicy.RETAIN,
             encryption: s3.BucketEncryption.S3_MANAGED,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            cors: BUCKET_CORS,
         });
 
         // Additional buckets requested: professional resumes and driving licenses,
@@ -1151,24 +1177,28 @@ export class DentiPalCDKStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.RETAIN,
             encryption: s3.BucketEncryption.S3_MANAGED,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            cors: BUCKET_CORS,
         });
 
         const drivingLicensesBucket = new s3.Bucket(this, 'DrivingLicensesBucket', {
             removalPolicy: cdk.RemovalPolicy.RETAIN,
             encryption: s3.BucketEncryption.S3_MANAGED,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            cors: BUCKET_CORS,
         });
 
         const professionalLicensesBucket = new s3.Bucket(this, 'ProfessionalLicensesBucket', {
             removalPolicy: cdk.RemovalPolicy.RETAIN,
             encryption: s3.BucketEncryption.S3_MANAGED,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            cors: BUCKET_CORS,
         });
 
         const clinicOfficeImagesBucket = new s3.Bucket(this, 'ClinicOfficeImagesBucket', {
             removalPolicy: cdk.RemovalPolicy.RETAIN,
             encryption: s3.BucketEncryption.S3_MANAGED,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            cors: BUCKET_CORS,
         });
 
         // Tables used specifically by the WebSocket handler
