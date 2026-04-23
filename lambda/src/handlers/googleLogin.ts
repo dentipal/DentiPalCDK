@@ -41,7 +41,10 @@ function formatAddressFromItem(item: any): string {
  * Exchange a Google authorization code for tokens and return user info.
  * Also accepts a raw ID token (JWT) as a fallback.
  */
-async function verifyGoogleToken(codeOrToken: string): Promise<Record<string, any>> {
+async function verifyGoogleToken(
+  codeOrToken: string,
+  clientRedirectUri?: string
+): Promise<Record<string, any>> {
   // If it looks like a JWT (3 dot-separated parts), treat as ID token
   if (codeOrToken.split(".").length === 3) {
     const res = await fetch(
@@ -58,10 +61,13 @@ async function verifyGoogleToken(codeOrToken: string): Promise<Record<string, an
     return payload;
   }
 
-  // Otherwise treat as authorization code — exchange it for tokens
+  // Otherwise treat as authorization code — exchange it for tokens.
+  // The redirect_uri MUST match the one used to obtain the code, so prefer
+  // the value the client reports; fall back to env for legacy callers.
   const clientId = process.env.GOOGLE_CLIENT_ID!;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET!;
-  const redirectUri = process.env.GOOGLE_REDIRECT_URI || "http://localhost:5173/callback";
+  const redirectUri =
+    clientRedirectUri || process.env.GOOGLE_REDIRECT_URI || "http://localhost:5173/callback";
 
   const body = new URLSearchParams({
     code: codeOrToken,
@@ -133,9 +139,10 @@ export const handler = async (
 
   try {
     const body = JSON.parse(event.body || "{}");
-    const { googleToken, userType } = body as {
+    const { googleToken, userType, redirectUri } = body as {
       googleToken?: string;
       userType?: "clinic" | "professional";
+      redirectUri?: string;
     };
 
     if (!googleToken) {
@@ -156,7 +163,7 @@ export const handler = async (
 
     // 1. Verify the Google token / exchange auth code
     console.log("[googleLogin] Verifying Google token...");
-    const googlePayload = await verifyGoogleToken(googleToken);
+    const googlePayload = await verifyGoogleToken(googleToken, redirectUri);
     const email = (googlePayload.email as string).toLowerCase();
     const givenName = (googlePayload.given_name as string) || "User";
     const familyName = (googlePayload.family_name as string) || "";
