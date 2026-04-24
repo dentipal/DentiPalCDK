@@ -3223,4 +3223,243 @@ This single Lambda serves **all three routes** (`$connect`, `$disconnect`, `$def
 
 ---
 
+## 22. Entity Relationship Diagram
 
+Reproduced verbatim from [DENTIPAL_DATABASE_SCHEMA.md](DENTIPAL_DATABASE_SCHEMA.md) and annotated with the 18th table (`JobPromotions`):
+
+```
+                        ┌──────────────────────────┐
+                        │   AWS COGNITO USER POOL   │
+                        │      (Identity Store)     │
+                        │                           │
+                        │  userSub (primary ID)     │
+                        │  20 groups (see §4.5)     │
+                        │                           │
+                        │  PreSignUp + Custom-Auth  │
+                        │  Lambda triggers          │
+                        └─────────┬─────────────────┘
+                                  │ userSub
+                ┌─────────────────┼──────────────────────┐
+                │                 │                       │
+                ▼                 ▼                       ▼
+  ┌──────────────────┐  ┌────────────────────┐  ┌──────────────────┐
+  │ ProfessionalProf │  │    UserAddresses    │  │  UserClinicAssgn │
+  │ iles             │  │                     │  │  ments           │
+  │  PK: userSub     │  │  PK: userSub        │  │   PK: userSub    │
+  │                  │  │                     │  │   SK: clinicId ──┼──┐
+  │  role, name,     │  │  addr, lat, lng     │  │                  │  │
+  │  specialties     │  │                     │  └──────────────────┘  │
+  └───────┬──────────┘  └─────────────────────┘                         │
+          │                                                             │
+          │ professionalUserSub                                         │
+          │                     ┌────────────────────────────────────────┘
+          │                     │
+          │                     ▼
+          │           ┌──────────────────┐
+          │           │     Clinics       │
+          │           │  PK: clinicId     │
+          │           │                  │
+          │           │  name, address,  │
+          │           │  lat/lng,         │
+          │           │  createdBy,       │
+          │           │  AssociatedUsers  │
+          │           └────────┬─────────┘
+          │                    │ clinicId
+          │         ┌──────────┼──────────────────────────────┐
+          │         │          │                               │
+          │         ▼          ▼                               ▼
+          │  ┌─────────────┐ ┌──────────────┐ ┌──────────────────┐
+          │  │ClinicProfile│ │ClinicFavorit-│ │    JobPostings    │
+          │  │s            │ │es            │ │                  │
+          │  │             │ │ PK:          │ │ PK: clinicUserSub│
+          │  │PK: clinicId │ │   clinicUser-│ │ SK: jobId        │
+          │  │SK: userSub  │ │   Sub        │ │                  │
+          │  │             │ │ SK:          │ │ GSIs:             │
+          │  │practice,    │ │   profUserSub│ │  ClinicIdIndex   │
+          │  │parking,     │ │              │ │  DateIndex        │
+          │  │staff counts │ └──────────────┘ │  jobId-index-1    │
+          │  └─────────────┘                  │  JobIdIndex-2     │
+          │                                   │  status-createdAt-│
+          │                                   │  index            │
+          │                                   └───────┬──────────┘
+          │                                           │ jobId
+          │                 ┌───────────────────────────────────────┐
+          │                 │                       │              │
+          │                 ▼                       ▼              ▼
+          │       ┌──────────────────┐  ┌──────────────────┐  ┌──────────────┐
+          │       │ JobApplications  │  │ JobInvitations   │  │ JobPromotions│
+          │       │  PK: jobId       │  │  PK: jobId       │  │  PK: jobId   │
+          └──────►│  SK: profUserSub │  │  SK: profUserSub │  │  SK: promoId │
+                  │                  │  │                  │  │              │
+                  │  5 GSIs:         │  │  2 GSIs:         │  │  3 GSIs:     │
+                  │   applicationId  │  │   invitationId   │  │   clinicUser-│
+                  │   clinicId       │  │   ProfessionalIdx│  │   Sub-index  │
+                  │   clinicId-jobId │  │                  │  │   clinicId-  │
+                  │   JobIdIndex-1   │  │                  │  │   createdAt  │
+                  │   profUserSub-idx│  │                  │  │   status-    │
+                  └───────┬──────────┘  └──────────────────┘  │   expiresAt  │
+                          │ applicationId                       └──────────────┘
+                          ▼
+                 ┌──────────────────┐
+                 │ JobNegotiations  │
+                 │  PK: applicationId│
+                 │  SK: negotiationId│
+                 │                  │
+                 │  3 GSIs:         │
+                 │   index(appId)   │
+                 │   GSI1(overload) │
+                 │   JobIndex       │
+                 └──────────────────┘
+
+
+  ┌──────────────────────────────────────────────────────────┐
+  │              MESSAGING SUBSYSTEM                          │
+  │                                                           │
+  │  Connections ──► Conversations ──► Messages               │
+  │  PK: userKey     PK: conversationId  PK: conversationId  │
+  │  SK: connectionId GSI clinicKey-lma   SK: messageId       │
+  │  GSI conn-index  GSI profKey-lma      GSI ConvIdIndex     │
+  │                                                           │
+  │  EventBridge ──► event-to-message Lambda ──► Conversations+Messages     │
+  │  source=denti-pal.api detailType=ShiftEvent                             │
+  └──────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────┐
+  │              SUPPORTING TABLES                            │
+  │                                                           │
+  │  Notifications      Referrals            OTPVerification  │
+  │  PK: recipientSub   PK: referralId       PK: email       │
+  │  SK: notificationId GSI ReferredUserSub                  │
+  │                     GSI ReferrerIndex                    │
+  │                                                           │
+  │  Feedback                                                 │
+  │  PK: PK  SK: SK  (single-table design)                    │
+  └──────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 23. Design Observations, GSI Redundancies, and Known Issues
+
+### 23.1 No enforced foreign keys
+
+DynamoDB has no FK constraints. All referential integrity is enforced in application code — **orphans are possible** when:
+- A clinic is deleted via `deleteClinic` (Root-only) but its `ClinicProfiles`, `JobPostings`, `UserClinicAssignments`, `ClinicFavorites`, and `JobApplications` rows are not cascaded.
+- A user is deleted via `deleteUser` but `AssociatedUsers` cleanup is non-fatal.
+- A job posting is deleted via `deleteJobPosting` **without** `?force=true` but still has dead applications/invitations/negotiations.
+
+### 23.2 Denormalization strategy
+
+- `JobPostings` rows embed `clinic_name, clinic_type, addressLine*, city, state, pincode, parking_type, parking_rate, clinicSoftware, freeParkingAvailable, lat, lng` — all copied from `Clinics` + `ClinicProfiles` at write time. Updates to the underlying clinic **do not back-propagate**.
+- `Clinics.lat/lng` is populated by on-the-fly geocoding from `findJobs` (fire-and-forget write-back).
+- `JobApplications` embeds `clinicId, clinicUserSub` alongside the composite key `(jobId, professionalUserSub)` to support multiple access patterns.
+
+### 23.3 GSI redundancies and cleanup opportunities
+
+Flagged by the stack comments and schema doc:
+
+| Table | Redundant index | Rationale |
+|-------|-----------------|-----------|
+| `JobPostings` | `JobIdIndex-2` | Duplicate of `jobId-index-1` (same PK, no SK, ALL projection). |
+| `Messages` | `ConversationIdIndex` | Identical key schema to the base table; zero query callers. Stack comment (audit 2026-04-17) marks it for removal after the next deploy. |
+| `JobNegotiations` | `index` | Same PK (`applicationId`) as the base table; only adds marginal value. |
+| `JobPromotions` | `clinicUserSub-index` | Stack comment: *"no longer queried by any handler, kept in this deploy so the DynamoDB 'one GSI change per update' rule is respected while the new clinicId-keyed index is being added. Remove in a follow-up deploy."* |
+
+### 23.4 Known correctness / performance issues (found while writing this report)
+
+| Area | Observation | Severity |
+|------|-------------|----------|
+| **JWT verification** | `extractAndDecodeAccessToken` only base64-decodes; does not verify the signature. `aws-jwt-verify` is already a dependency but not used. Every REST handler trusts the client-supplied bearer. | **Critical** |
+| **Stack secrets** | `GOOGLE_CLIENT_SECRET` is hardcoded as plaintext in [lib/denti_pal_cdk-stack.ts](lib/denti_pal_cdk-stack.ts) line ~1231 and is synthesized into the CloudFormation template. Should move to AWS Secrets Manager or SSM. | **Critical** |
+| **Full-table scans** | `loginUser`, `getAllClinics`, `getUsersClinics`, `deleteUser` cleanup, `getJobInvitationsForClinics`, `getAllPermanentJobs`, `getAllMultiDayConsulting`, `updateCompletedShifts`, `getActionNeeded (aggregate)` all do `Scan`. At scale these will throttle. | High |
+| **`getAllPermanentJobs.applicationCount = 0`** | Always returned as zero — no `Query` is issued per job. Other similar handlers compute this; this one is missing it. | Medium |
+| **Pincode uniqueness on `UserAddresses`** | Original code blocked multiple users from sharing a pincode; now removed, but the `createUserAddress` handler still does a `Scan` against pincode before `Put`. Dead check. | Low |
+| **Legacy `UserClinicAssignments` table** | Not populated by the Add-User flow; `hasClinicAccess` is deprecated. Table is still provisioned and granted read-write. | Low |
+| **REST Lambda memory** | 1024 MB for a cold-start-sensitive monolith with 128 handler imports is reasonable but could probably drop to 512 MB after verifying cold-start budgets. | Low |
+| **`CertificatesBucket` orphan** | Construct exists and is granted read-write, but no env var references it. `PROFESSIONAL_LICENSES_BUCKET` took over its role; the original construct is dead. | Low |
+| **Signup URL hardcoded** | `sendReferralInvite.ts` uses `http://localhost:5173/professional-signup?ref=<sub>` — dev-only URL in a prod email template. | Medium |
+| **SES sender identity** | `sendReferralInvite.ts` sends from `jelladivya369@gmail.com`; `Monolith` env uses `viswanadhapallivennela19@gmail.com`. Both must be SES-verified. Inconsistent and personal Gmail addresses in a server-to-server email path. | Medium |
+| **API Gateway `authorizationType: NONE`** | Trust is entirely shifted to the Lambda. Combined with the unverified JWT above, this means any internet user can construct a token with a target `sub` and call any endpoint. | **Critical** |
+| **`validateToken` vs `extractUserFromBearerToken`** | Two separate auth utilities with non-overlapping contracts. Handlers inconsistently use one or the other. Consolidate. | Low |
+| **Cognito group case** | `"Dental Hygienist"` appears in the `groups` array but Cognito group names cannot contain spaces; the actual groups are `DentalHygienist` and `Hygienist`. The `groups` array is effectively documentation, not code. Remove it. | Low |
+| **`JobNegotiations.GSI1` overloaded** | `gsi1pk`/`gsi1sk` composite is written by `respondToNegotiation` but projection is `INCLUDE` — fields must be kept in sync with callers. Currently includes `negotiationId, clinicId, jobId, professionalUserSub, status, lastOfferPay, lastOfferFrom, updatedAt`. Adding a new field requires GSI re-deploy. | Low |
+
+### 23.5 Composite-key patterns worth remembering
+
+- `Connections.userKey` = `clinic#{clinicId}` OR `prof#{userSub}` — encodes user type.
+- `Conversations.conversationId` = `sort([clinic#{clinicId}, prof#{userSub}]).join("|")` — deterministic regardless of who initiates.
+- `Feedback` table is a generic single-table design (`PK/SK`) used only for `site#feedback` + `feedback#{timestamp}#{id}`.
+- `JobPostings` uses `clinicUserSub` (not `clinicId`) as PK — this ties postings to the Cognito user who created them, not to the clinic entity. A user who migrates between clinics keeps their jobs. `ClinicIdIndex` GSI provides the inverse view.
+
+### 23.6 Aggregated observations for fixes before scale
+
+1. **Verify JWTs** with `aws-jwt-verify` (already in `package.json`). Move to an API Gateway Lambda authorizer so the monolith doesn't repeat the work per request.
+2. **Extract `GOOGLE_CLIENT_SECRET`** to Secrets Manager; mount with CDK `ssm.StringParameter.valueForStringParameter` or `secretsmanager.Secret.fromSecretNameV2`.
+3. **Replace `Scan` patterns** (loginUser/clinics, dashboard aggregator, applied-jobs exclusion) with the appropriate GSIs. `ClinicsByAssociatedUser` (GSI with PK `AssociatedUser`) would eliminate a lot of scans.
+4. **Drop redundant GSIs** after a safe deploy window: `JobIdIndex-2`, `Messages.ConversationIdIndex`, `JobPromotions.clinicUserSub-index`, and (pending query-audit) `JobNegotiations.index`.
+5. **Introduce a Lambda-layer shared module** for `utils.ts` + `corsHeaders.ts` + `geo.ts` to reduce per-handler cold init.
+6. **Cognito-side role consolidation**: remove `"Dental Hygienist"` from the documentation `groups` array (it isn't a real Cognito group); unify `Hygienist`/`DentalHygienist`.
+7. **Add cascade cleanup** for `deleteClinic` — at minimum, delete owned `ClinicProfiles`, `JobPostings`, `JobPromotions`, `ClinicFavorites`, `UserClinicAssignments` rows.
+
+---
+
+## 24. CloudFormation Outputs
+
+Declared at the end of the stack (`new cdk.CfnOutput(...)`):
+
+| Output key | Source | Typical consumer |
+|------------|--------|------------------|
+| `UserPoolId` | `userPool.userPoolId` | Frontend Cognito config |
+| `ClientId` | `client.userPoolClientId` | Frontend Cognito config |
+| `RestApiEndpoint` | `api.url` | Frontend fetch base URL |
+| `WebSocketEndpoint` | `webSocketApi.apiEndpoint` | Frontend WebSocket base URL |
+| `ProfileImagesBucketName` | `profileImagesBucket.bucketName` | ops / monitoring |
+| `ProfessionalResumesBucketName` | `professionalResumesBucket.bucketName` | ops / monitoring |
+| `VideoResumesBucketName` | `videoResumesBucket.bucketName` | ops / monitoring |
+| `DrivingLicensesBucketName` | `drivingLicensesBucket.bucketName` | ops / monitoring |
+| `ProfessionalLicensesBucketName` | `professionalLicensesBucket.bucketName` | ops / monitoring |
+
+### 24.1 Typical deployment flow
+
+```bash
+# From DentiPalCDK/
+npm run build               # Compile CDK constructs
+cd lambda && npm run build  # Compile Lambda TypeScript to dist/
+cd ..
+cdk synth                    # Generate CloudFormation template
+cdk deploy DentiPalCDKStackV5
+```
+
+### 24.2 What ops should monitor after deploy
+
+- CloudWatch Logs for `DentiPal-Backend-Monolith` at logging level `INFO` with data tracing enabled.
+- X-Ray traces (stack has `tracingEnabled: true`).
+- API Gateway `4xx` and `5xx` metric alarms on the `prod` stage.
+- DynamoDB `UserErrors` (conditional-check failures, throttling) on all 18 tables.
+- Lambda concurrent executions — the monolith is the single point of failure for all REST traffic.
+- EventBridge `FailedInvocations` on `DentiPal-ShiftEvent-to-Inbox` rule.
+- WebSocket connection count and staleness (`CONNS_TABLE` row growth).
+
+---
+
+## Appendix A — File Inventory
+
+| Path | LOC | Role |
+|------|----:|------|
+| [bin/denti_pal_cdk.ts](bin/denti_pal_cdk.ts) | 8 | CDK app entrypoint |
+| [lib/denti_pal_cdk-stack.ts](lib/denti_pal_cdk-stack.ts) | 1563 | Main CDK stack (lines 1–654 are commented-out history; active code starts line 655) |
+| [lambda/src/index.ts](lambda/src/index.ts) | 524 | REST monolith router |
+| [lambda/src/handlers/utils.ts](lambda/src/handlers/utils.ts) | 429 | Auth/RBAC utilities |
+| [lambda/src/handlers/corsHeaders.ts](lambda/src/handlers/corsHeaders.ts) | 48 | CORS header machinery |
+| [lambda/src/handlers/*.ts](lambda/src/handlers/) | ~32,700 (128 files) | Per-feature handlers |
+| [test/denti_pal_cdk.test.ts](test/denti_pal_cdk.test.ts) | — | Jest scaffolding |
+
+## Appendix B — Source documents consolidated here
+
+- [DENTIPAL_DATABASE_SCHEMA.md](DENTIPAL_DATABASE_SCHEMA.md) — authoritative per-attribute schema for tables 1–17.
+- [DENTIPAL_CDK_REFERENCE.md](DENTIPAL_CDK_REFERENCE.md) — stack-level reference.
+- [docs/database-schema.md](docs/database-schema.md) — earlier schema snapshot (superseded by the V5 doc above).
+
+---
+
+*End of report.*
