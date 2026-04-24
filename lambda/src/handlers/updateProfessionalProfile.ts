@@ -24,7 +24,9 @@ const LICENSE_REGEX = /^[A-Z0-9-]{4,20}$/i;
 const BIO_MAX = 500;
 const QUALIFICATIONS_MAX = 500;
 const YEARS_MIN = 0;
-const YEARS_MAX = 60;
+// Years-of-experience cap. MUST match the frontend constant YEARS_MAX in
+// dentipal/src/schemas/profileValidation.ts so the UI and server agree.
+const YEARS_MAX = 70;
 
 const SPECIALIZATION_OPTIONS = [
     "General Dentistry",
@@ -140,26 +142,6 @@ const FIELD_VALIDATORS: Record<string, Validator> = {
 };
 
 // --- 4. Handler ---
-// --- 2. Constants and Type Definitions ---
-
-// Years-of-experience allowed range. MUST match the frontend constant
-// YEARS_MAX in src/schemas/profileValidation.ts so the UI slider/input
-// caps at the same value the server accepts. Bumping this from 60 to 70.
-const YEARS_MIN = 0;
-const YEARS_MAX = 70;
-
-/** Interface for the data expected in the request body */
-interface UpdateProfileBody {
-    role?: string;
-    full_name?: string;
-    email?: string;
-    is_active?: boolean;
-    hourly_rate?: number;
-    yearsExperience?: number | string;
-    [key: string]: any;
-}
-
-// --- 3. Handler Function ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     setOriginFromEvent(event);
@@ -198,20 +180,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
-        // Reject unknown fields outright (defense against field injection)
+        // Reject unknown fields outright (defense against field injection).
+        // The FIELD_VALIDATORS map at the top of this file is the allowlist;
+        // yearsExperience is already validated there by validateNumber(
+        // YEARS_MIN, YEARS_MAX), so changing YEARS_MAX above is all that's
+        // needed to move the cap.
         const unknown = Object.keys(updateData).filter(
             (k) => !FIELD_VALIDATORS[k] && !BLOCKED_FIELDS.has(k)
         );
         if (unknown.length > 0) {
-        
-        const updateData: UpdateProfileBody = JSON.parse(event.body);
-
-        // Validate role if provided
-        if (updateData.role && !VALID_ROLE_VALUES.includes(updateData.role)) {
-            const validDisplayRoles = VALID_ROLE_VALUES.map(
-                role => DB_TO_DISPLAY_MAPPING[role] || role
-            ).join(', ');
-
             return {
                 statusCode: 400,
                 headers: CORS_HEADERS,
@@ -220,36 +197,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     unknownFields: unknown,
                 }),
             };
-        }
-
-        // Validate yearsExperience if provided. Accepts either a number or a
-        // numeric string (the frontend sends a JS number but older clients
-        // may send a string). Range: 0–70 inclusive, must be a finite number.
-        if (updateData.yearsExperience !== undefined && updateData.yearsExperience !== null && updateData.yearsExperience !== "") {
-            const years = typeof updateData.yearsExperience === "number"
-                ? updateData.yearsExperience
-                : Number(updateData.yearsExperience);
-
-            const isInvalid =
-                !Number.isFinite(years) ||
-                years < YEARS_MIN ||
-                years > YEARS_MAX;
-
-            if (isInvalid) {
-                return {
-                    statusCode: 400,
-                    headers: CORS_HEADERS,
-                    body: JSON.stringify({
-                        error: "Validation failed",
-                        fieldErrors: {
-                            yearsExperience: `Must be between ${YEARS_MIN} and ${YEARS_MAX}`,
-                        },
-                    }),
-                };
-            }
-
-            // Normalize to a number so DynamoDB writes a Number attribute.
-            updateData.yearsExperience = years;
         }
 
         // Ensure profile exists
