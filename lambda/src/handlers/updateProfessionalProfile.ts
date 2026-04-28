@@ -24,7 +24,9 @@ const LICENSE_REGEX = /^[A-Z0-9-]{4,20}$/i;
 const BIO_MAX = 500;
 const QUALIFICATIONS_MAX = 500;
 const YEARS_MIN = 0;
-const YEARS_MAX = 60;
+// Years-of-experience cap. MUST match the frontend constant YEARS_MAX in
+// dentipal/src/schemas/profileValidation.ts so the UI and server agree.
+const YEARS_MAX = 70;
 
 const SPECIALIZATION_OPTIONS = [
     "General Dentistry",
@@ -178,7 +180,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
-        // Reject unknown fields outright (defense against field injection)
+        // Reject unknown fields outright (defense against field injection).
+        // The FIELD_VALIDATORS map at the top of this file is the allowlist;
+        // yearsExperience is already validated there by validateNumber(
+        // YEARS_MIN, YEARS_MAX), so changing YEARS_MAX above is all that's
+        // needed to move the cap.
         const unknown = Object.keys(updateData).filter(
             (k) => !FIELD_VALIDATORS[k] && !BLOCKED_FIELDS.has(k)
         );
