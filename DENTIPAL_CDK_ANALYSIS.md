@@ -1,3 +1,5 @@
+> ⚠ **NOTE — 2026-04-28**: `DentiPal-V5-Notifications` and `DentiPal-V5-OTPVerification` tables and their `NOTIFICATIONS_TABLE` / `OTP_VERIFICATION_TABLE` env vars have been retired. References below to those tables are historical — they no longer exist in the deployed stack. Notifications were never read by any handler; OTPVerification duplicated Cognito's native flow.
+
 # DentiPal CDK — Deep Analysis Report
 
 > **Scope**: This document is a line-by-line, handler-by-handler analysis of the DentiPal AWS CDK stack located at [DentiPalCDK/](./). It covers every DynamoDB table, every S3 bucket, every Cognito group, every REST endpoint, every WebSocket action, every Lambda handler (payload attributes, response shape, DB access, IAM posture, side effects), every EventBridge wiring, and every cross-cutting utility used by the Lambda monolith.

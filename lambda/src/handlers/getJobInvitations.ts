@@ -6,13 +6,13 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyHandler, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -29,14 +29,13 @@ function toStrArr(attr: any): string[] {
 }
 
 export const handler: APIGatewayProxyHandler = async (event): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   try {
     if (event.httpMethod === "OPTIONS") {
-      return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+      return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     if (!process.env.JOB_INVITATIONS_TABLE || !process.env.JOB_POSTINGS_TABLE) {
-      return json(500, { error: "Table names are missing from the environment variables" });
+      return json(event, 500, { error: "Table names are missing from the environment variables" });
     }
 
     let professionalUserSub: string;
@@ -45,11 +44,11 @@ export const handler: APIGatewayProxyHandler = async (event): Promise<APIGateway
       const userInfo = extractUserFromBearerToken(authHeader);
       professionalUserSub = userInfo.sub;
     } catch (authError: any) {
-      return json(401, { error: authError.message || "Invalid access token" });
+      return json(event, 401, { error: authError.message || "Invalid access token" });
     }
 
     if (!professionalUserSub) {
-      return json(401, { error: "Unauthorized: No user identity found." });
+      return json(event, 401, { error: "Unauthorized: No user identity found." });
     }
 
     // Use ProfessionalIndex GSI to query by professionalUserSub directly
@@ -165,13 +164,13 @@ export const handler: APIGatewayProxyHandler = async (event): Promise<APIGateway
 
     invitations.sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
 
-    return json(200, {
+    return json(event, 200, {
       message: "Invitations fetched successfully.",
       invitations,
       totalCount: invitations.length,
     });
   } catch (error: any) {
     console.error("Error fetching invitations:", error);
-    return json(500, { error: "Failed to retrieve invitations.", details: error.message });
+    return json(event, 500, { error: "Failed to retrieve invitations.", details: error.message });
   }
 };

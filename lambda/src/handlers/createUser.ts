@@ -20,7 +20,7 @@ import {
 } from "@aws-sdk/client-ses";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, isRoot } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Initialization (using V3 clients) ---
 const REGION: string = process.env.REGION || process.env.AWS_REGION || "us-east-1";
@@ -30,9 +30,9 @@ const dynamodbClient = new DynamoDBClient({ region: REGION });
 const sesClient = new SESClient({ region: REGION }); 
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -52,12 +52,11 @@ interface RequestBody {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     // Handle preflight CORS request
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -71,7 +70,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             userGroups = userInfo.groups || [];
         } catch (authError: any) {
             console.error("Authentication error:", authError.message);
-            return json(401, { 
+            return json(event, 401, { 
                 error: "Unauthorized", 
                 message: authError.message || "Invalid access token" 
             });
@@ -80,7 +79,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // strict check for Root group (case-insensitive via isRoot helper)
         if (!isRoot(userGroups)) {
             console.warn("Unauthorized user tried to add new user. Groups:", userGroups);
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 message: "Only Root users can add new users",
                 details: { requiredGroup: "Root", userGroups }
@@ -97,7 +96,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Validate password match
         if (password !== verifyPassword) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Passwords do not match",
                 field: "password"
@@ -106,7 +105,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Validate required fields
         if (!firstName || !lastName || !phoneNumber || !email || !password || !subgroup || !clinicIds || clinicIds.length === 0) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Missing required fields",
                 requiredFields: ["firstName", "lastName", "phoneNumber", "email", "password", "verifyPassword", "subgroup", "clinicIds"]
@@ -116,7 +115,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate the subgroup
         const validGroups = ["ClinicAdmin", "ClinicManager", "ClinicViewer"];
         if (!validGroups.includes(subgroup)) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid subgroup",
                 validOptions: validGroups,
@@ -302,7 +301,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
-        return json(201, {
+        return json(event, 201, {
             status: "success",
             message: "User created successfully",
             data: {
@@ -341,7 +340,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             errorMessage = "Too Many Requests";
         }
 
-        return json(statusCode, {
+        return json(event, statusCode, {
             error: errorMessage,
             details,
             timestamp: new Date().toISOString(),

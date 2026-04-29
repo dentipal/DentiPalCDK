@@ -258,12 +258,44 @@ export const validateToken = (event: APIGatewayProxyEvent): string => {
     // Cast to any to handle both REST Authorizer structure and HTTP API JWT structure
     const authorizer = (event.requestContext as any).authorizer;
     const userSub: string | undefined = authorizer?.claims?.sub || authorizer?.jwt?.claims?.sub;
-    
+
     if (!userSub) {
         throw new Error("User not authenticated or token invalid");
     }
-    
+
     return userSub;
+};
+
+/**
+ * Extract userType from the Cognito `address` attribute.
+ *
+ * Why this exists: signup writes user type into `address` as a packed string
+ * (e.g. "userType:clinic|role:none|clinic:Dr.Smith") instead of a dedicated
+ * `custom:user_type` attribute. Callers should still prefer `custom:user_type`
+ * when present and fall back to this parser otherwise.
+ */
+const parseUserTypeFromAddress = (address: unknown): string => {
+    if (typeof address !== 'string' || !address) return '';
+    const match = address.match(/userType:([^|]+)/);
+    return match ? match[1].trim().toLowerCase() : '';
+};
+
+/**
+ * Derive userType from Cognito groups as a final fallback.
+ *
+ * Why this exists: some users (e.g. admin-created via createUser.ts) have
+ * neither `custom:user_type` nor a parseable `address` field, but they
+ * always get assigned to clinic-side Cognito groups (Root / ClinicAdmin /
+ * ClinicManager / ClinicViewer). Groups are the universal source of truth
+ * for clinic-vs-professional in this system, so we use them as the final
+ * derivation step before defaulting.
+ */
+const deriveUserTypeFromGroups = (groups: string[]): string => {
+    if (!groups || groups.length === 0) return '';
+    const lowered = groups.map(g => g.toLowerCase());
+    return lowered.some(g => (CLINIC_ROLES as readonly string[]).includes(g))
+        ? 'clinic'
+        : 'professional';
 };
 
 export const verifyToken = async (event: APIGatewayProxyEvent): Promise<UserInfo | null> => {
@@ -284,7 +316,10 @@ export const verifyToken = async (event: APIGatewayProxyEvent): Promise<UserInfo
         
     return {
         sub: claims.sub,
-        userType: claims['custom:user_type'] || 'professional',
+        userType: claims['custom:user_type']
+            || parseUserTypeFromAddress(claims.address)
+            || deriveUserTypeFromGroups(groups)
+            || 'professional',
         email: claims.email,
         groups: groups,
     };
@@ -391,7 +426,10 @@ export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo
     
     const userInfo: UserInfo = {
         sub: claims.sub,
-        userType: claims['custom:user_type'] || 'professional',
+        userType: claims['custom:user_type']
+            || parseUserTypeFromAddress(claims.address)
+            || deriveUserTypeFromGroups(groups)
+            || 'professional',
         email: claims.email,
         groups,
     };

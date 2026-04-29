@@ -6,7 +6,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // ----------------------
@@ -86,13 +86,12 @@ const fetchApplicationCount = async (jobId: string): Promise<number> => {
 // Main handler
 // ----------------------
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // FIX: Handle HTTP API (v2) structure where method is in requestContext.http
     const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 
     // Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 204, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -122,7 +121,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!jobId) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "jobId is required in path parameters",
                 }),
@@ -198,7 +197,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 status: "success",
                 statusCode: 200,
@@ -213,7 +212,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 error: "Internal Server Error",
                 statusCode: 500,

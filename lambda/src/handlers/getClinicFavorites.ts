@@ -11,7 +11,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -86,11 +86,10 @@ interface ResponseBody {
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // Preflight
     if (event && event.httpMethod === "OPTIONS") {
         // ✅ Uses imported headers
-        return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 204, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -121,7 +120,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (rawFavorites.length === 0) {
             return {
                 statusCode: 200,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: corsHeaders(event), // ✅ Uses imported headers
                 body: JSON.stringify({
                     message: "No favorites found",
                     favorites: [],
@@ -221,7 +220,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 9. Final Response
         return {
             statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: corsHeaders(event), // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Favorites retrieved successfully",
                 favorites: filteredFavorites,
@@ -247,7 +246,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Unauthorized",
                     details: error.message
@@ -257,7 +256,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: corsHeaders(event), // ✅ Uses imported headers
             body: JSON.stringify({ error: error.message })
         };
     }

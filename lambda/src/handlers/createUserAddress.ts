@@ -10,7 +10,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; // Assuming extractUserFromBearerToken is in utils.ts
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { geocodeAddressParts } from "./geo";
 
 // Initialize the DynamoDB client
@@ -33,7 +33,6 @@ interface AddressRequestBody {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
     const method =
         (event.requestContext as any)?.http?.method || event.httpMethod || "POST";
@@ -41,7 +40,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // --- CORS preflight ---
     if (method === "OPTIONS") {
         // ✅ Uses imported headers
-        return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 204, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -54,7 +53,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         } catch (authError: any) {
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: authError.message || "Invalid access token"
                 })
@@ -72,7 +71,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         ) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: corsHeaders(event), // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "Required fields: addressLine1, city, state, pincode",
                 }),
@@ -143,7 +142,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 // Found at least one address with same postal code
                 return {
                     statusCode: 409,
-                    headers: CORS_HEADERS,
+                    headers: corsHeaders(event),
                     body: JSON.stringify({ error: `Postal code ${addressData.pincode} already exists in the addresses table` })
                 };
             }
@@ -164,7 +163,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Step 5: Return success response
         return {
             statusCode: 201,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: corsHeaders(event), // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "User address created successfully",
                 userSub,
@@ -179,7 +178,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (err.name === "ConditionalCheckFailedException") {
             return {
                 statusCode: 409,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: corsHeaders(event), // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "User address already exists. Use PUT to update.",
                 }),
@@ -189,7 +188,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Handle other errors
         return {
             statusCode: 500,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: corsHeaders(event), // ✅ Uses imported headers
             body: JSON.stringify({ error: err.message || "Internal Server Error" }),
         };
     }

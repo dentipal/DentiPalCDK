@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_PROMOTIONS_TABLE = process.env.JOB_PROMOTIONS_TABLE || "DentiPal-V5-JobPromotions";
@@ -12,12 +12,11 @@ const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  setOriginFromEvent(event);
 
   try {
     const user = extractUserFromBearerToken(event.headers?.Authorization || event.headers?.authorization);
     if (!user?.sub) {
-      return { statusCode: 401, headers: CORS_HEADERS, body: JSON.stringify({ error: "Unauthorized" }) };
+      return { statusCode: 401, headers: corsHeaders(event), body: JSON.stringify({ error: "Unauthorized" }) };
     }
 
     // Extract promotionId from path: /promotions/{promotionId}/cancel
@@ -27,17 +26,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const promotionId = cancelIdx > 0 ? segments[cancelIdx - 1] : "";
 
     if (!promotionId) {
-      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "promotionId is required" }) };
+      return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "promotionId is required" }) };
     }
 
     const clinicId = event.queryStringParameters?.clinicId;
     if (!clinicId) {
-      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "clinicId query parameter is required" }) };
+      return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "clinicId query parameter is required" }) };
     }
 
     const allowed = await canWriteClinic(user.sub, user.groups, clinicId, "manageJobs");
     if (!allowed) {
-      return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: "You do not have permission to cancel this clinic's promotions" }) };
+      return { statusCode: 403, headers: corsHeaders(event), body: JSON.stringify({ error: "You do not have permission to cancel this clinic's promotions" }) };
     }
 
     // Find the promotion within the clinic's partition on the clinicId GSI.
@@ -54,11 +53,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const promotion = result.Items?.[0];
     if (!promotion) {
-      return { statusCode: 404, headers: CORS_HEADERS, body: JSON.stringify({ error: "Promotion not found" }) };
+      return { statusCode: 404, headers: corsHeaders(event), body: JSON.stringify({ error: "Promotion not found" }) };
     }
 
     if (promotion.status === "cancelled") {
-      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Promotion is already cancelled" }) };
+      return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "Promotion is already cancelled" }) };
     }
 
     const now = new Date().toISOString();
@@ -101,7 +100,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         status: "success",
         message: "Promotion cancelled successfully",
@@ -111,7 +110,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.error("Error cancelling promotion:", error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({ error: `Failed to cancel promotion: ${error.message || "unknown"}` }),
     };
   }

@@ -10,7 +10,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -144,9 +144,8 @@ const FIELD_VALIDATORS: Record<string, Validator> = {
 // --- 4. Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -156,14 +155,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const userSub = userInfo.sub;
 
         if (!event.body) {
-            return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Request body is required." }) };
+            return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "Request body is required." }) };
         }
 
         let updateData: Record<string, unknown>;
         try {
             updateData = JSON.parse(event.body);
         } catch {
-            return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Invalid JSON body" }) };
+            return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "Invalid JSON body" }) };
         }
 
         // Reject attempts to change immutable/locked fields
@@ -171,7 +170,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (blocked.length > 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Some fields cannot be changed through this endpoint",
                     blockedFields: blocked,
@@ -191,7 +190,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (unknown.length > 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Unknown fields are not accepted",
                     unknownFields: unknown,
@@ -208,7 +207,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!existing.Item) {
             return {
                 statusCode: 404,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: "Professional profile not found" }),
             };
         }
@@ -242,7 +241,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (Object.keys(fieldErrors).length > 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: "Validation failed", fieldErrors }),
             };
         }
@@ -250,7 +249,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (setPairs.length === 0 && removeNames.length === 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: "No fields to update" }),
             };
         }
@@ -279,7 +278,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 message: "Professional profile updated successfully",
                 profile: {
@@ -301,14 +300,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token") {
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: error.message, details: error.message }),
             };
         }
 
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 error: "Failed to update professional profile. Please try again.",
                 details: err.message,

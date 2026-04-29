@@ -12,15 +12,15 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Changed import to use the new token utility
 import { extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -198,13 +198,12 @@ function toStrArr(attr: AttributeValue | undefined): string[] {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     // Check standard REST method or HTTP API v2 method
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -312,7 +311,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
 
         // 5. Success Response
-        return json(200, {
+        return json(event, 200, {
             message: "Permanent jobs retrieved successfully",
             excludedCount: appliedJobIds.size, 
             jobs
@@ -328,13 +327,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: "Failed to retrieve permanent jobs. Please try again.",
             details: error?.message || String(error)
         });

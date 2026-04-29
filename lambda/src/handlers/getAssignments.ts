@@ -6,15 +6,15 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize DynamoDB client (AWS SDK v3)
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj),
 });
 
@@ -44,7 +44,6 @@ interface AssignmentResponseItem {
 export const handler = async (
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     const method =
         event.httpMethod ||
@@ -52,7 +51,7 @@ export const handler = async (
         "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -72,7 +71,7 @@ export const handler = async (
         //   Root is a clinic-side role, not a platform superuser.
         void groups;
         if (pathUserSub && pathUserSub !== callerSub) {
-            return json(403, {
+            return json(event, 403, {
                 status: "error",
                 statusCode: 403,
                 error: "Forbidden",
@@ -104,7 +103,7 @@ export const handler = async (
         }));
 
         // --- STEP 5: Success Response ---
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             statusCode: 200,
             message: `Retrieved ${assignments.length} assignment(s) for userSub ${targetUserSub}`,
@@ -122,14 +121,14 @@ export const handler = async (
             error?.message === "Failed to decode access token" ||
             error?.message === "User sub not found in token claims"
         ) {
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message,
             });
         }
 
         // Generic 500
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to retrieve assignments",

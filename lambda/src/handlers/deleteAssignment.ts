@@ -3,7 +3,7 @@ import { DynamoDBClient, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
 import { isRoot, extractUserFromBearerToken } from './utils'; // Assumed dependency
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Initialization ---
 
@@ -18,10 +18,9 @@ interface DeleteAssignmentRequestBody {
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // ✅ ADDED PREFLIGHT CHECK
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -36,7 +35,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn(`[AUTH] User groups [${groups.join(', ')}] is not Root. Access denied.`);
             return {
                 statusCode: 403,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Forbidden",
                     statusCode: 403,
@@ -55,7 +54,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("Error parsing request body:", parseError);
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Bad Request",
                     statusCode: 400,
@@ -71,7 +70,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("[VALIDATION] Missing required fields: userSub or clinicId.");
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Bad Request",
                     statusCode: 400,
@@ -99,7 +98,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 4. Success Response
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 status: "success",
                 statusCode: 200,
@@ -115,7 +114,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 error: "Internal Server Error",
                 statusCode: 500,

@@ -4,14 +4,14 @@ import {
     AttributeType,
 } from "@aws-sdk/client-cognito-identity-provider";
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj),
 });
 
@@ -24,9 +24,8 @@ const getAttr = (attrs: AttributeType[], name: string): string =>
  * Reads: name, email, phone_number, given_name, family_name, sub.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -35,7 +34,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const userPoolId = process.env.USER_POOL_ID;
         if (!userPoolId) {
-            return json(500, { error: "Server configuration error: USER_POOL_ID missing" });
+            return json(event, 500, { error: "Server configuration error: USER_POOL_ID missing" });
         }
 
         const cognitoUser = await cognito.send(new AdminGetUserCommand({
@@ -49,7 +48,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const lastName = getAttr(attrs, "family_name");
         const fullName = getAttr(attrs, "name") || [firstName, lastName].filter(Boolean).join(" ");
 
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             data: {
                 sub: userInfo.sub,
@@ -70,9 +69,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims"
         ) {
-            return json(401, { error: "Unauthorized", details: error.message });
+            return json(event, 401, { error: "Unauthorized", details: error.message });
         }
 
-        return json(500, { error: "Internal server error" });
+        return json(event, 500, { error: "Internal server error" });
     }
 };

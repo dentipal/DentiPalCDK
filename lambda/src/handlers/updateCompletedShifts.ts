@@ -11,7 +11,7 @@ import {
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import { APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- 1. Environment and Constants ---
 
@@ -33,9 +33,9 @@ const REFERRALS_REFERRED_USER_SUB_INDEX: string = 'ReferredUserSubIndex';
 const BONUS_AMOUNT: number = 50;
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: typeof bodyObj === 'string' ? bodyObj : JSON.stringify(bodyObj)
 });
 
@@ -109,10 +109,9 @@ const updateItemStatus = async (
 // --- 4. Handler Function ---
 
 export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // CORS Preflight (if invoked via API Gateway)
   if (event?.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   console.log("--- updateCompletedShifts handler started (v9: Deep Debug) ---");
@@ -137,7 +136,7 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
 
     if (scheduledApplications.length === 0) {
       console.log("✅ SUCCESS: Found 0 scheduled applications. Exiting.");
-      return json(200, "No scheduled applications to process.");
+      return json(event, 200, "No scheduled applications to process.");
     }
 
     console.log(`2. Found ${scheduledApplications.length} scheduled applications. Now checking each one.`);
@@ -383,10 +382,10 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
       console.log("\n5. FINISHED: No shifts were ready to be marked as completed.");
     }
 
-    return json(200, "Job completion check finished successfully.");
+    return json(event, 200, "Job completion check finished successfully.");
 
   } catch (error: any) {
     console.error("❌❌❌ FATAL ERROR in updateCompletedShifts handler: ❌❌❌", error);
-    return json(500, { error: "Fatal error in updateCompletedShifts", details: error.message });
+    return json(event, 500, { error: "Fatal error in updateCompletedShifts", details: error.message });
   }
 };

@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand, UpdateCommandInput } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 
@@ -15,9 +15,9 @@ const ddbDoc = DynamoDBDocumentClient.from(client);
 
 // --- 2. Helpers ---
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -67,16 +67,15 @@ interface JobItem {
 // --- 4. Handler Function ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     if (method !== 'PUT') {
-        return json(405, {
+        return json(event, 405, {
             error: "Method Not Allowed",
             statusCode: 405,
             message: "Only PUT method is supported",
@@ -106,7 +105,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("DEBUG: Extracted Job ID:", jobId);
 
         if (!jobId) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Job ID is required",
@@ -119,7 +118,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (!event.body) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Request body is required",
@@ -139,7 +138,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existingJobResponse = await ddbDoc.send(getCommand);
         
         if (!existingJobResponse.Item) {
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 statusCode: 404,
                 message: "Job not found",
@@ -155,7 +154,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Check for critical missing data
         if (!clinicUserSub || !jobType) {
-             return json(500, {
+             return json(event, 500, {
                  error: "Internal Server Error",
                  statusCode: 500,
                  message: "Internal job data incomplete",
@@ -166,7 +165,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Security check: Only clinic owner can update their jobs (existing composite-key gate).
         if (userSub !== clinicUserSub) {
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Access denied",
@@ -179,7 +178,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Blocks a user whose role was downgraded to ClinicViewer from editing past creations.
         const jobClinicId = (existingItem as any).clinicId;
         if (jobClinicId && !(await canWriteClinic(userSub, userGroups, jobClinicId, "manageJobs"))) {
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Access denied",
@@ -190,7 +189,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Prevent updates to completed jobs
         if (currentStatus === 'completed') {
-            return json(409, {
+            return json(event, 409, {
                 error: "Conflict",
                 statusCode: 409,
                 message: "Cannot update completed jobs",
@@ -203,7 +202,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         // Validate professional role
         if (updateData.professional_role && !VALID_ROLE_VALUES.includes(updateData.professional_role)) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Invalid professional role",
@@ -219,69 +218,69 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (updateData.date) {
                 const jobDate = new Date(updateData.date);
                 if (jobDate <= now) {
-                    return json(400, { error: 'Job date must be in the future' });
+                    return json(event, 400, { error: 'Job date must be in the future' });
                 }
             }
             if (updateData.hours && (updateData.hours < 1 || updateData.hours > 12)) {
-                return json(400, { error: 'Hours must be between 1 and 12' });
+                return json(event, 400, { error: 'Hours must be between 1 and 12' });
             }
             if (updateData.rate !== undefined) {
                 const pt = updateData.pay_type || existingItem.pay_type || 'per_hour';
                 if (pt === 'per_hour' && (updateData.rate < 10 || updateData.rate > 200)) {
-                    return json(400, { error: 'Hourly rate must be between $10 and $200' });
+                    return json(event, 400, { error: 'Hourly rate must be between $10 and $200' });
                 }
                 if (pt === 'per_transaction' && updateData.rate <= 0) {
-                    return json(400, { error: 'Rate per transaction must be positive' });
+                    return json(event, 400, { error: 'Rate per transaction must be positive' });
                 }
                 if (pt === 'percentage_of_revenue' && (updateData.rate <= 0 || updateData.rate > 100)) {
-                    return json(400, { error: 'Revenue percentage must be between 0 and 100' });
+                    return json(event, 400, { error: 'Revenue percentage must be between 0 and 100' });
                 }
             }
         }
         else if (jobType === 'multi_day_consulting') {
             if (updateData.dates) {
                 if (!Array.isArray(updateData.dates) || updateData.dates.length === 0 || updateData.dates.length > 30) {
-                    return json(400, { error: 'Dates array must have 1-30 entries' });
+                    return json(event, 400, { error: 'Dates array must have 1-30 entries' });
                 }
                 // Validate all dates are in the future
                 const invalidDates = updateData.dates.filter(date => new Date(date) <= now);
                 if (invalidDates.length > 0) {
-                    return json(400, { error: 'All dates must be in the future' });
+                    return json(event, 400, { error: 'All dates must be in the future' });
                 }
                 // Recalculate total_days if dates are updated
                 updateData.total_days = updateData.dates.length;
             }
             if (updateData.hours_per_day && (updateData.hours_per_day < 1 || updateData.hours_per_day > 12)) {
-                return json(400, { error: 'Hours per day must be between 1 and 12' });
+                return json(event, 400, { error: 'Hours per day must be between 1 and 12' });
             }
             if (updateData.rate !== undefined) {
                 const pt = updateData.pay_type || existingItem.pay_type || 'per_hour';
                 if (pt === 'per_hour' && (updateData.rate < 10 || updateData.rate > 300)) {
-                    return json(400, { error: 'Hourly rate must be between $10 and $300' });
+                    return json(event, 400, { error: 'Hourly rate must be between $10 and $300' });
                 }
                 if (pt === 'per_transaction' && updateData.rate <= 0) {
-                    return json(400, { error: 'Rate per transaction must be positive' });
+                    return json(event, 400, { error: 'Rate per transaction must be positive' });
                 }
                 if (pt === 'percentage_of_revenue' && (updateData.rate <= 0 || updateData.rate > 100)) {
-                    return json(400, { error: 'Revenue percentage must be between 0 and 100' });
+                    return json(event, 400, { error: 'Revenue percentage must be between 0 and 100' });
                 }
             }
         }
         else if (jobType === 'permanent') {
             if (updateData.salary_min && updateData.salary_min < 0) {
-                return json(400, { error: 'Minimum salary must be a positive number' });
+                return json(event, 400, { error: 'Minimum salary must be a positive number' });
             }
             if (updateData.salary_max && updateData.salary_min && updateData.salary_max <= updateData.salary_min) {
-                return json(400, { error: 'Maximum salary must be greater than minimum salary' });
+                return json(event, 400, { error: 'Maximum salary must be greater than minimum salary' });
             }
             if (updateData.vacation_days && (updateData.vacation_days < 0 || updateData.vacation_days > 50)) {
-                return json(400, { error: 'Vacation days must be between 0 and 50' });
+                return json(event, 400, { error: 'Vacation days must be between 0 and 50' });
             }
             if (updateData.employment_type && !['full_time', 'part_time'].includes(updateData.employment_type)) {
-                return json(400, { error: 'Employment type must be full_time or part_time' });
+                return json(event, 400, { error: 'Employment type must be full_time or part_time' });
             }
             if (updateData.benefits && !Array.isArray(updateData.benefits)) {
-                 return json(400, { error: 'Benefits must be an array of strings' });
+                 return json(event, 400, { error: 'Benefits must be an array of strings' });
             }
         }
 
@@ -344,7 +343,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
         
         if (fieldsUpdatedCount === 0) {
-            return json(400, { error: 'No valid fields to update' });
+            return json(event, 400, { error: 'No valid fields to update' });
         }
 
         // Add updated timestamp
@@ -356,7 +355,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate clinicUserSub and jobId
         if (!clinicUserSub || !jobId) {
             console.error("Invalid Key: Missing clinicUserSub or jobId", { clinicUserSub, jobId });
-            return json(500, {
+            return json(event, 500, {
                 error: "Internal Server Error",
                 statusCode: 500,
                 message: "Invalid Key: Missing clinicUserSub or jobId",
@@ -382,7 +381,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const result = await ddbDoc.send(new UpdateCommand(updateCommand));
 
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             statusCode: 200,
             message: "Job updated successfully",
@@ -403,13 +402,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Invalid access token format" ||
             error.message === "Failed to decode access token") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to update job",

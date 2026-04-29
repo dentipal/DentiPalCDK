@@ -5,7 +5,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { geocodeAddressParts } from "./geo";
 
 // --- 1. Configuration ---
@@ -22,9 +22,9 @@ const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
 // --- 2. Helpers ---
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -178,12 +178,11 @@ const validatePermanentJob = (jobData: PermanentJobData): string | null => {
 // --- 5. Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "{}" };
     }
 
     try {
@@ -223,20 +222,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 4. Validate common required fields
         if (!jobData.job_type || !jobData.professional_role || !jobData.shift_speciality || !jobData.clinicId) {
-            return json(400, { error: "Required fields: clinicId, job_type, professional_role, shift_speciality" });
+            return json(event, 400, { error: "Required fields: clinicId, job_type, professional_role, shift_speciality" });
         }
 
         // 4b. Per-clinic RBAC gate — requester must belong to this clinic and hold a write role
         //     (Root / ClinicAdmin / ClinicManager; ClinicViewer is blocked by canWriteClinic).
         if (!(await canWriteClinic(userSub, userInfo.groups || [], jobData.clinicId, "manageJobs"))) {
             console.warn(`[createJobPosting] Write denied: sub=${userSub} clinicId=${jobData.clinicId}`);
-            return json(403, { error: "Forbidden: you cannot create jobs for this clinic" });
+            return json(event, 403, { error: "Forbidden: you cannot create jobs for this clinic" });
         }
 
         // Validate job type
         const validJobTypes = ['temporary', 'multi_day_consulting', 'permanent'];
         if (!validJobTypes.includes(jobData.job_type)) {
-            return json(400, { error: `Invalid job_type. Valid options: ${validJobTypes.join(', ')}` });
+            return json(event, 400, { error: `Invalid job_type. Valid options: ${validJobTypes.join(', ')}` });
         }
 
         // Support multi-role: accept professional_roles (array) or professional_role (string)
@@ -245,7 +244,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             : jobData.professional_role ? [jobData.professional_role] : [];
 
         if (professionalRoles.length === 0) {
-            return json(400, {
+            return json(event, 400, {
                 error: "At least one professional role is required",
                 details: { validRoles: VALID_ROLE_VALUES }
             });
@@ -253,7 +252,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const invalidRoles = professionalRoles.filter(r => !VALID_ROLE_VALUES.includes(r));
         if (invalidRoles.length > 0) {
-            return json(400, {
+            return json(event, 400, {
                 error: `Invalid professional role(s): ${invalidRoles.join(', ')}. Valid options: ${VALID_ROLE_VALUES.join(', ')}`
             });
         }
@@ -261,18 +260,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate work location type if provided
         const VALID_WORK_LOCATIONS = ['onsite', 'us_remote', 'global_remote'];
         if (jobData.work_location_type && !VALID_WORK_LOCATIONS.includes(jobData.work_location_type)) {
-            return json(400, { error: `Invalid work_location_type. Valid options: ${VALID_WORK_LOCATIONS.join(', ')}` });
+            return json(event, 400, { error: `Invalid work_location_type. Valid options: ${VALID_WORK_LOCATIONS.join(', ')}` });
         }
 
         // Validate pay type if provided
         const VALID_PAY_TYPES = ['per_hour', 'per_transaction', 'percentage_of_revenue'];
         if (jobData.pay_type && !VALID_PAY_TYPES.includes(jobData.pay_type)) {
-            return json(400, { error: `Invalid pay_type. Valid options: ${VALID_PAY_TYPES.join(', ')}` });
+            return json(event, 400, { error: `Invalid pay_type. Valid options: ${VALID_PAY_TYPES.join(', ')}` });
         }
 
         // per_transaction is not allowed for doctor roles
         if (jobData.pay_type === 'per_transaction' && professionalRoles.some(r => isDoctorRole(r))) {
-            return json(400, { error: "Per-transaction pay type is not available for doctor roles" });
+            return json(event, 400, { error: "Per-transaction pay type is not available for doctor roles" });
         }
 
         // 5. Job type specific validation
@@ -290,7 +289,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (validationError) {
-            return json(400, { error: validationError });
+            return json(event, 400, { error: validationError });
         }
 
         const jobId = uuidv4();
@@ -304,13 +303,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const cItem = clinicRes.Item;
         if (!cItem) {
-            return json(400, { error: `Clinic not found with ID: ${jobData.clinicId}` });
+            return json(event, 400, { error: `Clinic not found with ID: ${jobData.clinicId}` });
         }
 
         // Ensure all required address fields exist
         if (!cItem.addressLine1 || !cItem.city || !cItem.state || !cItem.pincode) {
              console.error("[DB_ERROR] Clinic item is missing required address fields.", cItem);
-             return json(500, { error: "Clinic data is incomplete in the database." });
+             return json(event, 500, { error: "Clinic data is incomplete in the database." });
         }
 
         const clinicAddress: ClinicAddress = {
@@ -349,7 +348,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const clinicProfile = profileRes.Item;
         if (!clinicProfile) {
-            return json(400, { error: "Profile not found for this clinic user. Please complete your clinic profile first." });
+            return json(event, 400, { error: "Profile not found for this clinic user. Please complete your clinic profile first." });
         }
 
         const profileDetails: ClinicProfileDetails = {
@@ -485,11 +484,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             Item: item
         }));
 
-        return json(201, responseData);
+        return json(event, 201, responseData);
 
     } catch (error) {
         const err = error as Error;
         console.error("Error creating job posting:", err);
-        return json(500, { error: err.message || "An unexpected error occurred" });
+        return json(event, 500, { error: err.message || "An unexpected error occurred" });
     }
 };

@@ -1,13 +1,13 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const s3Client = new S3Client({ region: process.env.REGION });
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -22,10 +22,9 @@ interface RequestBody {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "POST";
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -45,21 +44,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (!userSub) {
                 const reason = authHeader ? 'Failed to decode/validate Authorization token' : 'Missing Authorization header and no authorizer claims';
                 console.error('Unauthorized upload request:', reason);
-                return json(401, { error: 'Unauthorized', reason });
+                return json(event, 401, { error: 'Unauthorized', reason });
             }
         }
 
-        if (method !== "POST") return json(405, { error: "Method not allowed" });
-        if (!event.body) return json(400, { error: "Request body is required" });
+        if (method !== "POST") return json(event, 405, { error: "Method not allowed" });
+        if (!event.body) return json(event, 400, { error: "Request body is required" });
 
         const { fileType, fileName, contentType, fileBase64, clinicId } = JSON.parse(event.body) as RequestBody;
 
         const allowed: FileType[] = ["profile-image", "professional-resume", "video-resume", "professional-license", "certificate", "driving-license", "clinic-office-image"];
-        if (!allowed.includes(fileType)) return json(400, { error: "Invalid fileType" });
+        if (!allowed.includes(fileType)) return json(event, 400, { error: "Invalid fileType" });
 
-        if (fileType === "clinic-office-image" && !clinicId) return json(400, { error: "clinicId is required for clinic-office-image uploads" });
+        if (fileType === "clinic-office-image" && !clinicId) return json(event, 400, { error: "clinicId is required for clinic-office-image uploads" });
 
-        if (!fileBase64) return json(400, { error: "fileBase64 is required (base64-encoded)" });
+        if (!fileBase64) return json(event, 400, { error: "fileBase64 is required (base64-encoded)" });
 
         const buckets: Record<FileType, string | undefined> = {
             "profile-image": process.env.PROFILE_IMAGES_BUCKET,
@@ -72,7 +71,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
 
         const bucketName = buckets[fileType];
-        if (!bucketName) return json(500, { error: `Server configuration error: Missing bucket for ${fileType}` });
+        if (!bucketName) return json(event, 500, { error: `Server configuration error: Missing bucket for ${fileType}` });
 
         const sanitizedFileName = String(fileName || "file").replace(/[^a-zA-Z0-9.\-_]/g, "_");
         // Clinic office images are keyed by clinicId so they can be retrieved by clinic.
@@ -101,7 +100,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.log("File uploaded to S3", { bucket: bucketName, key: objectKey });
         } catch (err) {
             console.error("Failed to upload file to S3:", err);
-            return json(500, { error: "Failed to store file in S3" });
+            return json(event, 500, { error: "Failed to store file in S3" });
         }
 
         // also store a metadata JSON record beside the file
@@ -123,10 +122,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("Failed to store upload metadata to S3:", metaErr);
         }
 
-        return json(201, { message: "File stored", bucket: bucketName, objectKey });
+        return json(event, 201, { message: "File stored", bucket: bucketName, objectKey });
 
     } catch (error) {
         console.error("Error in uploadFile handler:", error);
-        return json(500, { error: "Internal server error" });
+        return json(event, 500, { error: "Internal server error" });
     }
 };

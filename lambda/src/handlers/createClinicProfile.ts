@@ -8,7 +8,7 @@ import {
 // Updated imports to use the new token extraction utility
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -34,21 +34,20 @@ interface ClinicProfileData {
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === 'OPTIONS') {
-        return { statusCode: 200, headers: CORS_HEADERS, body: '' };
+        return { statusCode: 200, headers: corsHeaders(event), body: '' };
     }
 
     try {
@@ -68,7 +67,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             
         } catch (authError: any) {
             console.error("Authentication failed:", authError.message);
-            return json(401, { error: authError.message || "Invalid access token" });
+            return json(event, 401, { error: authError.message || "Invalid access token" });
         }
 
         // Parse request body - handle null or empty body
@@ -83,7 +82,7 @@ try {
 } catch (parseError) {
     const error = parseError as Error; // Explicitly cast parseError to Error
     console.error("Error parsing request body:", error.message);
-    return json(400, { error: "Invalid JSON in request body" });
+    return json(event, 400, { error: "Invalid JSON in request body" });
 }
 
 
@@ -96,7 +95,7 @@ try {
             !profileData.primary_contact_last_name
         ) {
             console.warn("[VALIDATION] Missing required fields in body.");
-            return json(400, {
+            return json(event, 400, {
                 error: "Required fields: clinicId, practice_type, primary_practice_area, primary_contact_first_name, primary_contact_last_name"
             });
         }
@@ -113,7 +112,7 @@ try {
 
         if (!clinicItem) {
             console.warn(`[AUTH] Clinic not found: ${profileData.clinicId}`);
-            return json(404, { error: "Clinic not found with provided clinicId" });
+            return json(event, 404, { error: "Clinic not found with provided clinicId" });
         }
 
         // Check if userSub is in the AssociatedUsers list
@@ -121,7 +120,7 @@ try {
         const associatedUsers = clinicItem.AssociatedUsers?.L?.map(u => u.S) || [];
         if (!associatedUsers.includes(userSub)) {
             console.warn(`[AUTH] User ${userSub} is not associated with clinic ${profileData.clinicId}.`);
-            return json(403, { error: "User is not authorized to create a profile for this clinic" });
+            return json(event, 403, { error: "User is not authorized to create a profile for this clinic" });
         }
 
         // 3. ✅ Build the item using Record<string, AttributeValue>
@@ -173,7 +172,7 @@ try {
             ConditionExpression: "attribute_not_exists(clinicId) AND attribute_not_exists(userSub)"
         }));
 
-        return json(201, {
+        return json(event, 201, {
             message: "Clinic profile created successfully",
             clinicId: profileData.clinicId
         });
@@ -183,17 +182,17 @@ try {
         console.error("Error creating clinic profile:", err);
 
         if (err.name === "ConditionalCheckFailedException") {
-            return json(409, {
+            return json(event, 409, {
                 error: "A profile already exists for this clinic and user"
             });
         }
         
         // Check for auth-specific errors thrown by extractUserFromBearerToken
         if (err.message === "Authorization header missing" || err.message.includes("Invalid access token")) {
-             return json(401, { error: err.message });
+             return json(event, 401, { error: err.message });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: err.message || "An unexpected error occurred"
         });
     }

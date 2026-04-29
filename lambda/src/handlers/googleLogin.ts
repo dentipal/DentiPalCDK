@@ -11,14 +11,14 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient, ScanCommand, ScanCommandInput } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 const dynamo = new DynamoDBClient({ region: process.env.REGION });
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -132,9 +132,8 @@ function googlePassword(userSub: string): string {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -146,7 +145,7 @@ export const handler = async (
     };
 
     if (!googleToken) {
-      return json(400, {
+      return json(event, 400, {
         error: "Bad Request",
         message: "Missing googleToken",
         statusCode: 400,
@@ -154,7 +153,7 @@ export const handler = async (
     }
 
     if (!userType || !["clinic", "professional"].includes(userType)) {
-      return json(400, {
+      return json(event, 400, {
         error: "Bad Request",
         message: "Missing or invalid userType (must be 'clinic' or 'professional')",
         statusCode: 400,
@@ -245,14 +244,14 @@ export const handler = async (
     if (!isNewUser) {
       const userIsClinic = isClinicRole(userGroups);
       if (userType === "clinic" && !userIsClinic) {
-        return json(403, {
+        return json(event, 403, {
           error: "Forbidden",
           message: "This is a professional account. Please use the Professional login page.",
           statusCode: 403,
         });
       }
       if (userType === "professional" && userIsClinic) {
-        return json(403, {
+        return json(event, 403, {
           error: "Forbidden",
           message: "This is a clinic account. Please use the Clinic login page.",
           statusCode: 403,
@@ -296,7 +295,7 @@ export const handler = async (
     }
 
     if (!tokens) {
-      return json(500, {
+      return json(event, 500, {
         error: "Internal Server Error",
         message: "Failed to generate authentication tokens",
         statusCode: 500,
@@ -308,7 +307,7 @@ export const handler = async (
 
     console.log("[googleLogin] Login successful for:", email, "isNewUser:", isNewUser);
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       statusCode: 200,
       message: isNewUser ? "Account created and logged in with Google" : "Login successful",
@@ -332,7 +331,7 @@ export const handler = async (
     });
   } catch (error: any) {
     console.error("[googleLogin] Error:", error);
-    return json(500, {
+    return json(event, 500, {
       error: "Internal Server Error",
       message: error.message || "Google login failed",
       statusCode: 500,

@@ -8,7 +8,7 @@
     BatchGetItemCommand,
     AttributeValue,
   } from "@aws-sdk/client-dynamodb";
-  import {CORS_HEADERS} from "./corsHeaders";
+  import { corsHeaders } from "./corsHeaders";
   // ✅ ADDED: Import auth utility
   import { extractUserFromBearerToken } from "./utils"; 
 
@@ -35,9 +35,9 @@
   const ddb = new DynamoDBClient({ region: REGION });
 
   // Helper to build JSON responses with shared CORS
-  const json = (statusCode: number, bodyObj: object): any => ({
+  const json = (event: any, statusCode: number, bodyObj: object): any => ({
       statusCode,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify(bodyObj)
   });
 
@@ -212,7 +212,7 @@
       event?.requestContext?.http?.method || event?.httpMethod || "GET";
 
     if (method === "OPTIONS") {
-      return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+      return { statusCode: 204, headers: corsHeaders(event), body: "" };
     }
 
     console.log("============= 🟦 getJobApplicationsForClinic START");
@@ -226,7 +226,7 @@
 
       const clinicId = getClinicIdFromPath(event);
       if (!clinicId) {
-        return json(400, {
+        return json(event, 400, {
           error: "Bad Request",
           statusCode: 400,
           message: "Clinic ID is required",
@@ -337,7 +337,7 @@
       console.log(`Returning ${grouped.length} job buckets with applicants`);
       console.log("============= 🟩 getJobApplicationsForClinic END");
 
-      return json(200, {
+      return json(event, 200, {
         status: "success",
         statusCode: 200,
         message: "Clinic job applications retrieved successfully",
@@ -361,14 +361,14 @@
           err.message === "Failed to decode access token" ||
           err.message === "User sub not found in token claims") {
           
-          return json(401, {
+          return json(event, 401, {
               error: "Unauthorized",
               details: err.message
           });
       }
 
       console.log("============= 🟥 getJobApplicationsForClinic END (ERROR)");
-      return json(500, {
+      return json(event, 500, {
         error: "Internal Server Error",
         statusCode: 500,
         message: "Failed to fetch clinic job applicants",

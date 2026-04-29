@@ -8,7 +8,7 @@ import {
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 export const dynamodb = new DynamoDBClient({
   region: process.env.REGION,
 });
@@ -69,19 +69,18 @@ const strOr = (a?: AttributeValue, b?: AttributeValue): string =>
   (a && "S" in a && a.S) || (b && "S" in b && b.S) || "";
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): any => ({
+const json = (event: any, statusCode: number, bodyObj: object): any => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
 // ---- MAIN LAMBDA HANDLER ----
 export const handler = async (event: any) => {
-    setOriginFromEvent(event);
   try {
     // Handle OPTIONS
     if (event.httpMethod === "OPTIONS") {
-      return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+      return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     let userSub: string;
@@ -90,7 +89,7 @@ export const handler = async (event: any) => {
       const userInfo = extractUserFromBearerToken(authHeader);
       userSub = userInfo.sub;
     } catch (authError: any) {
-      return { statusCode: 401, headers: CORS_HEADERS, body: JSON.stringify({ error: authError.message || "Invalid access token" }) };
+      return { statusCode: 401, headers: corsHeaders(event), body: JSON.stringify({ error: authError.message || "Invalid access token" }) };
     }
     const queryParams = event.queryStringParameters || {};
 
@@ -281,7 +280,7 @@ export const handler = async (event: any) => {
         new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime()
     );
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       statusCode: 200,
       message: "Job applications retrieved successfully",
@@ -298,7 +297,7 @@ export const handler = async (event: any) => {
     });
   } catch (error: any) {
     console.error("Error retrieving job applications:", error);
-    return json(500, {
+    return json(event, 500, {
       error: "Internal Server Error",
       statusCode: 500,
       message: "Failed to retrieve job applications",

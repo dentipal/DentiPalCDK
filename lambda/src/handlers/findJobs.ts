@@ -8,7 +8,7 @@ import {
   ScanCommandOutput
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { fireAndForgetIncrement } from "./promotionCounters";
 import { geocodeAddressParts } from "./geo";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
@@ -247,7 +247,6 @@ async function resolveClinicCoords(clinicId: string): Promise<{ lat: number | nu
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // Define CORS headers
  
 
@@ -425,7 +424,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         status: "success",
         jobPostings,
@@ -436,7 +435,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.error("Error retrieving active job postings:", error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         error: `Failed to retrieve active job postings: ${error.message || "unknown"}`,
       }),

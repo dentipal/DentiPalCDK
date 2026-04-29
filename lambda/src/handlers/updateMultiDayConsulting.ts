@@ -12,7 +12,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -51,10 +51,9 @@ interface JobItem {
  * Enforces ownership and job type.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // ✅ ADDED PREFLIGHT CHECK
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -71,13 +70,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!jobId) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: corsHeaders(event), // ✅ Uses imported headers
                 body: JSON.stringify({ error: "jobId is required in path parameters" })
             };
         }
 
         if (!event.body) {
-             return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Request body is required." }) };
+             return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "Request body is required." }) };
         }
 
         const updateData: UpdateMultiDayConsultingBody = JSON.parse(event.body);
@@ -98,7 +97,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!existingJob) {
             return {
                 statusCode: 404,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: corsHeaders(event), // ✅ Uses imported headers
                 body: JSON.stringify({ error: "Multi-day consulting job not found or access denied" })
             };
         }
@@ -107,7 +106,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (existingJob.job_type?.S !== 'multi_day_consulting') {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: corsHeaders(event), // ✅ Uses imported headers
                 body: JSON.stringify({
                     error: "This is not a multi-day consulting job. Use the appropriate endpoint for this job type."
                 })
@@ -167,7 +166,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (fieldsUpdatedCount === 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, // ✅ Uses imported headers
+                headers: corsHeaders(event), // ✅ Uses imported headers
                 body: JSON.stringify({ error: "No updateable fields provided in the request body." })
             };
         }
@@ -198,7 +197,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Step 4: Return structured response ---
         return {
             statusCode: 200,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: corsHeaders(event), // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Multi-day consulting job updated successfully",
                 job: {
@@ -233,7 +232,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Unauthorized",
                     details: err.message
@@ -246,7 +245,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: statusCode,
-            headers: CORS_HEADERS, // ✅ Uses imported headers
+            headers: corsHeaders(event), // ✅ Uses imported headers
             body: JSON.stringify({
                 error: err.message || "Failed to update multi-day consulting job due to an unexpected server error."
             })

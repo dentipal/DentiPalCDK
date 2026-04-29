@@ -6,15 +6,15 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -38,13 +38,12 @@ interface ClinicAddressResponse {
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     // Check standard REST method or HTTP API v2 method
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     console.log("getClinicAddress event:", JSON.stringify(event, null, 2));
@@ -62,7 +61,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("Resolved clinicId:", clinicId, "from path:", path);
 
         if (!clinicId) {
-            return json(400, { error: "Missing clinicId" });
+            return json(event, 400, { error: "Missing clinicId" });
         }
 
         // 1. Fetch the clinic item from DynamoDB
@@ -75,7 +74,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const item = res.Item;
 
         if (!item) {
-            return json(404, { error: "Clinic not found" });
+            return json(event, 404, { error: "Clinic not found" });
         }
 
         // 2. Map and unwrap the attributes
@@ -89,10 +88,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
 
         // 3. Success Response
-        return json(200, body);
+        return json(event, 200, body);
 
     } catch (err: any) {
         console.error("getClinicAddress error:", err);
-        return json(500, { error: "Internal server error", details: err.message });
+        return json(event, 500, { error: "Internal server error", details: err.message });
     }
 };

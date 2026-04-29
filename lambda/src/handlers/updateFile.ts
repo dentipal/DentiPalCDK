@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, UpdateCommand, UpdateCommandInput } from "@aws-
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || "us-east-1";
@@ -15,9 +15,9 @@ const ddbDoc = DynamoDBDocumentClient.from(client);
 
 // --- 2. Helpers ---
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -32,10 +32,9 @@ interface UpdateFileBody {
 
 // Generic update implementation — updates the professional profile record for a given userSub
 const updateFileForType = async (event: APIGatewayProxyEvent, fileType: string): Promise<APIGatewayProxyResult> => {
-    // Must run before anything touches CORS_HEADERS. See getFileUrl.ts for
+    // Must run before anything touches corsHeaders(event). See getFileUrl.ts for
     // the full explanation — warm Lambda containers share _currentOrigin,
     // so skipping this call leaks a previous request's origin into this one.
-    setOriginFromEvent(event);
 
     console.info(`🔧 Starting updateFileMetadata handler for ${fileType}`);
 
@@ -43,7 +42,7 @@ const updateFileForType = async (event: APIGatewayProxyEvent, fileType: string):
 
     // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -53,10 +52,10 @@ const updateFileForType = async (event: APIGatewayProxyEvent, fileType: string):
         const userSub = userInfo.sub;
 
         // Parse Body
-        if (!event.body) return json(400, { error: "Request body is required" });
+        if (!event.body) return json(event, 400, { error: "Request body is required" });
         let body: UpdateFileBody;
-        try { body = JSON.parse(event.body); } catch (e) { return json(400, { error: "Invalid JSON format" }); }
-        if (!body.objectKey) return json(400, { error: "objectKey is required" });
+        try { body = JSON.parse(event.body); } catch (e) { return json(event, 400, { error: "Invalid JSON format" }); }
+        if (!body.objectKey) return json(event, 400, { error: "objectKey is required" });
 
         // Build update expression depending on fileType
         const now = new Date().toISOString();
@@ -86,7 +85,7 @@ const updateFileForType = async (event: APIGatewayProxyEvent, fileType: string):
                 expressionAttributeValues = { ":key": body.objectKey, ":ts": now };
                 break;
             default:
-                return json(400, { error: "Unsupported fileType for update" });
+                return json(event, 400, { error: "Unsupported fileType for update" });
         }
 
         const params: UpdateCommandInput = {
@@ -99,14 +98,14 @@ const updateFileForType = async (event: APIGatewayProxyEvent, fileType: string):
 
         const result = await ddbDoc.send(new UpdateCommand(params));
 
-        return json(200, { message: "File metadata updated successfully", objectKey: body.objectKey, updatedAttributes: result.Attributes });
+        return json(event, 200, { message: "File metadata updated successfully", objectKey: body.objectKey, updatedAttributes: result.Attributes });
 
     } catch (error: any) {
         console.error("Error updating file metadata:", error);
         if (error.message === "Authorization header missing" || error.message?.startsWith("Invalid authorization header") || error.message === "Invalid access token format" || error.message === "Failed to decode access token") {
-            return json(401, { error: "Unauthorized", details: error.message });
+            return json(event, 401, { error: "Unauthorized", details: error.message });
         }
-        return json(500, { error: error.message || "Internal Server Error" });
+        return json(event, 500, { error: error.message || "Internal Server Error" });
     }
 };
 
@@ -119,11 +118,10 @@ export const updateVideoResume = async (event: APIGatewayProxyEvent) => updateFi
 
 // Keep default handler for backward compatibility
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // Try to infer file type from path and dispatch
     const path = event.path || (event as any).rawPath || "";
     if (path.includes("profile-image") || path.includes("profile-images")) return updateProfileImage(event);
     if (path.includes("certificate") || path.includes("certificates")) return updateProfessionalLicense(event);
     if (path.includes("video-resume") || path.includes("video-resumes")) return updateVideoResume(event);
-    return json(400, { error: "Invalid file update path. Use /profile-image, /certificates, or /video-resume." });
+    return json(event, 400, { error: "Invalid file update path. Use /profile-image, /certificates, or /video-resume." });
 };

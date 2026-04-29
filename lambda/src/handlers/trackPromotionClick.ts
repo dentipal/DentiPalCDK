@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_PROMOTIONS_TABLE = process.env.JOB_PROMOTIONS_TABLE || "DentiPal-V5-JobPromotions";
@@ -10,10 +10,9 @@ const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  setOriginFromEvent(event);
 
   if ((event.httpMethod || "POST") === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -23,7 +22,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (!jobId || !promotionId) {
       return {
         statusCode: 400,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({ error: "jobId and promotionId are required" }),
       };
     }
@@ -38,16 +37,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       ExpressionAttributeValues: { ":one": 1, ":active": "active" },
     }));
 
-    return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 204, headers: corsHeaders(event), body: "" };
   } catch (error: any) {
     // ConditionalCheckFailed = promotion not active; treat as a silent no-op so clients don't care.
     if (error?.name === "ConditionalCheckFailedException") {
-      return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+      return { statusCode: 204, headers: corsHeaders(event), body: "" };
     }
     console.error("Error tracking promotion click:", error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({ error: `Failed to track click: ${error.message || "unknown"}` }),
     };
   }
