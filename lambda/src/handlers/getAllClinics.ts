@@ -7,7 +7,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
@@ -49,11 +49,10 @@ interface DynamoDBClinicItem {
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // ✅ ADDED PREFLIGHT CHECK
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -128,7 +127,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!response.Items || response.Items.length === 0) {
             return {
                 statusCode: 200,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     status: "success",
                     statusCode: 200,
@@ -188,7 +187,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 7. Success Response
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 status: "success",
                 statusCode: 200,
@@ -214,7 +213,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (error.message === "Authorization header missing" || error.message === "Invalid access token format") {
              return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Unauthorized",
                     statusCode: 401,
@@ -225,7 +224,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 error: "Internal Server Error",
                 statusCode: 500,

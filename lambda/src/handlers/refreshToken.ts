@@ -10,7 +10,7 @@ import {
   APIGatewayProxyResult
 } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Type Definitions for better safety ---
 
@@ -29,9 +29,9 @@ interface RefreshedTokens {
 }
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj)
 });
 
@@ -51,10 +51,9 @@ const cognito = new CognitoIdentityProviderClient({ region: REGION });
  * @returns A promise resolving to an API Gateway Proxy result (HandlerResponse).
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -65,7 +64,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       // Event body can be undefined or null in some Lambda event types (e.g., S3, SNS).
       // For an API Gateway V2 proxy integration, we expect it to be a string.
       if (!event.body) {
-        return json(400, {
+        return json(event, 400, {
           error: "Bad Request",
           statusCode: 400,
           message: "Request body is missing",
@@ -75,7 +74,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       }
       tokenData = JSON.parse(event.body) as TokenData;
     } catch (parseError) {
-      return json(400, {
+      return json(event, 400, {
         error: "Bad Request",
         statusCode: 400,
         message: "Invalid JSON format in request body",
@@ -86,7 +85,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // Validate required field
     if (!tokenData.refreshToken) {
-      return json(400, {
+      return json(event, 400, {
         error: "Bad Request",
         statusCode: 400,
         message: "Refresh token is required",
@@ -112,7 +111,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     if (!tokens || !tokens.AccessToken || !tokens.IdToken) {
       // This case might capture various issues like token expiration or client misconfig
-      return json(401, {
+      return json(event, 401, {
         error: "Unauthorized",
         statusCode: 401,
         message: "Token refresh failed",
@@ -132,7 +131,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       tokenType: tokens.TokenType || "Bearer"
     };
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       statusCode: 200,
       message: "Tokens refreshed successfully",
@@ -176,7 +175,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       500: "Internal Server Error"
     };
 
-    return json(statusCode, {
+    return json(event, statusCode, {
       error: errorTypeMap[statusCode],
       statusCode: statusCode,
       message: message,

@@ -4,7 +4,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { canAccessClinic, buildAddress, extractUserFromBearerToken } from "./utils";
 import { geocodeAddressParts } from "./geo";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -29,9 +29,9 @@ const dynamoClient = new DynamoDBClient({ region: REGION });
 // --- Helpers ---
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -51,12 +51,11 @@ const ALLOWED_UPDATERS: ReadonlySet<string> = new Set(["root", "clinicadmin", "c
 /** ----------------------------------------------------------------------- */
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = getMethod(event);
 
     // 1. CORS Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -71,7 +70,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isAllowedGroup: boolean = normalized.some(g => ALLOWED_UPDATERS.has(g));
         
         if (!isAllowedGroup) {
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Access denied to update clinics",
@@ -94,7 +93,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("Extracted clinicId:", clinicId);
 
         if (!clinicId) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Clinic ID is required",
@@ -111,7 +110,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const hasAccess: boolean = await canAccessClinic(userSub, groups, clinicId);
 
         if (!hasAccess) {
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Access denied to update this clinic",
@@ -193,7 +192,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Check if only timestamp is being updated
         // If we only have 1 item in the array, it's just 'updatedAt'
         if (updateExpression.length === 1 && updateExpression[0].includes("updatedAt")) { 
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "No fields to update",
@@ -204,7 +203,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!CLINICS_TABLE) {
              console.error("Environment variable CLINICS_TABLE is not set.");
-             return json(500, {
+             return json(event, 500, {
                  error: "Internal Server Error",
                  statusCode: 500,
                  message: "Server configuration error",
@@ -226,7 +225,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamoClient.send(command);
         
         // 8. Success Response
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             statusCode: 200,
             message: "Clinic updated successfully",
@@ -245,13 +244,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to update clinic",

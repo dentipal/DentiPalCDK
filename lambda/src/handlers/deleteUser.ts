@@ -14,7 +14,7 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Initialization ---
 const REGION = process.env.REGION || "us-east-1";
@@ -23,9 +23,9 @@ const ddbDoc = DynamoDBDocumentClient.from(client);
 const cognito = new CognitoIdentityProviderClient({ region: REGION });
 
 // Helper
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -158,11 +158,10 @@ async function removeUserFromClinics(userSub: string): Promise<void> {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -173,11 +172,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userInfo = extractUserFromBearerToken(authHeader);
             userGroups = userInfo.groups || [];
         } catch (authError: any) {
-            return json(401, { error: authError.message || "Invalid access token" });
+            return json(event, 401, { error: authError.message || "Invalid access token" });
         }
         
         if (!userGroups.some(g => g.toLowerCase() === "root")) {
-             return json(403, {
+             return json(event, 403, {
                 error: "Forbidden",
                 message: "Only Root users can delete users",
                 details: { requiredGroup: "Root" }
@@ -186,7 +185,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const idOrSub = getPathId(event);
         if (!idOrSub) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "User identifier is required",
                 details: { pathFormat: "/users/{email-or-sub}" }
@@ -198,7 +197,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isSubLookup = !idOrSub.includes("@");
 
         if (isSubLookup && !resolved) {
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 message: "User not found in Cognito",
                 details: { searchedBy: "sub", providedId: idOrSub }
@@ -217,7 +216,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             );
         } catch (e: any) {
             if (e?.name === "UserNotFoundException") {
-                return json(404, {
+                return json(event, 404, {
                     error: "Not Found",
                     message: "User does not exist in Cognito",
                     details: { username: username }
@@ -262,7 +261,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 6. Success
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             message: "User deleted successfully",
             data: {
@@ -273,7 +272,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     } catch (error: any) {
         console.error("Error deleting user:", error);
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             message: "Failed to delete user",
             details: { reason: error?.message }

@@ -9,14 +9,14 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj)
 });
 
@@ -32,7 +32,6 @@ interface DynamoItem {
 // Handler: Retrieve job postings for the caller
 // -------------------------
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
   const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 
@@ -40,7 +39,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   if (method === "OPTIONS") {
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: "",
     };
   }
@@ -151,7 +150,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         new Date(a.createdAt).getTime()
     );
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       statusCode: 200,
       message: `Retrieved ${jobPostings.length} job posting(s)`,
@@ -164,7 +163,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
   } catch (error: any) {
     console.error("Error retrieving job postings:", error);
-    return json(500, {
+    return json(event, 500, {
       error: "Internal Server Error",
       statusCode: 500,
       message: "Failed to retrieve job postings",

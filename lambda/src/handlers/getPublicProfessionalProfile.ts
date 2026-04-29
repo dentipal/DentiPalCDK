@@ -8,14 +8,14 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -125,11 +125,10 @@ function getMethod(event: APIGatewayProxyEvent): string {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   try {
     // CORS preflight
     if (getMethod(event) === "OPTIONS") {
-      return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+      return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     // Validate caller token (clinic/user)
@@ -140,7 +139,7 @@ export const handler = async (
     const professionalUserSub = getUserSubFromEvent(event);
 
     if (!professionalUserSub) {
-      return json(400, {
+      return json(event, 400, {
         error: "Professional userSub missing from path",
         debug: {
           pathParameters: event.pathParameters ?? null,
@@ -171,7 +170,7 @@ export const handler = async (
 
     const profiles = items.map((it) => unmarshallMap(it));
 
-    return json(200, { profile: profiles[0] || null });
+    return json(event, 200, { profile: profiles[0] || null });
 
   } catch (error: any) {
     console.error("Error getting public professional profile:", error);
@@ -181,7 +180,7 @@ export const handler = async (
         ? 401
         : 500;
 
-    return json(statusCode, {
+    return json(event, statusCode, {
       error: error.message || "Internal server error",
     });
   }

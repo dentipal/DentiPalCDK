@@ -13,15 +13,15 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 /* AWS Client */
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -125,13 +125,12 @@ async function fetchProfessionalNameBySub(userSub: string): Promise<Professional
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   try {
     // CORS Preflight
     if (event?.httpMethod === "OPTIONS") {
       return {
         statusCode: 200,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: "",
       };
     }
@@ -141,7 +140,7 @@ export const handler = async (
     console.log("PROFESSIONAL_PROFILES_TABLE:", process.env.PROFESSIONAL_PROFILES_TABLE);
 
     if (!process.env.JOB_INVITATIONS_TABLE || !process.env.JOB_POSTINGS_TABLE) {
-      return json(500, {
+      return json(event, 500, {
         error: "Table names are missing from the environment variables",
       });
     }
@@ -151,7 +150,7 @@ export const handler = async (
       const authHeader = event.headers?.Authorization || event.headers?.authorization;
       extractUserFromBearerToken(authHeader);
     } catch (authError: any) {
-      return json(401, { error: authError.message || "Invalid access token" });
+      return json(event, 401, { error: authError.message || "Invalid access token" });
     }
 
     const fullPath = event.pathParameters?.proxy;
@@ -160,7 +159,7 @@ export const handler = async (
     console.log("Extracted clinicId:", clinicId);
 
     if (!clinicId) {
-      return json(400, { error: "clinicId is required in the path" });
+      return json(event, 400, { error: "clinicId is required in the path" });
     }
 
     const queryParams = event.queryStringParameters ?? {};
@@ -272,7 +271,7 @@ export const handler = async (
       (a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime()
     );
 
-    return json(200, {
+    return json(event, 200, {
       message: "Invitations fetched successfully.",
       invitations,
       totalCount: invitations.length,
@@ -284,7 +283,7 @@ export const handler = async (
 
   } catch (error: any) {
     console.error("Error fetching invitations:", error);
-    return json(500, {
+    return json(event, 500, {
       error: "Failed to retrieve invitations.",
       details: error?.message,
     });

@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, UpdateCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 
 const REGION: string = process.env.REGION || "us-east-1";
@@ -10,9 +10,9 @@ const CLINIC_PROFILES_TABLE: string = process.env.CLINIC_PROFILES_TABLE!;
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -71,17 +71,16 @@ const transformBody = (body: any): any => {
 };
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     console.info("🔧 Starting updateClinicProfile handler");
 
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     // 🛑 CRITICAL FIX: Check if body is null immediately
     if (!event.body) {
         console.error("❌ Request body is NULL. Client likely sent a GET request instead of PUT/POST.");
-        return json(400, { 
+        return json(event, 400, { 
             error: "Request body is missing.", 
             details: "You must send a JSON payload. Ensure you are using PUT or POST method, not GET." 
         });
@@ -111,7 +110,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("DEBUG: Extracted Clinic ID:", clinicIdFromPath);
 
         if (!clinicIdFromPath) {
-            return json(400, { error: "Missing clinicId in URL path." });
+            return json(event, 400, { error: "Missing clinicId in URL path." });
         }
 
         // --- 1. FIND THE PROFILE ---
@@ -125,7 +124,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existingProfile = queryResult.Items?.[0];
 
         if (!existingProfile) {
-            return json(404, { error: "Clinic profile not found.", details: `No profile exists for clinicId: ${clinicIdFromPath}` });
+            return json(event, 404, { error: "Clinic profile not found.", details: `No profile exists for clinicId: ${clinicIdFromPath}` });
         }
 
         const dbUserSub = existingProfile.userSub;
@@ -136,7 +135,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // superuser, so it goes through the same membership gate as everyone else.
         const allowed = await canWriteClinic(loggedInUserSub, groups, clinicIdFromPath, "manageClinic");
         if (!allowed) {
-            return json(403, { error: "Access denied." });
+            return json(event, 403, { error: "Access denied." });
         }
 
         // --- 3. TRANSFORM & UPDATE ---
@@ -153,7 +152,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         try {
             requestBody = JSON.parse(bodyString);
         } catch (e) {
-            return json(400, { error: "Invalid JSON body format" });
+            return json(event, 400, { error: "Invalid JSON body format" });
         }
 
         const dynamoBody = transformBody(requestBody);
@@ -178,7 +177,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
         
         if (updatedFields.length === 0) {
-            return json(400, { 
+            return json(event, 400, { 
                 error: "No updateable fields provided. Check your JSON keys.",
                 receivedKeys: Object.keys(requestBody), 
                 allowedKeys: allowedFields
@@ -212,13 +211,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const result = await ddbDoc.send(updateCommand);
 
-        return json(200, {
+        return json(event, 200, {
             message: "Clinic profile updated successfully",
             profile: result.Attributes, 
         });
 
     } catch (error: any) {
         console.error("❌ Error:", error);
-        return json(500, { error: "Internal Server Error", details: error.message });
+        return json(event, 500, { error: "Internal Server Error", details: error.message });
     }
 };

@@ -7,28 +7,27 @@ import {
   ResendConfirmationCodeCommand,
   AdminGetUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-  setOriginFromEvent(event);
 
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
     if (!event.body) {
-      return json(400, {
+      return json(event, 400, {
         error: "Bad Request",
         statusCode: 400,
         message: "Request body is missing",
@@ -40,7 +39,7 @@ export const handler = async (
     const { email: rawEmail } = JSON.parse(event.body) as { email?: string };
 
     if (!rawEmail) {
-      return json(400, {
+      return json(event, 400, {
         error: "Bad Request",
         statusCode: 400,
         message: "Email is required",
@@ -62,7 +61,7 @@ export const handler = async (
       userStatus = existing.UserStatus;
     } catch (err: any) {
       if (err.name === "UserNotFoundException") {
-        return json(404, {
+        return json(event, 404, {
           error: "Not Found",
           statusCode: 404,
           message: "No signup found for this email",
@@ -74,7 +73,7 @@ export const handler = async (
     }
 
     if (userStatus === "CONFIRMED") {
-      return json(409, {
+      return json(event, 409, {
         error: "Conflict",
         statusCode: 409,
         message: "Email is already verified",
@@ -84,7 +83,7 @@ export const handler = async (
     }
 
     if (userStatus !== "UNCONFIRMED") {
-      return json(409, {
+      return json(event, 409, {
         error: "Conflict",
         statusCode: 409,
         message: `Cannot resend code — user is in '${userStatus}' state`,
@@ -99,7 +98,7 @@ export const handler = async (
       })
     );
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       statusCode: 200,
       message: "Verification code resent. Please check your email.",
@@ -125,7 +124,7 @@ export const handler = async (
       message = "Invalid email";
     }
 
-    return json(statusCode, {
+    return json(event, statusCode, {
       error:
         statusCode === 400 ? "Bad Request" :
         statusCode === 429 ? "Too Many Requests" :

@@ -11,27 +11,26 @@ import {
 
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // Handle HTTP API (v2) structure where method is in requestContext.http
   const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 
   // CORS Preflight
   if (method === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -44,7 +43,7 @@ export const handler = async (
     const jobId = pathParts?.[2];
 
     if (!jobId) {
-      return json(400, {
+      return json(event, 400, {
         error: "jobId is required in path parameters",
       });
     }
@@ -60,7 +59,7 @@ export const handler = async (
     const jobResponse = await dynamodb.send(new GetItemCommand(jobCommand));
 
     if (!jobResponse.Item) {
-      return json(404, {
+      return json(event, 404, {
         error: "Permanent job not found or access denied",
       });
     }
@@ -68,7 +67,7 @@ export const handler = async (
     const job = jobResponse.Item;
 
     if (job.job_type?.S !== "permanent") {
-      return json(400, {
+      return json(event, 400, {
         error: "This is not a permanent job. Use the appropriate endpoint for this job type.",
       });
     }
@@ -105,7 +104,7 @@ export const handler = async (
       created_by: job.created_by?.S || "",
     };
 
-    return json(200, {
+    return json(event, 200, {
       message: "Permanent job retrieved successfully",
       job: permanentJob,
     });
@@ -113,7 +112,7 @@ export const handler = async (
   } catch (error: any) {
     console.error("Error retrieving permanent job:", error);
 
-    return json(500, {
+    return json(event, 500, {
       error: "Failed to retrieve permanent job. Please try again.",
       details: error.message,
     });

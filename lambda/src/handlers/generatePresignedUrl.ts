@@ -2,15 +2,15 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const REGION: string = process.env.REGION || "us-east-1";
 const s3Client = new S3Client({ region: REGION });
 const PRESIGN_TTL_SECONDS = 900; // 15 minutes
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj),
 });
 
@@ -98,10 +98,9 @@ const getExtension = (name: string): string => {
 // directly to S3. Size/MIME/extension are enforced in the policy itself, so
 // the client cannot bypass the caps.
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "POST";
-    if (method === "OPTIONS") return { statusCode: 200, headers: CORS_HEADERS, body: "" };
-    if (method !== "POST") return json(405, { error: "Method not allowed" });
+    if (method === "OPTIONS") return { statusCode: 200, headers: corsHeaders(event), body: "" };
+    if (method !== "POST") return json(event, 405, { error: "Method not allowed" });
 
     // ─── Auth ──────────────────────────────────────────────────────────────
     const authHeader = event.headers?.Authorization || event.headers?.authorization;
@@ -122,35 +121,35 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         userEmail = claims?.email;
         if (!userSub) {
             console.error("[uploadFile] Unauthorized request (no token, no claims)");
-            return json(401, { error: "Unauthorized" });
+            return json(event, 401, { error: "Unauthorized" });
         }
     }
 
     // ─── Body ──────────────────────────────────────────────────────────────
-    if (!event.body) return json(400, { error: "Request body is required" });
+    if (!event.body) return json(event, 400, { error: "Request body is required" });
     let body: RequestBody;
     try {
         body = JSON.parse(event.body) as RequestBody;
     } catch {
-        return json(400, { error: "Invalid JSON body" });
+        return json(event, 400, { error: "Invalid JSON body" });
     }
     const { fileType, fileName, contentType, fileSize, clinicId } = body;
 
     // ─── Input checks ─────────────────────────────────────────────────────
     if (!ALL_FILE_TYPES.includes(fileType)) {
-        return json(400, { error: "Invalid fileType", allowedTypes: ALL_FILE_TYPES });
+        return json(event, 400, { error: "Invalid fileType", allowedTypes: ALL_FILE_TYPES });
     }
     if (!fileName || typeof fileName !== "string") {
-        return json(400, { error: "fileName is required" });
+        return json(event, 400, { error: "fileName is required" });
     }
     if (!contentType || typeof contentType !== "string") {
-        return json(400, { error: "contentType is required" });
+        return json(event, 400, { error: "contentType is required" });
     }
 
     // MIME allowlist
     const mimeAllowed = MIME_ALLOWLIST[fileType];
     if (!mimeAllowed.includes(contentType.toLowerCase())) {
-        return json(400, {
+        return json(event, 400, {
             error: `File type "${contentType}" is not allowed for ${fileType}.`,
             details: { allowedMimeTypes: mimeAllowed },
         });
@@ -160,7 +159,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const ext = getExtension(fileName);
     const extAllowed = EXTENSION_ALLOWLIST[fileType];
     if (!ext || !extAllowed.includes(ext)) {
-        return json(400, {
+        return json(event, 400, {
             error: `File extension "${ext || "(none)"}" is not allowed for ${fileType}.`,
             details: { allowedExtensions: extAllowed },
         });
@@ -170,7 +169,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const limits = SIZE_LIMITS[fileType];
     if (typeof fileSize === "number" && Number.isFinite(fileSize)) {
         if (fileSize < limits.min) {
-            return json(400, {
+            return json(event, 400, {
                 error: `File is too small. Minimum for ${fileType} is ${fmtBytes(limits.min)}.`,
                 details: {
                     minSize: limits.min,
@@ -180,7 +179,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
         if (fileSize > limits.max) {
-            return json(400, {
+            return json(event, 400, {
                 error: `File is too large. Maximum for ${fileType} is ${fmtBytes(limits.max)}.`,
                 details: {
                     maxSize: limits.max,
@@ -204,7 +203,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const bucketName = buckets[fileType];
     if (!bucketName) {
         console.error(`[uploadFile] Missing bucket env var for fileType: ${fileType}`);
-        return json(500, { error: `Server configuration error: bucket not configured for ${fileType}.` });
+        return json(event, 500, { error: `Server configuration error: bucket not configured for ${fileType}.` });
     }
 
     // ─── Object key (user-scoped, collision-resistant) ────────────────────
@@ -241,7 +240,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             sizeRange: [limits.min, limits.max],
         });
 
-        return json(200, {
+        return json(event, 200, {
             url,
             fields,
             objectKey,
@@ -256,6 +255,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
     } catch (err: any) {
         console.error("[uploadFile] Failed to create presigned POST:", err?.name, err?.message);
-        return json(500, { error: "Failed to prepare upload. Please try again." });
+        return json(event, 500, { error: "Failed to prepare upload. Please try again." });
     }
 };

@@ -11,7 +11,7 @@ import {
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Constants and Initialization ---
 
@@ -23,9 +23,9 @@ const dynamodb = new DynamoDBClient(clientConfig);
 const ALLOWED_GROUPS = new Set<string>(["root", "clinicadmin", "clinicmanager"]);
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -49,13 +49,12 @@ const normalize = (g: string): string => g.toLowerCase().replace(/[^a-z0-9]/g, "
 
 // --- Main Handler Function ---
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
   const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 
   // CORS Preflight
   if (method === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -69,7 +68,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const isAllowed: boolean = normalizedGroups.some(g => ALLOWED_GROUPS.has(g));
 
     if (!isAllowed) {
-      return json(403, {
+      return json(event, 403, {
         status: "error",
         statusCode: 403,
         error: "Forbidden",
@@ -94,7 +93,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     if (!clinicId || !jobId) {
-      return json(400, {
+      return json(event, 400, {
         status: "error",
         statusCode: 400,
         error: "Bad Request",
@@ -110,7 +109,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       try {
         body = JSON.parse(raw);
       } catch {
-        return json(400, {
+        return json(event, 400, {
           status: "error",
           statusCode: 400,
           error: "Bad Request",
@@ -121,7 +120,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const professionalUserSub: string | undefined = body.professionalUserSub;
 
     if (!professionalUserSub) {
-      return json(400, {
+      return json(event, 400, {
         status: "error",
         statusCode: 400,
         error: "Bad Request",
@@ -148,7 +147,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.log(`Application for job ${jobId} by professional ${professionalUserSub} rejected successfully.`);
 
     // 5. Success Response
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       statusCode: 200,
       message: "Job application rejected successfully",
@@ -160,7 +159,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.error("❌ Error rejecting job application:", error);
 
     if (isAuthError(error)) {
-      return json(401, {
+      return json(event, 401, {
         status: "error",
         statusCode: 401,
         error: "Unauthorized",
@@ -168,7 +167,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
-    return json(500, {
+    return json(event, 500, {
       status: "error",
       statusCode: 500,
       error: "Internal Server Error",

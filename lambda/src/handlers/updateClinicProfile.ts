@@ -6,7 +6,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken, isRoot } from "./utils";
 
@@ -52,27 +52,26 @@ const ALLOWED_FIELDS: ReadonlyArray<keyof UpdateFields> = [
 ];
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj)
 });
 
 // --- Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     console.info("🔧 Starting updateClinicProfile handler");
 
     // CORS Preflight
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
         if (!CLINIC_PROFILES_TABLE) {
             console.error("❌ CLINIC_PROFILES_TABLE environment variable is not set.");
-            return json(500, { error: "Server configuration error: Table not defined." });
+            return json(event, 500, { error: "Server configuration error: Table not defined." });
         }
 
         // --- ✅ STEP 1: AUTHENTICATION (AccessToken) ---
@@ -92,7 +91,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!clinicId || !userSub) {
             console.error("❌ Missing clinicId or userSub");
-            return json(401, { error: "Missing clinicId or userSub" });
+            return json(event, 401, { error: "Missing clinicId or userSub" });
         }
 
         // Step 3: Verify user is clinic or Root (case-insensitive)
@@ -101,7 +100,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!isClinicUser && !isRootUser) {
             console.warn("🚫 Unauthorized userType for profile update:", userType);
-            return json(403, { error: "Access denied – only clinic users can update clinic profiles" });
+            return json(event, 403, { error: "Access denied – only clinic users can update clinic profiles" });
         }
 
         // Step 4: Parse body and validate
@@ -110,7 +109,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!profileId) {
             console.warn("⚠️ profileId missing in request body");
-            return json(400, { error: "profileId is required" });
+            return json(event, 400, { error: "profileId is required" });
         }
 
         // Step 5: Confirm profile exists
@@ -126,7 +125,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!existingProfile.Item) {
             console.warn("⚠️ Clinic profile not found for clinicId:", clinicId);
-            return json(404, { error: "Clinic profile not found",clinicId:clinicId});
+            return json(event, 404, { error: "Clinic profile not found",clinicId:clinicId});
         }
 
         // Step 6: Prepare update fields
@@ -174,7 +173,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (updateExpressions.length === 0) {
-            return json(400, { error: "No valid fields provided for update" });
+            return json(event, 400, { error: "No valid fields provided for update" });
         }
 
         // Step 7: Execute Update
@@ -196,7 +195,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         console.info("✅ Clinic profile updated");
 
-        return json(200, {
+        return json(event, 200, {
             message: "Clinic profile updated successfully",
             profileId,
             updatedAt: new Date().toISOString(),
@@ -213,12 +212,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             errorMessage === "Failed to decode access token" ||
             errorMessage === "User sub not found in token claims") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: errorMessage
             });
         }
 
-        return json(500, { error: "Failed to update clinic profile", details: errorMessage });
+        return json(event, 500, { error: "Failed to update clinic profile", details: errorMessage });
     }
 };

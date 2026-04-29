@@ -5,7 +5,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { geocodeAddressParts } from "./geo";
 
 // --- Configuration ---
@@ -62,9 +62,9 @@ interface ProfileData {
 
 // --- Helpers ---
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -90,12 +90,11 @@ async function getClinicProfileByUser(clinicId: string, userSub: string): Promis
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -112,7 +111,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             userEmail = userInfo.email || "";
         } catch (authError: any) {
             console.error("Auth Error:", authError.message);
-            return json(401, { error: authError.message || "Invalid access token" });
+            return json(event, 401, { error: authError.message || "Invalid access token" });
         }
 
         // 1b. Fetch user's first/last name from Cognito
@@ -134,7 +133,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         if (!isAllowed) {
             console.warn(`[AUTH] User ${userSub} denied. Groups: [${userGroups.join(', ')}]`);
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 message: "Access denied",
                 details: { requiredGroups: Array.from(ALLOWED_GROUPS), userGroups }
@@ -156,7 +155,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             !jobData.start_time ||
             !jobData.end_time
         ) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Missing required fields",
                 details: {
@@ -171,7 +170,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         for (const cid of jobData.clinicIds) {
             if (!(await canWriteClinic(userSub, userGroups, cid, "manageJobs"))) {
                 console.warn(`[createTemporaryJob] Write denied: sub=${userSub} clinicId=${cid}`);
-                return json(403, { error: `Forbidden: you cannot create jobs for clinic ${cid}` });
+                return json(event, 403, { error: `Forbidden: you cannot create jobs for clinic ${cid}` });
             }
         }
 
@@ -183,7 +182,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             : jobData.professional_role ? [jobData.professional_role] : [];
 
         if (professionalRoles.length === 0) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "At least one professional role is required",
                 details: { validRoles: VALID_ROLE_VALUES }
@@ -193,7 +192,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate each professional role
         const invalidRoles = professionalRoles.filter(r => !VALID_ROLE_VALUES.includes(r));
         if (invalidRoles.length > 0) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid professional role(s)",
                 details: { validRoles: VALID_ROLE_VALUES, invalidRoles }
@@ -203,7 +202,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate work location type if provided
         const VALID_WORK_LOCATIONS = ['onsite', 'us_remote', 'global_remote'];
         if (jobData.work_location_type && !VALID_WORK_LOCATIONS.includes(jobData.work_location_type)) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid work location type",
                 details: { validOptions: VALID_WORK_LOCATIONS, provided: jobData.work_location_type }
@@ -213,7 +212,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate pay type if provided
         const VALID_PAY_TYPES = ['per_hour', 'per_transaction', 'percentage_of_revenue'];
         if (jobData.pay_type && !VALID_PAY_TYPES.includes(jobData.pay_type)) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid pay type",
                 details: { validOptions: VALID_PAY_TYPES, provided: jobData.pay_type }
@@ -222,7 +221,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // per_transaction is not allowed for doctor roles
         if (jobData.pay_type === 'per_transaction' && professionalRoles.some(r => isDoctorRole(r))) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Per-transaction pay type is not available for doctor roles",
             });
@@ -231,7 +230,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate date format and future
         const jobDate = new Date(jobData.date);
         if (isNaN(jobDate.getTime())) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid date format",
                 details: { providedDate: jobData.date, expectedFormat: "ISO 8601 date string" }
@@ -241,7 +240,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const today = new Date();
         today.setHours(0, 0, 0, 0); 
         if (jobDate < today) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Job date must be in the future",
                 details: { providedDate: jobData.date, minimumDate: today.toISOString() }
@@ -250,7 +249,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Validate hours and rate
         if (jobData.hours < 1 || jobData.hours > 12) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid hours value",
                 details: { providedHours: jobData.hours, validRange: "1-12" }
@@ -259,14 +258,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate compensation based on pay type
         const payType = jobData.pay_type || "per_hour";
         if (jobData.rate === undefined || jobData.rate === null) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Rate is required",
             });
         }
         if (payType === "per_hour") {
             if (jobData.rate < 10 || jobData.rate > 200) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Bad Request",
                     message: "Hourly rate must be between $10 and $200",
                     details: { providedRate: `$${jobData.rate}`, validRange: "$10-$200" }
@@ -274,14 +273,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         } else if (payType === "per_transaction") {
             if (jobData.rate <= 0) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Bad Request",
                     message: "Rate per transaction must be positive",
                 });
             }
         } else if (payType === "percentage_of_revenue") {
             if (jobData.rate <= 0 || jobData.rate > 100) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Bad Request",
                     message: "Revenue percentage must be between 0 and 100",
                 });
@@ -424,7 +423,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
 
         if (succeeded.length === 0) {
-            return json(500, {
+            return json(event, 500, {
                 error: "Internal Server Error",
                 message: "Failed to create any temporary job postings",
                 details: { failed },
@@ -433,7 +432,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 6. Response
         const statusCode = failed.length > 0 ? 207 : 201;
-        return json(statusCode, {
+        return json(event, statusCode, {
             status: failed.length > 0 ? "partial_success" : "success",
             message: failed.length > 0
                 ? `Created ${succeeded.length} of ${jobData.clinicIds.length} job postings`
@@ -454,7 +453,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error;
         console.error("Error creating temporary job postings:", err);
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             message: "Failed to create temporary job postings",
             details: { reason: err.message }

@@ -10,7 +10,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming extractUserFromBearerToken exists in a local utility file
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
 
 // --- Initialization ---
@@ -19,9 +19,9 @@ import { VALID_ROLE_VALUES } from "./professionalRoles";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -90,14 +90,13 @@ interface JobPosting {
 // Define the Lambda handler function
 // Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     try {
         // --- CORS preflight ---
         // FIX: Cast event to 'any' to access .http (HTTP API v2) property without TS error
         const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
         if (method === "OPTIONS") {
-            return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+            return { statusCode: 200, headers: corsHeaders(event), body: "" };
         }
 
         // Step 1: Authenticate user - Extract access token
@@ -107,7 +106,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
         } catch (authError: any) {
-            return json(401, {
+            return json(event, 401, {
                 error: authError.message || "Invalid access token"
             });
         }
@@ -128,7 +127,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Validate professional role if provided
         if (professionalRole && !VALID_ROLE_VALUES.includes(professionalRole)) {
-            return json(400, {
+            return json(event, 400, {
                 error: `Invalid professional role. Valid options: ${VALID_ROLE_VALUES.join(', ')}`
             });
         }
@@ -264,7 +263,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         jobPostings.sort((a, b) => new Date(b.postedAt).getTime() - new Date(a.postedAt).getTime());
 
         // Step 5: Return results
-        return json(200, {
+        return json(event, 200, {
             message: "Job postings retrieved successfully",
             jobPostings,
             totalCount: jobPostings.length,
@@ -284,7 +283,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error;
         console.error("Error browsing job postings:", err);
-        return json(500, {
+        return json(event, 500, {
             error: "Failed to retrieve job postings. Please try again.",
             details: err.message
         });

@@ -6,7 +6,7 @@ import {
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 // ✅ UPDATE: Changed import to use the new token utility
 import { extractUserFromBearerToken } from "./utils";
 
@@ -14,9 +14,9 @@ import { extractUserFromBearerToken } from "./utils";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -146,13 +146,12 @@ const getPermanentStartDate = (job: UnmarshalledJobItem): PermanentStartDate => 
 // ------------------------------------------------------------
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     console.log("📥 Incoming Event:", JSON.stringify(event, null, 2));
 
     // --- CORS preflight ---
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -171,7 +170,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!clinicId) {
             console.warn("⚠️ clinicId missing in path");
-            return json(400, { error: "clinicId is required in path" });
+            return json(event, 400, { error: "clinicId is required in path" });
         }
 
         // 3. Query using ClinicIdIndex (GSI)
@@ -260,7 +259,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("✅ All permanent jobs formatted successfully");
 
         // 6. Success Response
-        return json(200, {
+        return json(event, 200, {
             message: `Retrieved ${formattedJobs.length} permanent job(s) for clinicId: ${clinicId}`,
             jobs: formattedJobs
         });
@@ -275,13 +274,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: "Failed to retrieve permanent jobs",
             details: error.message
         });

@@ -9,7 +9,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the Cognito client (AWS SDK v3)
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
@@ -102,12 +102,11 @@ function deriveUserTypeFromGroups(groups: string[]): 'clinic' | 'professional' |
 // --- handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     console.log("=== /auth/forgot START ===");
     
     // ✅ ADDED PREFLIGHT CHECK
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "{}" };
     }
 
     try {
@@ -119,7 +118,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!email) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Bad Request",
                     message: "Email is required",
@@ -132,7 +131,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("[forgot] missing env CLIENT_ID or USER_POOL_ID");
             return {
                 statusCode: 500,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Internal Server Error",
                     message: "Server configuration error",
@@ -151,7 +150,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!username) {
             return {
                 statusCode: 404,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Not Found",
                     statusCode: 404,
@@ -169,7 +168,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("[forgot] AdminListGroupsForUser failed:", e?.name, e?.message);
             return {
                 statusCode: 500,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Internal Server Error",
                     message: "Failed to retrieve user role information",
@@ -188,7 +187,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const portalType = userType === "clinic" ? "Clinic" : "Professional";
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Bad Request",
                     message: `This account is a ${userType} account. Please use the ${portalType} portal.`,
@@ -207,7 +206,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 status: "success",
                 statusCode: 200,
@@ -219,7 +218,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("[forgot] ERROR:", err?.name, err?.message);
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({ error: "An error occurred while initiating the password reset. Please try again." })
         };
     }

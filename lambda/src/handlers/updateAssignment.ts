@@ -4,7 +4,7 @@ import { isRoot } from "./utils";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -23,19 +23,18 @@ const USER_CLINIC_ASSIGNMENTS_TABLE: string | undefined = process.env.USER_CLINI
 const dynamoClient = new DynamoDBClient({ region: REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj)
 });
 
 // --- Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // CORS Preflight
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -46,29 +45,29 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 2. Authorization Check (Root User)
         if (!isRoot(userGroups)) {
-            return json(403, { error: "Only Root users can update assignments" });
+            return json(event, 403, { error: "Only Root users can update assignments" });
         }
 
         if (!event.body) {
-             return json(400, { error: "Missing request body" });
+             return json(event, 400, { error: "Missing request body" });
         }
         
         // 3. Parse and Validate Body
         const { userSub, clinicId, accessLevel }: UpdateAssignmentBody = JSON.parse(event.body);
         
         if (!userSub || !clinicId || !accessLevel) {
-            return json(400, { error: "Missing required fields (userSub, clinicId, or accessLevel)" });
+            return json(event, 400, { error: "Missing required fields (userSub, clinicId, or accessLevel)" });
         }
         
         const validAccessLevels: ReadonlyArray<string> = ['ClinicAdmin', 'ClinicManager', 'ClinicViewer', 'Professional'];
         
         if (!validAccessLevels.includes(accessLevel)) {
-            return json(400, { error: "Invalid access level" });
+            return json(event, 400, { error: "Invalid access level" });
         }
 
         if (!USER_CLINIC_ASSIGNMENTS_TABLE) {
              console.error("Environment variable USER_CLINIC_ASSIGNMENTS_TABLE is not set.");
-             return json(500, { error: "Server configuration error." });
+             return json(event, 500, { error: "Server configuration error." });
         }
 
         // 4. Update DynamoDB Item
@@ -90,7 +89,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamoClient.send(command);
 
         // 5. Success Response
-        return json(200, { status: "success", message: "Assignment updated successfully" });
+        return json(event, 200, { status: "success", message: "Assignment updated successfully" });
 
     } catch (err) {
         const error = err as Error;
@@ -103,7 +102,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message
             });
@@ -111,9 +110,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Check for specific DynamoDB error if needed (e.g., ConditionalCheckFailedException from the ConditionExpression)
         if (error.name === "ConditionalCheckFailedException") {
-             return json(404, { error: "The assignment to be updated was not found." });
+             return json(event, 404, { error: "The assignment to be updated was not found." });
         }
 
-        return json(500, { error: `Failed to update assignment: ${error.message}` });
+        return json(event, 500, { error: `Failed to update assignment: ${error.message}` });
     }
 };

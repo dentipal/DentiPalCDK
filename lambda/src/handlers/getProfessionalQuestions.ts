@@ -2,12 +2,12 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 import { VALID_ROLE_VALUES } from "./professionalRoles";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -459,12 +459,11 @@ const ROLE_QUESTIONS: RoleQuestionsMap = {
 export const handler = async (
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // CORS Preflight
     if (event.httpMethod === "OPTIONS") {
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: "",
         };
     }
@@ -477,14 +476,14 @@ export const handler = async (
         const { role } = event.queryStringParameters || {};
 
         if (!role) {
-            return json(200, {
+            return json(event, 200, {
                 availableRoles: VALID_ROLE_VALUES,
                 message: "Provide 'role' parameter to get specific questions"
             });
         }
 
         if (!VALID_ROLE_VALUES.includes(role)) {
-            return json(400, {
+            return json(event, 400, {
                 error: `Invalid role. Valid options: ${VALID_ROLE_VALUES.join(", ")}`,
                 availableRoles: VALID_ROLE_VALUES
             });
@@ -492,13 +491,13 @@ export const handler = async (
 
         const questions = ROLE_QUESTIONS[role] || [];
 
-        return json(200, {
+        return json(event, 200, {
             role,
             questions: questions,
             totalQuestions: questions.length
         });
     } catch (error: any) {
         console.error("Error getting professional questions:", error);
-        return json(500, { error: error.message });
+        return json(event, 500, { error: error.message });
     }
 };

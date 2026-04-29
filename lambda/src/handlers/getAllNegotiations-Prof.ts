@@ -11,7 +11,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Changed import to use the new token utility
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -253,11 +253,10 @@ async function enrichWithClinicAndJob(neg: DynamoDBNegotiationItem): Promise<Enr
 // ---------- Handler ----------
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     try {
         // Preflight
         if (event.httpMethod === "OPTIONS") {
-            return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+            return { statusCode: 200, headers: corsHeaders(event), body: "" };
         }
 
         const qs = event.queryStringParameters || {};
@@ -289,14 +288,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (!raw) {
                 return {
                     statusCode: 404,
-                    headers: CORS_HEADERS,
+                    headers: corsHeaders(event),
                     body: JSON.stringify({ error: "No negotiations found for this applicationId" }),
                 };
             }
             const item = await enrichWithClinicAndJob(raw);
             return {
                 statusCode: 200,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ item }),
             };
         }
@@ -307,7 +306,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (!raw) {
                 return {
                     statusCode: 404,
-                    headers: CORS_HEADERS,
+                    headers: corsHeaders(event),
                     body: JSON.stringify({
                         error: "No negotiation found for the given jobId and professionalUserSub",
                     }),
@@ -316,7 +315,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const item = await enrichWithClinicAndJob(raw);
             return {
                 statusCode: 200,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ item }),
             };
         }
@@ -326,7 +325,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             // If we reached here, we need an authenticated user to fetch their specific negotiations
             return {
                 statusCode: 401, // Changed from 400 to 401 for auth missing
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: "Unauthorized: Missing or invalid access token" }),
             };
         }
@@ -343,7 +342,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 message: "Negotiations retrieved successfully",
                 negotiations,
@@ -363,7 +362,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Unauthorized",
                     details: error.message
@@ -373,7 +372,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 error: "Failed to retrieve negotiations",
                 details: error.message,

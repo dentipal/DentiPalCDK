@@ -7,25 +7,24 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // Handle HTTP API (v2) structure where method is in requestContext.http
     const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 
     // CORS Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -40,7 +39,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobId: string | undefined = pathParts?.[2];
 
         if (!jobId) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Job ID is required",
@@ -60,7 +59,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const jobResponse = await dynamodb.send(jobCommand);
         if (!jobResponse.Item) {
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 statusCode: 404,
                 message: "Temporary job not found",
@@ -73,7 +72,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Verify it's a temporary job
         if (job.job_type?.S !== "temporary") {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Invalid job type",
@@ -118,7 +117,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const profileResponse = await dynamodb.send(profileCommand);
         if (!profileResponse.Item) {
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 statusCode: 404,
                 message: "Clinic profile not found",
@@ -180,7 +179,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             bookingOutPeriod: profileData.bookingOutPeriod
         };
 
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             statusCode: 200,
             message: "Temporary job retrieved successfully",
@@ -190,7 +189,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     } catch (error: any) {
         console.error("Error retrieving temporary job:", error);
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to retrieve temporary job",

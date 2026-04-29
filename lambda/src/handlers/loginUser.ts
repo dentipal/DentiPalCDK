@@ -7,15 +7,15 @@ import {
 import { DynamoDBClient, ScanCommand, ScanCommandInput } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 const dynamo = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -51,10 +51,9 @@ function formatAddressFromItem(item: any): string {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   console.log("Login request received:", event.body);
@@ -64,7 +63,7 @@ export const handler = async (
 
     if (!loginData.email || !loginData.password) {
       console.warn("Missing required fields");
-      return json(400, {
+      return json(event, 400, {
         error: "Bad Request",
         message: "Missing required fields",
         requiredFields: ["email", "password"],
@@ -90,7 +89,7 @@ export const handler = async (
 
     if (!tokens) {
       console.warn("Authentication failed for email:", email);
-      return json(401, {
+      return json(event, 401, {
         error: "Unauthorized",
         message: "Invalid email or password",
         statusCode: 401,
@@ -118,7 +117,7 @@ export const handler = async (
 
       if (requestedClinic && !userIsClinic) {
         console.warn(`[login] Portal mismatch: professional user tried clinic login. Email: ${email}`);
-        return json(403, {
+        return json(event, 403, {
           error: "Forbidden",
           message: "This is a professional account. Please use the Professional login page.",
           statusCode: 403,
@@ -129,7 +128,7 @@ export const handler = async (
 
       if (!requestedClinic && userIsClinic) {
         console.warn(`[login] Portal mismatch: clinic user tried professional login. Email: ${email}`);
-        return json(403, {
+        return json(event, 403, {
           error: "Forbidden",
           message: "This is a clinic account. Please use the Clinic login page.",
           statusCode: 403,
@@ -260,7 +259,7 @@ export const handler = async (
       clinicsCount: responseBody.user.associatedClinics.length,
     });
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       statusCode: 200,
       message: "Login successful",
@@ -303,7 +302,7 @@ export const handler = async (
           statusCode = 401;
           errorMessage = "Unauthorized";
           details = { message: "This account uses Google Sign-In. Please click the Google button to log in." };
-          return json(statusCode, { error: errorMessage, statusCode, details, timestamp: new Date().toISOString() });
+          return json(event, statusCode, { error: errorMessage, statusCode, details, timestamp: new Date().toISOString() });
         }
       } catch {
         // User lookup failed, continue with default error
@@ -337,7 +336,7 @@ export const handler = async (
       details = { message: error.message || "An unexpected error occurred" };
     }
 
-    return json(statusCode, {
+    return json(event, statusCode, {
       error: errorMessage,
       statusCode,
       details,

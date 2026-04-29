@@ -12,7 +12,7 @@ import { extractUserFromBearerToken, buildAddress, verifyToken } from "./utils";
 import { geocodeAddressParts } from "./geo";
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
@@ -89,11 +89,10 @@ function canCreateClinic(groups: string[]): boolean {
 
 // Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // Handle CORS preflight
     if (event.httpMethod === "OPTIONS") {
-        // ✅ Updated to use CORS_HEADERS
-        return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
+        // ✅ Updated to use corsHeaders(event)
+        return { statusCode: 200, headers: corsHeaders(event), body: "{}" };
     }
 
     try {
@@ -136,7 +135,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!userSub) {
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: 'User not authenticated' })
             };
         }
@@ -144,7 +143,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!canCreateClinic(groups)) {
             return {
                 statusCode: 403,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Forbidden",
                     message: "Only Root or Clinic Admin users can create clinics",
@@ -162,7 +161,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!name || !addressLine1 || !city || !state || !pincode) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Bad Request",
                     message: "Missing required fields",
@@ -245,7 +244,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Step 5: Return Success Response
         return {
             statusCode: 201,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 status: "success",
                 statusCode: 201,
@@ -304,7 +303,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 error: errorMessage,
                 statusCode,

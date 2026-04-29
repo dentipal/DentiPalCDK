@@ -18,7 +18,7 @@ import {
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -57,9 +57,9 @@ const eb = new EventBridgeClient({ region: REGION });
 const VALID_RESPONSES: ReadonlyArray<NegotiationResponsePayload['response']> = ["accepted", "declined", "counter_offer"];
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyStructuredResultV2 => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyStructuredResultV2 => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -99,14 +99,13 @@ const getAppProposedRate = (appItem: DynamoDBItem | undefined): number | null =>
 
 // --- Main Handler Function ---
 export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEvent): Promise<APIGatewayProxyStructuredResultV2> => {
-    setOriginFromEvent(event);
 
   // Handle CORS preflight
   // Safe access for HTTP Method across V1 and V2 events
   const method = (event as APIGatewayProxyEventV2).requestContext?.http?.method || (event as APIGatewayProxyEvent).httpMethod;
 
   if (method === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -135,13 +134,13 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     const negotiationId: string | undefined = parts[4];
 
     if (!applicationId || !negotiationId) {
-      return json(400, {
+      return json(event, 400, {
         error: "applicationId and negotiationId are required in path",
       });
     }
 
     if (!body.response || !VALID_RESPONSES.includes(body.response)) {
-      return json(400, {
+      return json(event, 400, {
         error: `'response' is required and must be one of: ${VALID_RESPONSES.join(", ")}`,
       });
     }
@@ -158,7 +157,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     );
 
     if (!negotiationRes.Item) {
-      return json(404, { error: "Negotiation not found" });
+      return json(event, 404, { error: "Negotiation not found" });
     }
 
     const negotiationItem: DynamoDBItem = negotiationRes.Item;
@@ -167,7 +166,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     // 3b. Validate state transition — terminal states cannot be changed
     const TERMINAL_STATES = ["accepted", "declined"];
     if (currentStatus && TERMINAL_STATES.includes(currentStatus)) {
-      return json(409, {
+      return json(event, 409, {
         error: `Negotiation is already '${currentStatus}' and cannot be changed.`,
       });
     }
@@ -176,13 +175,13 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
 
     // 4. Load Job Item (to get job type and clinic owner)
     if (!jobId) {
-      return json(500, { error: "Negotiation data is invalid (missing jobId)" });
+      return json(event, 500, { error: "Negotiation data is invalid (missing jobId)" });
     }
 
     const jobRes = await dynamodb.send(
       new QueryCommand({
         TableName: process.env.JOB_POSTINGS_TABLE,
-        IndexName: "JobIdIndex-2",
+        IndexName: "jobId-index-1",
         KeyConditionExpression: "jobId = :jobId",
         ExpressionAttributeValues: {
           ":jobId": { S: jobId },
@@ -191,7 +190,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     );
 
     if (!jobRes.Items || jobRes.Items.length === 0) {
-      return json(404, { error: "Job not found or no permission" });
+      return json(event, 404, { error: "Job not found or no permission" });
     }
 
     const jobItem: DynamoDBItem = jobRes.Items[0];
@@ -212,7 +211,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     );
 
     if (!appRes.Items || appRes.Items.length === 0) {
-      return json(404, { error: "Application not found" });
+      return json(event, 404, { error: "Application not found" });
     }
 
     const appItem: DynamoDBItem = appRes.Items[0];
@@ -227,7 +226,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     }
 
     if (!actor) {
-      return json(403, {
+      return json(event, 403, {
         error: "Not authorized for this negotiation. Caller is neither clinic owner nor professional applicant.",
       });
     }
@@ -240,16 +239,16 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
 
       if (isPermanent) {
         if (typeof body.counterSalaryMin !== "number" || typeof body.counterSalaryMax !== "number") {
-          return json(400, {
+          return json(event, 400, {
             error: "counterSalaryMin and counterSalaryMax are required for permanent job counter offers",
           });
         }
         if (body.counterSalaryMax < body.counterSalaryMin) {
-          return json(400, { error: "counterSalaryMax must be greater than counterSalaryMin" });
+          return json(event, 400, { error: "counterSalaryMax must be greater than counterSalaryMin" });
         }
       } else { // Temporary jobs (per_hour, per_transaction, percentage_of_revenue)
         if (typeof body.clinicCounterHourlyRate !== "number" && typeof body.professionalCounterHourlyRate !== "number") {
-          return json(400, {
+          return json(event, 400, {
             error: "clinicCounterHourlyRate or professionalCounterHourlyRate is required for temporary job counter offers",
           });
         }
@@ -258,7 +257,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         if (effectivePayType === "percentage_of_revenue") {
           const counterRate = body.clinicCounterHourlyRate ?? body.professionalCounterHourlyRate;
           if (counterRate != null && (counterRate <= 0 || counterRate > 100)) {
-            return json(400, { error: "Revenue percentage must be between 0 and 100" });
+            return json(event, 400, { error: "Revenue percentage must be between 0 and 100" });
           }
         }
       }
@@ -339,7 +338,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
 
       if (actor === "professional") {
         if (clinicCounter == null) {
-          return json(400, { error: "Cannot accept: no clinic counter rate to accept." });
+          return json(event, 400, { error: "Cannot accept: no clinic counter rate to accept." });
         }
         finalAcceptedRate = clinicCounter;
       } else {
@@ -350,7 +349,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         } else if (appProposed != null) {
           finalAcceptedRate = appProposed;
         } else {
-          return json(400, {
+          return json(event, 400, {
             error: "Cannot accept: no professional counter rate or original proposed rate found.",
           });
         }
@@ -451,7 +450,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     }
 
     // 11. Success Response
-    return json(200, {
+    return json(event, 200, {
       message: `Negotiation ${body.response} successfully`,
       negotiationId,
       applicationId,
@@ -478,7 +477,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         error.message === "Failed to decode access token" ||
         error.message === "User sub not found in token claims") {
         
-        return json(401, {
+        return json(event, 401, {
             error: "Unauthorized",
             details: error.message
         });
@@ -487,6 +486,6 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     // Safely access the message property of the error object
     const errorMessage: string = (error as Error).message || "An unknown error occurred";
 
-    return json(500, { error: errorMessage });
+    return json(event, 500, { error: errorMessage });
   }
 };

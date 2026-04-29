@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, QueryCommand, PutCommand } from "@a
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { fireAndForgetJobApplicationIncrement } from "./jobPostingCounters";
 
 // --- 1. Configuration ---
@@ -16,9 +16,9 @@ const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
 // --- 2. Helpers ---
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -33,12 +33,11 @@ interface ApplyJobBody {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -63,7 +62,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (!jobId) {
-            return json(400, { error: "jobId is required in the path parameters" });
+            return json(event, 400, { error: "jobId is required in the path parameters" });
         }
 
         console.log("Job ID extracted:", jobId);
@@ -76,18 +75,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 4. Parse & Validate Body
         if (!event.body) {
-            return json(400, { error: "Request body is required" });
+            return json(event, 400, { error: "Request body is required" });
         }
         
         let applicationData: ApplyJobBody;
         try {
             applicationData = JSON.parse(event.body);
         } catch {
-            return json(400, { error: "Invalid JSON in request body" });
+            return json(event, 400, { error: "Invalid JSON in request body" });
         }
 
         if (!applicationData.message || !applicationData.proposedRate || !applicationData.availability) {
-            return json(400, { error: "Missing required fields (message, proposedRate, availability)." });
+            return json(event, 400, { error: "Missing required fields (message, proposedRate, availability)." });
         }
 
         // 5. Check if Job Exists
@@ -98,7 +97,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }));
         
         if (!jobResult.Item) {
-            return json(404, { error: "Job posting not found" });
+            return json(event, 404, { error: "Job posting not found" });
         }
 
         const jobItem = jobResult.Item;
@@ -106,12 +105,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const clinicIdFromJob = jobItem.clinicUserSub || jobItem.clinicId; 
 
         if (!clinicIdFromJob) {
-            return json(400, { error: "Clinic ID not found in job posting configuration." });
+            return json(event, 400, { error: "Clinic ID not found in job posting configuration." });
         }
 
         const jobStatus = jobItem.status || 'active';
         if (jobStatus !== 'active') {
-            return json(400, { error: `Cannot apply to ${jobStatus} job posting` });
+            return json(event, 400, { error: `Cannot apply to ${jobStatus} job posting` });
         }
 
         // 6. Check for Duplicate Application
@@ -127,7 +126,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }));
 
         if (existingAppsResponse.Items && existingAppsResponse.Items.length > 0) {
-            return json(409, { error: "You have already applied to this job" });
+            return json(event, 409, { error: "You have already applied to this job" });
         }
 
         // 7. Create Application
@@ -172,7 +171,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             dates: jobItem.dates
         };
 
-        return json(201, {
+        return json(event, 201, {
             message: "Job application submitted successfully",
             applicationId,
             jobId,
@@ -184,7 +183,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (err) {
         const error = err as Error;
         console.error("Error creating job application:", error);
-        return json(500, { 
+        return json(event, 500, { 
             error: "Failed to submit job application.", 
             details: error.message 
         });

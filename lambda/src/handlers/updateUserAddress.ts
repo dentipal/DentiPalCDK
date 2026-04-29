@@ -11,7 +11,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { geocodeAddressParts } from "./geo";
 
 // --- 1. AWS and Environment Setup ---
@@ -39,11 +39,10 @@ interface UpdateAddressFields {
  * Updates a user's address in DynamoDB, identified by their userSub.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // ✅ ADDED PREFLIGHT CHECK
     const method = event.httpMethod || (event.requestContext as any)?.http?.method;
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -60,7 +59,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (Object.keys(updateFields).length === 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS, 
+                headers: corsHeaders(event), 
                 body: JSON.stringify({ error: 'No valid fields provided for update' })
             };
         }
@@ -75,7 +74,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!existingAddress.Item) {
             return {
                 statusCode: 404,
-                headers: CORS_HEADERS, 
+                headers: corsHeaders(event), 
                 body: JSON.stringify({ error: 'Address not found for this user' })
             };
         }
@@ -114,7 +113,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (updatedFields.length === 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: 'No valid fields provided for update after filtering' })
             };
         }
@@ -222,7 +221,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 message: 'Address updated successfully',
                 updatedFields,
@@ -245,7 +244,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Unauthorized",
                     details: error.message
@@ -255,7 +254,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 500,
-            headers: CORS_HEADERS, 
+            headers: corsHeaders(event), 
             body: JSON.stringify({ 
                 error: err.message || 'Failed to update user address'
             })
