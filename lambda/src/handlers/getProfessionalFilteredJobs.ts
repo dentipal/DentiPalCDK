@@ -73,7 +73,7 @@ export async function getAppliedJobInfo(userSub: string): Promise<AppliedInfo> {
         IndexName: "professionalUserSub-index",
         KeyConditionExpression: "professionalUserSub = :userSub",
         ExpressionAttributeValues: { ":userSub": { S: userSub } },
-        ProjectionExpression: "jobId, clinicId",
+        ProjectionExpression: "jobId, clinicId, applicationStatus",
         ExclusiveStartKey: lastKey,
       })
     );
@@ -81,7 +81,13 @@ export async function getAppliedJobInfo(userSub: string): Promise<AppliedInfo> {
     resp.Items?.forEach((item) => {
       const jid = str(item.jobId);
       const cid = str(item.clinicId);
-      if (jid) jobIds.add(jid);
+      const status = String(str(item.applicationStatus) || "").toLowerCase();
+      // Rejected applications must not exclude the job — the clinic may invite
+      // the pro back, and the job has to be applyable again.
+      if (status !== "rejected") {
+        if (jid) jobIds.add(jid);
+      }
+      // Familiar-clinic boost stays — prior contact (even a rejection) is still signal.
       if (cid) clinicIds.add(cid);
     });
 

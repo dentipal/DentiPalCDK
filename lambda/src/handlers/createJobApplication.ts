@@ -119,6 +119,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 6. Check for Duplicate Application
+        // A "rejected" application does NOT block re-application: if the clinic
+        // rejected the pro and later invited them back, the stale rejected record
+        // must not stand in the way. The PutCommand below will overwrite it.
         const existingAppsResponse = await ddbDoc.send(new QueryCommand({
             TableName: APPLICATIONS_TABLE,
             KeyConditionExpression: "jobId = :jobId AND professionalUserSub = :userSub",
@@ -128,10 +131,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }));
 
-        if (existingAppsResponse.Items && existingAppsResponse.Items.length > 0) {
-            return json(409, { 
-                error: "Conflict", 
-                message: "Duplicate application", 
+        const blockingApp = existingAppsResponse.Items?.find(
+            (item) => String(item.applicationStatus || "").toLowerCase() !== "rejected"
+        );
+
+        if (blockingApp) {
+            return json(409, {
+                error: "Conflict",
+                message: "Duplicate application",
                 details: { reason: "You have already applied to this job", jobId }
             });
         }

@@ -178,8 +178,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const existingApplicationCommand = new QueryCommand(existingApplicationInput);
         const existingApplication = await dynamodb.send(existingApplicationCommand);
-        
-        if (existingApplication.Items && existingApplication.Items.length > 0) {
+
+        // A "rejected" application does NOT block re-application: if the clinic rejected
+        // the pro and later invited them back, the stale rejected record must not stand
+        // in the way. The new application below will replace it.
+        const blockingApp = existingApplication.Items?.find(
+            (item) => String(item.applicationStatus?.S || "").toLowerCase() !== "rejected"
+        );
+
+        if (blockingApp) {
             console.log("User has already applied to this job.");
             return json(409, {
                 error: "Conflict",
