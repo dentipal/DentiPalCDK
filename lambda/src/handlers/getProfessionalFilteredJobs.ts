@@ -6,7 +6,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { haversineDistance, type Coordinates } from "./geo";
 import { fireAndForgetIncrement, PROMOTION_TIER_WEIGHT } from "./promotionCounters";
 
@@ -18,9 +18,9 @@ const JOB_PROMOTIONS_TABLE = process.env.JOB_PROMOTIONS_TABLE || "DentiPal-V5-Jo
 
 const ddb = new DynamoDBClient({ region: REGION });
 
-const json = (statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -73,7 +73,7 @@ export async function getAppliedJobInfo(userSub: string): Promise<AppliedInfo> {
         IndexName: "professionalUserSub-index",
         KeyConditionExpression: "professionalUserSub = :userSub",
         ExpressionAttributeValues: { ":userSub": { S: userSub } },
-        ProjectionExpression: "jobId, clinicId",
+        ProjectionExpression: "jobId, clinicId, applicationStatus",
         ExclusiveStartKey: lastKey,
       })
     );
@@ -81,7 +81,13 @@ export async function getAppliedJobInfo(userSub: string): Promise<AppliedInfo> {
     resp.Items?.forEach((item) => {
       const jid = str(item.jobId);
       const cid = str(item.clinicId);
-      if (jid) jobIds.add(jid);
+      const status = String(str(item.applicationStatus) || "").toLowerCase();
+      // Rejected applications must not exclude the job — the clinic may invite
+      // the pro back, and the job has to be applyable again.
+      if (status !== "rejected") {
+        if (jid) jobIds.add(jid);
+      }
+      // Familiar-clinic boost stays — prior contact (even a rejection) is still signal.
       if (cid) clinicIds.add(cid);
     });
 
@@ -361,21 +367,20 @@ export function matchesFilters(item: Record<string, AttributeValue>, filters: {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   const method = (event.requestContext as any)?.http?.method || event.httpMethod || "GET";
 
   if (method === "OPTIONS")
-    return { statusCode: 204, headers: CORS_HEADERS, body: "" };
-  if (method !== "GET") return json(405, { error: "Method not allowed" });
+    return { statusCode: 204, headers: corsHeaders(event), body: "" };
+  if (method !== "GET") return json(event, 405, { error: "Method not allowed" });
 
   let userSub: string | undefined;
   try {
     const authHeader = event.headers?.Authorization || event.headers?.authorization;
-    if (!authHeader) return json(401, { error: "Missing Authorization header" });
+    if (!authHeader) return json(event, 401, { error: "Missing Authorization header" });
     userSub = extractUserFromBearerToken(authHeader).sub;
-    if (!userSub) return json(401, { error: "User sub missing in token" });
+    if (!userSub) return json(event, 401, { error: "User sub missing in token" });
   } catch (e: any) {
-    return json(401, { error: "Unauthorized", reason: e?.message });
+    return json(event, 401, { error: "Unauthorized", reason: e?.message });
   }
 
   // Parse query parameters
@@ -457,7 +462,7 @@ export const handler = async (
           exclusiveStartKey = decoded;
         }
       } catch {
-        return json(400, { error: "Invalid cursor" });
+        return json(event, 400, { error: "Invalid cursor" });
       }
     }
 
@@ -467,7 +472,7 @@ export const handler = async (
     // So: figure out which status the cursor came from, and resume iteration there.
     const cursorStatus = exclusiveStartKey?.status?.S;
     if (cursorStatus && !statusesToQuery.includes(cursorStatus)) {
-      return json(400, { error: "Invalid cursor" });
+      return json(event, 400, { error: "Invalid cursor" });
     }
     const resumeStatuses = cursorStatus
       ? statusesToQuery.slice(statusesToQuery.indexOf(cursorStatus))
@@ -737,7 +742,7 @@ export const handler = async (
       }
     }
 
-    return json(200, {
+    return json(event, 200, {
       totalJobs: jobs.length,
       totalMatched,
       hasMore,
@@ -754,7 +759,7 @@ export const handler = async (
 
   } catch (err: any) {
     console.error("Handler Fatal Error:", err);
-    return json(500, {
+    return json(event, 500, {
       error: "Internal Server Error",
       details: err.message,
       stack: process.env.NODE_ENV === "development" ? err.stack : undefined,

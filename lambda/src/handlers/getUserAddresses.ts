@@ -7,7 +7,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize DynamoDB Client V3
 const dynamodb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
@@ -16,10 +16,9 @@ const USER_ADDRESSES_TABLE = process.env.USER_ADDRESSES_TABLE!;
 export const handler = async (
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -46,14 +45,14 @@ export const handler = async (
         if (addresses.length === 0) {
             return {
                 statusCode: 404,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: "No addresses found for this user" }),
             };
         }
 
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 message: "User addresses retrieved successfully",
                 addresses: addresses,
@@ -72,7 +71,7 @@ export const handler = async (
             
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Unauthorized",
                     details: error.message
@@ -82,7 +81,7 @@ export const handler = async (
 
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({ error: "Failed to retrieve user addresses" }),
         };
     }

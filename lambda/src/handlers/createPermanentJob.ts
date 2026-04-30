@@ -5,7 +5,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { geocodeAddressParts } from "./geo";
 
 // --- Configuration ---
@@ -68,9 +68,9 @@ interface ProfileData {
 
 // --- Helpers ---
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -194,7 +194,6 @@ const validatePermanentJob = (jobData: JobData): string | null => {
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     console.log('🚀 HANDLER STARTED - createPermanentJob.ts');
     console.log('HTTP Method:', event.httpMethod);
     console.log('Path:', event.path);
@@ -203,7 +202,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -251,7 +250,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         if (!isAllowed) {
             console.warn(`User ${userSub} denied. Groups: [${userGroups.join(', ')}]`);
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 message: "Access denied: only Root, ClinicAdmin, or ClinicManager can create jobs",
                 details: { 
@@ -273,7 +272,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             !Array.isArray(jobData.clinicIds) ||
             jobData.clinicIds.length === 0
         ) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Missing required fields",
                 details: {
@@ -285,7 +284,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 5. Validate Job Type
         const validJobTypes: string[] = ["temporary", "multi_day_consulting", "permanent"];
         if (!validJobTypes.includes(jobData.job_type)) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid job type",
                 details: { 
@@ -301,7 +300,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             : jobData.professional_role ? [jobData.professional_role] : [];
 
         if (professionalRoles.length === 0) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "At least one professional role is required",
                 details: { validRoles: VALID_ROLE_VALUES }
@@ -310,7 +309,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const invalidRoles = professionalRoles.filter(r => !VALID_ROLE_VALUES.includes(r));
         if (invalidRoles.length > 0) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid professional role(s)",
                 details: { validRoles: VALID_ROLE_VALUES, invalidRoles }
@@ -320,7 +319,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate work location type if provided
         const VALID_WORK_LOCATIONS = ['onsite', 'us_remote', 'global_remote'];
         if (jobData.work_location_type && !VALID_WORK_LOCATIONS.includes(jobData.work_location_type)) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid work location type",
                 details: { validOptions: VALID_WORK_LOCATIONS, provided: jobData.work_location_type }
@@ -361,7 +360,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (validationError) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Validation failed",
                 details: { validationError }
@@ -376,7 +375,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const hasAccess = await canWriteClinic(userSub, userGroups, clinicId, "manageJobs");
             if (!hasAccess) {
                 console.warn(`User ${userSub} denied write access to clinic ${clinicId}`);
-                return json(403, {
+                return json(event, 403, {
                     error: "Forbidden",
                     message: `Access denied to clinic ${clinicId}`,
                     details: {
@@ -541,7 +540,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // ✅ FIX: Better response with partial success handling
         if (jobIds.length === 0) {
-            return json(500, {
+            return json(event, 500, {
                 error: "Internal Server Error",
                 message: "Failed to create any job postings",
                 details: {
@@ -574,7 +573,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             response.data.failedCount = failedClinics.length;
         }
 
-        return json(jobIds.length === jobData.clinicIds.length ? 201 : 207, response);
+        return json(event, jobIds.length === jobData.clinicIds.length ? 201 : 207, response);
 
     } catch (error: any) {
         console.error("Error creating job posting:", error);
@@ -586,13 +585,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message
             });
         }
         
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             message: "Failed to create job posting",
             details: { reason: error.message }

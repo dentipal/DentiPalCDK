@@ -9,7 +9,7 @@ import {
   SearchPlaceIndexForTextCommand,
 } from "@aws-sdk/client-location";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const PLACE_INDEX_NAME = process.env.PLACE_INDEX_NAME || "DentiPalGeocoder";
@@ -63,19 +63,18 @@ const US_STATE_ABBR: Record<string, string> = {
   wyoming: "WY", "district of columbia": "DC",
 };
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-  setOriginFromEvent(event);
 
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "{}" };
   }
 
   const params = event.queryStringParameters || {};
@@ -83,13 +82,13 @@ export const handler = async (
   const countryRaw = (params.country || "").trim().toUpperCase();
 
   if (!postalCode) {
-    return json(400, {
+    return json(event, 400, {
       error: "Bad Request",
       message: "postalCode query parameter is required",
     });
   }
   if (postalCode.length > 12) {
-    return json(400, {
+    return json(event, 400, {
       error: "Bad Request",
       message: "postalCode is too long",
     });
@@ -113,7 +112,7 @@ export const handler = async (
 
     const place = resp.Results?.[0]?.Place;
     if (!place) {
-      return json(404, {
+      return json(event, 404, {
         error: "Not Found",
         message: "No location found for that postal code",
       });
@@ -132,7 +131,7 @@ export const handler = async (
         ? { lng: point[0], lat: point[1] }
         : null;
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       data: {
         city,
@@ -147,7 +146,7 @@ export const handler = async (
   } catch (err) {
     const error = err as Error;
     console.error("[geocodePostal] Error:", error.name, error.message);
-    return json(500, {
+    return json(event, 500, {
       error: "Internal Server Error",
       message: "Failed to look up postal code",
     });

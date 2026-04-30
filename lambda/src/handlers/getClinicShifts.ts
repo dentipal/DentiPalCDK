@@ -11,7 +11,7 @@ import {
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, canAccessClinic } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
@@ -37,9 +37,9 @@ const TERMINAL_IGNORE_STATUSES = (process.env.TERMINAL_IGNORE_STATUSES || "rejec
 
 /* ----------------------------- Helpers ----------------------------- */
 
-const json = (statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -124,14 +124,13 @@ async function resolveCreatorName(createdBy: string): Promise<string> {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   try {
     if (event.httpMethod === "OPTIONS") {
-      return json(200, { message: "CORS preflight OK" });
+      return json(event, 200, { message: "CORS preflight OK" });
     }
 
     if (!JOB_POSTINGS_TABLE || !JOB_APPLICATIONS_TABLE) {
-      return json(500, { error: "Missing DynamoDB table env vars" });
+      return json(event, 500, { error: "Missing DynamoDB table env vars" });
     }
 
     // 1. Authentication
@@ -149,13 +148,13 @@ export const handler = async (
     }
 
     if (!targetClinicId) {
-      return json(400, { error: "clinicId is required in the path" });
+      return json(event, 400, { error: "clinicId is required in the path" });
     }
 
     // 3. Authorization — user must be Root or a member of this clinic (Clinics.AssociatedUsers / createdBy).
     if (!(await canAccessClinic(requesterSub, groups, targetClinicId))) {
       console.warn(`[getClinicShifts] Access denied: sub=${requesterSub} clinicId=${targetClinicId}`);
-      return json(403, { error: "Forbidden: you are not a member of this clinic" });
+      return json(event, 403, { error: "Forbidden: you are not a member of this clinic" });
     }
 
     // Identify which dataset to return
@@ -495,12 +494,12 @@ export const handler = async (
       }
     }
 
-    return json(200, {
+    return json(event, 200, {
       message: "Clinic shifts retrieved successfully.",
       data: responseData,
     });
   } catch (error: any) {
     console.error("Error retrieving clinic specific shifts:", error);
-    return json(500, { error: "Failed to retrieve shifts.", details: error.message });
+    return json(event, 500, { error: "Failed to retrieve shifts.", details: error.message });
   }
 };

@@ -8,16 +8,16 @@ import {
 } from "@aws-sdk/client-s3";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- 1. Initialization ---
 const REGION = process.env.REGION || "us-east-1";
 const s3Client = new S3Client({ region: REGION });
 
 // --- 2. Helpers ---
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -40,16 +40,15 @@ type BucketMap = Record<FileType, string | undefined>;
 // --- 3. Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     if (method !== 'DELETE') {
-        return json(405, { error: 'Method not allowed. Only DELETE is supported.' });
+        return json(event, 405, { error: 'Method not allowed. Only DELETE is supported.' });
     }
 
     try {
@@ -60,7 +59,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
         } catch (authError: any) {
-            return json(401, { 
+            return json(event, 401, { 
                 error: authError.message || "Invalid access token" 
             });
         }
@@ -72,13 +71,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const fileType = fileTypeMap[pathFileType]; 
         
         if (!fileType) {
-            return json(400, { error: `Invalid file type in path. Must be one of: ${Object.keys(fileTypeMap).join(', ')}` });
+            return json(event, 400, { error: `Invalid file type in path. Must be one of: ${Object.keys(fileTypeMap).join(', ')}` });
         }
 
         // 4. Get Object Key from query parameters
         const objectKey: string | undefined = event.queryStringParameters?.key;
         if (!objectKey) {
-            return json(400, { error: 'Object key is required as a query parameter' });
+            return json(event, 400, { error: 'Object key is required as a query parameter' });
         }
 
         // 5. Determine Bucket Name
@@ -95,7 +94,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!bucket) {
             console.error(`Missing environment variable for bucket type: ${fileType}`);
-            return json(500, { error: `Server configuration error: Bucket not defined for ${fileType}` });
+            return json(event, 500, { error: `Server configuration error: Bucket not defined for ${fileType}` });
         }
 
         try {
@@ -113,7 +112,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             // If no metadata exists, we might deny or allow based on policy. Secure default is deny.
             if (!uploadedBy || uploadedBy !== userSub) {
                 console.warn(`User ${userSub} attempted to delete file owned by ${uploadedBy}`);
-                return json(403, { error: 'Access denied - you can only delete your own files' });
+                return json(event, 403, { error: 'Access denied - you can only delete your own files' });
             }
 
             // 7. Delete the file
@@ -125,7 +124,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             await s3Client.send(deleteCommand);
 
             // 8. Return success response
-            return json(200, {
+            return json(event, 200, {
                 message: `File of type '${fileType}' deleted successfully`,
                 objectKey,
                 fileType,
@@ -141,7 +140,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             
             // Handle file not found specific S3 errors
             if (err.name === 'NoSuchKey' || err.name === 'NotFound') {
-                return json(404, { error: 'File not found in the specified location' });
+                return json(event, 404, { error: 'File not found in the specified location' });
             }
             
             throw err;
@@ -149,6 +148,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error & { message?: string };
         console.error('Error deleting file:', err);
-        return json(500, { error: err.message || 'Internal server error' });
+        return json(event, 500, { error: err.message || 'Internal server error' });
     }
 };

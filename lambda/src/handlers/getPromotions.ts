@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, BatchGetCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, canAccessClinic, listAccessibleClinicIds } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_PROMOTIONS_TABLE = process.env.JOB_PROMOTIONS_TABLE || "DentiPal-V5-JobPromotions";
@@ -12,18 +12,17 @@ const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  setOriginFromEvent(event);
 
   try {
     const user = extractUserFromBearerToken(event.headers?.Authorization || event.headers?.authorization);
     if (!user?.sub) {
-      return { statusCode: 401, headers: CORS_HEADERS, body: JSON.stringify({ error: "Unauthorized" }) };
+      return { statusCode: 401, headers: corsHeaders(event), body: JSON.stringify({ error: "Unauthorized" }) };
     }
 
     const clinicId = event.queryStringParameters?.clinicId;
     console.log("[getPromotions] sub=", user.sub, "groups=", user.groups, "clinicId=", clinicId);
     if (!clinicId) {
-      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "clinicId query parameter is required" }) };
+      return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "clinicId query parameter is required" }) };
     }
 
     // Resolve which clinics to query. "all" is the frontend sentinel for the
@@ -49,7 +48,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } else {
       const allowed = await canAccessClinic(user.sub, user.groups, clinicId);
       if (!allowed) {
-        return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: "You do not have access to this clinic" }) };
+        return { statusCode: 403, headers: corsHeaders(event), body: JSON.stringify({ error: "You do not have access to this clinic" }) };
       }
       const result = await ddbDoc.send(new QueryCommand({
         TableName: JOB_PROMOTIONS_TABLE,
@@ -107,7 +106,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         status: "success",
         promotions,
@@ -118,7 +117,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.error("Error fetching promotions:", error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({ error: `Failed to fetch promotions: ${error.message || "unknown"}` }),
     };
   }

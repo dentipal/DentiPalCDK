@@ -5,7 +5,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { VALID_ROLE_VALUES, isDoctorRole } from "./professionalRoles";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { geocodeAddressParts } from "./geo";
 
 // --- 1. Configuration ---
@@ -21,9 +21,9 @@ const ddbDoc = DynamoDBDocumentClient.from(client);
 const cognito = new CognitoIdentityProviderClient({ region: REGION });
 
 // --- 2. Helpers ---
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -117,12 +117,11 @@ interface ProfileData {
 const ALLOWED_GROUPS: Set<string> = new Set(["root", "clinicadmin", "clinicmanager"]);
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -151,7 +150,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isAllowed = groups.some(g => ALLOWED_GROUPS.has(normalizeGroup(g)));
 
         if (!isAllowed) {
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 message: "Access denied",
                 details: { requiredGroups: Array.from(ALLOWED_GROUPS), userGroups: groups }
@@ -175,7 +174,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             !jobData.start_time ||
             !jobData.end_time
         ) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Missing required fields",
                 details: {
@@ -190,7 +189,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         for (const cid of jobData.clinicIds) {
             if (!(await canWriteClinic(userSub, groups, cid, "manageJobs"))) {
                 console.warn(`[createMultiDayConsulting] Write denied: sub=${userSub} clinicId=${cid}`);
-                return json(403, { error: `Forbidden: you cannot create jobs for clinic ${cid}` });
+                return json(event, 403, { error: `Forbidden: you cannot create jobs for clinic ${cid}` });
             }
         }
 
@@ -200,7 +199,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             : jobData.professional_role ? [jobData.professional_role] : [];
 
         if (professionalRoles.length === 0) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "At least one professional role is required",
                 details: { validRoles: VALID_ROLE_VALUES }
@@ -209,7 +208,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const invalidRoles = professionalRoles.filter(r => !VALID_ROLE_VALUES.includes(r));
         if (invalidRoles.length > 0) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid professional role(s)",
                 details: { validRoles: VALID_ROLE_VALUES, invalidRoles }
@@ -219,7 +218,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate work location type if provided
         const VALID_WORK_LOCATIONS = ['onsite', 'us_remote', 'global_remote'];
         if (jobData.work_location_type && !VALID_WORK_LOCATIONS.includes(jobData.work_location_type)) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid work location type",
                 details: { validOptions: VALID_WORK_LOCATIONS, provided: jobData.work_location_type }
@@ -229,7 +228,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate pay type if provided
         const VALID_PAY_TYPES = ['per_hour', 'per_transaction', 'percentage_of_revenue'];
         if (jobData.pay_type && !VALID_PAY_TYPES.includes(jobData.pay_type)) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid pay type",
                 details: { validOptions: VALID_PAY_TYPES, provided: jobData.pay_type }
@@ -238,7 +237,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // per_transaction is not allowed for doctor roles
         if (jobData.pay_type === 'per_transaction' && professionalRoles.some(r => isDoctorRole(r))) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Per-transaction pay type is not available for doctor roles",
             });
@@ -246,10 +245,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Dates validation
         if (!Array.isArray(jobData.dates) || jobData.dates.length === 0) {
-            return json(400, { error: "Bad Request", message: "Dates array is required" });
+            return json(event, 400, { error: "Bad Request", message: "Dates array is required" });
         }
         if (jobData.dates.length > 30) {
-            return json(400, { error: "Bad Request", message: "Too many dates", details: { maxDays: 30 } });
+            return json(event, 400, { error: "Bad Request", message: "Too many dates", details: { maxDays: 30 } });
         }
 
         const today = new Date();
@@ -257,52 +256,52 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         for (const d of jobData.dates) {
             const dt = new Date(d);
             if (isNaN(dt.getTime())) {
-                return json(400, { error: "Bad Request", message: "Invalid date format", details: { invalidDate: d } });
+                return json(event, 400, { error: "Bad Request", message: "Invalid date format", details: { invalidDate: d } });
             }
             if (dt < today) {
-                return json(400, { error: "Bad Request", message: "All dates must be in the future", details: { invalidDate: d } });
+                return json(event, 400, { error: "Bad Request", message: "All dates must be in the future", details: { invalidDate: d } });
             }
         }
 
         const uniqueDates = new Set(jobData.dates);
         if (uniqueDates.size !== jobData.dates.length) {
-            return json(400, { error: "Bad Request", message: "Duplicate dates not allowed" });
+            return json(event, 400, { error: "Bad Request", message: "Duplicate dates not allowed" });
         }
 
         if (jobData.dates.length !== jobData.total_days) {
-            return json(400, { error: "Bad Request", message: "Dates count must match total_days" });
+            return json(event, 400, { error: "Bad Request", message: "Dates count must match total_days" });
         }
 
         // Numeric and range validation
         const hoursPerDay = Number(jobData.hours_per_day);
 
         if (!Number.isFinite(hoursPerDay) || hoursPerDay < 1 || hoursPerDay > 12) {
-            return json(400, { error: "Bad Request", message: "Invalid hours per day (1-12)" });
+            return json(event, 400, { error: "Bad Request", message: "Invalid hours per day (1-12)" });
         }
         // Validate compensation based on pay type
         const payType = jobData.pay_type || "per_hour";
         if (jobData.rate === undefined || jobData.rate === null) {
-            return json(400, { error: "Bad Request", message: "Rate is required" });
+            return json(event, 400, { error: "Bad Request", message: "Rate is required" });
         }
         const rate = Number(jobData.rate);
         if (payType === "per_hour") {
             if (!Number.isFinite(rate) || rate < 10 || rate > 300) {
-                return json(400, { error: "Bad Request", message: "Hourly rate must be between $10 and $300" });
+                return json(event, 400, { error: "Bad Request", message: "Hourly rate must be between $10 and $300" });
             }
         } else if (payType === "per_transaction") {
             if (rate <= 0) {
-                return json(400, { error: "Bad Request", message: "Rate per transaction must be positive" });
+                return json(event, 400, { error: "Bad Request", message: "Rate per transaction must be positive" });
             }
         } else if (payType === "percentage_of_revenue") {
             if (rate <= 0 || rate > 100) {
-                return json(400, { error: "Bad Request", message: "Revenue percentage must be between 0 and 100" });
+                return json(event, 400, { error: "Bad Request", message: "Revenue percentage must be between 0 and 100" });
             }
         }
 
         // Meal break parsing
         const mealBreakRaw = typeof jobData.meal_break === "string" ? normalizeWs(jobData.meal_break) : "";
         if (mealBreakRaw && mealBreakRaw.length > 100) {
-             return json(400, { error: "Bad Request", message: "Meal break description too long" });
+             return json(event, 400, { error: "Bad Request", message: "Meal break description too long" });
         }
         const mealBreakMinutes = mealBreakRaw ? parseMealBreakMinutes(mealBreakRaw) : null;
 
@@ -433,7 +432,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await Promise.all(postJobsPromises);
 
         // 7. Response
-        return json(201, {
+        return json(event, 201, {
             status: "success",
             message: "Multi-day consulting projects created successfully",
             data: {
@@ -457,7 +456,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error;
         console.error("Error creating multi-day consulting project:", err);
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             message: "Failed to create multi-day consulting projects",
             details: { reason: err.message }

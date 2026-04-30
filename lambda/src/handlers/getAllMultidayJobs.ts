@@ -7,7 +7,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Changed import to use the new token utility
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -79,10 +79,9 @@ interface MultidayJobResponse {
  * @returns APIGatewayProxyResult.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // ✅ ADDED PREFLIGHT CHECK
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -100,7 +99,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return {
                 statusCode: 400,
                 body: JSON.stringify({ error: "jobId is required in path parameters" }),
-                headers: CORS_HEADERS, 
+                headers: corsHeaders(event), 
             };
         }
 
@@ -124,7 +123,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return {
                 statusCode: 404,
                 body: JSON.stringify({ error: "Multiday job not found or access denied" }),
-                headers: CORS_HEADERS, 
+                headers: corsHeaders(event), 
             };
         }
 
@@ -135,7 +134,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 body: JSON.stringify({
                     error: "This is not a multi-day consulting job. Use the appropriate endpoint for this job type."
                 }),
-                headers: CORS_HEADERS, 
+                headers: corsHeaders(event), 
             };
         }
 
@@ -187,7 +186,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 message: "Multiday consulting job retrieved successfully",
                 job: multidayJob
             }),
-            headers: CORS_HEADERS, 
+            headers: corsHeaders(event), 
         };
 
     } catch (error: any) {
@@ -206,7 +205,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     error: "Unauthorized", 
                     details: error.message 
                 }),
-                headers: CORS_HEADERS, 
+                headers: corsHeaders(event), 
             };
         }
 
@@ -216,7 +215,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Failed to retrieve multiday consulting job. Please try again.",
                 details: error.message
             }),
-            headers: CORS_HEADERS, 
+            headers: corsHeaders(event), 
         };
     }
 };

@@ -8,7 +8,7 @@ import {
 import { extractUserFromBearerToken } from "./utils"; // Assumed dependency
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -29,16 +29,15 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // FIX: Cast requestContext to 'any' to allow access to 'http' property which is specific to HTTP API (v2)
     const method = event.httpMethod || (event.requestContext as any)?.http?.method;
 
@@ -46,7 +45,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 1. Handle CORS preflight
         if (method === "OPTIONS") {
             // ✅ Uses imported headers
-            return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+            return { statusCode: 200, headers: corsHeaders(event), body: "" };
         }
 
         // 2. Authenticate professional user
@@ -61,7 +60,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!applicationId) {
             console.warn("[VALIDATION] Missing applicationId in path parameters.");
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Application ID is required",
@@ -84,7 +83,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!findResponse.Items || findResponse.Items.length === 0) {
             console.warn(`[DB] Application not found: ${applicationId}`);
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 statusCode: 404,
                 message: "Job application not found",
@@ -100,7 +99,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 5. Ensure the application belongs to the requesting user
         if (professionalUserSubFound !== userSub) {
             console.warn(`[AUTH] User ${userSub} attempted to delete application belonging to ${professionalUserSubFound}`);
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Access denied",
@@ -113,7 +112,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const currentStatus = applicationFound.applicationStatus?.S || "pending";
         if (currentStatus === "accepted") {
             console.warn(`[VALIDATION] Cannot withdraw accepted application ${applicationId}`);
-            return json(409, {
+            return json(event, 409, {
                 error: "Conflict",
                 statusCode: 409,
                 message: "Cannot withdraw accepted application",
@@ -125,7 +124,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // We need both PK (jobId) and SK (professionalUserSub) for DeleteItem
         if (!jobIdFound) {
             console.error(`[DATA_ERROR] Application item ${applicationId} is missing jobId.`);
-            return json(500, {
+            return json(event, 500, {
                 error: "Internal Server Error",
                 statusCode: 500,
                 message: "Application record incomplete",
@@ -153,7 +152,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamodb.send(deleteCommand);
 
         // 8. Success Response
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             statusCode: 200,
             message: "Job application withdrawn successfully",
@@ -169,7 +168,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error deleting job application:", err);
 
         if (err.name === "ConditionalCheckFailedException") {
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 statusCode: 404,
                 message: "Job application not found or already deleted",
@@ -178,7 +177,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to withdraw job application",

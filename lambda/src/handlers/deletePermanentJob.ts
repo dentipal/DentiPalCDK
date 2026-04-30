@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -22,18 +22,17 @@ const ddbDoc = DynamoDBDocumentClient.from(client);
 const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
 
 // Helper
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -47,14 +46,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             userSub = userInfo.sub;
             userGroups = userInfo.groups || [];
         } catch (authError: any) {
-            return json(401, { error: authError.message || "Invalid access token" });
+            return json(event, 401, { error: authError.message || "Invalid access token" });
         }
 
         const normalizedGroups = userGroups.map(g => g.toLowerCase());
         const isAllowed = normalizedGroups.some(g => ALLOWED_GROUPS.has(g));
 
         if (!isAllowed) {
-            return json(403, { error: "You do not have permission to delete this job." });
+            return json(event, 403, { error: "You do not have permission to delete this job." });
         }
 
         // 2. Extract Job ID
@@ -65,7 +64,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (!jobId) {
-            return json(400, { error: "jobId is required in path parameters" });
+            return json(event, 400, { error: "jobId is required in path parameters" });
         }
 
         // 3. Verify Job Existence & Ownership
@@ -82,12 +81,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const job = jobResponse.Item;
 
         if (!job) {
-            return json(404, { error: "Permanent job not found or access denied" });
+            return json(event, 404, { error: "Permanent job not found or access denied" });
         }
 
         // 4. Verify Type
         if (job.job_type !== "permanent") {
-            return json(400, { error: "This is not a permanent job. Use the appropriate endpoint for this job type." });
+            return json(event, 400, { error: "This is not a permanent job. Use the appropriate endpoint for this job type." });
         }
 
         // 5. Check Active Applications
@@ -158,7 +157,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await ddbDoc.send(deleteCommand);
 
         // 8. Response
-        return json(200, {
+        return json(event, 200, {
             message: "Permanent job deleted successfully",
             jobId,
             affectedApplications: activeApplications.length,
@@ -170,7 +169,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error;
         console.error("Error deleting permanent job:", err);
-        return json(500, {
+        return json(event, 500, {
             error: "Failed to delete permanent job. Please try again.",
             details: err.message,
         });

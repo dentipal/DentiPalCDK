@@ -7,7 +7,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize Document Client
 const REGION = process.env.REGION || "us-east-1";
@@ -15,18 +15,17 @@ const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
 // Helper
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -37,12 +36,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
         } catch (authError: any) {
-            return json(401, { error: authError.message || "Invalid access token" });
+            return json(event, 401, { error: authError.message || "Invalid access token" });
         }
 
         const tableName = process.env.USER_ADDRESSES_TABLE;
         if (!tableName) {
-             return json(500, { error: 'Server error: USER_ADDRESSES_TABLE not configured' });
+             return json(event, 500, { error: 'Server error: USER_ADDRESSES_TABLE not configured' });
         }
 
         // 2. Fetch the user's addresses
@@ -55,7 +54,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }));
 
         if (!queryResponse.Items || queryResponse.Items.length === 0) {
-            return json(404, { error: 'No addresses found for this user' });
+            return json(event, 404, { error: 'No addresses found for this user' });
         }
 
         // 3. Identify Address to Delete 
@@ -68,12 +67,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isDefault = addressItem.isDefault === true || addressItem.isDefault === "true";
 
         if (!addressId) {
-             return json(500, { error: 'Database integrity error: Found address without ID' });
+             return json(event, 500, { error: 'Database integrity error: Found address without ID' });
         }
 
         // 4. Check if default
         if (isDefault) {
-            return json(403, {
+            return json(event, 403, {
                 error: 'Cannot delete default address. Set another address as default first.'
             });
         }
@@ -90,7 +89,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await ddbDoc.send(new DeleteCommand(deleteInput));
 
         // 6. Success
-        return json(200, {
+        return json(event, 200, {
             message: 'Address deleted successfully',
             addressId: addressId,
             deletedAt: new Date().toISOString()
@@ -99,6 +98,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error;
         console.error('Error deleting user address:', err);
-        return json(500, { error: 'Failed to delete user address', details: err.message });
+        return json(event, 500, { error: 'Failed to delete user address', details: err.message });
     }
 };

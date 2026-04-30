@@ -11,24 +11,23 @@ import {
 
 import { extractUserFromBearerToken, isRoot } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -82,7 +81,7 @@ export const handler = async (
     const response = await dynamoClient.send(new ScanCommand(scanCommand));
 
     if (!response.Items || response.Items.length === 0) {
-      return json(200, {
+      return json(event, 200, {
         status: "success",
         clinics: [],
         totalCount: 0,
@@ -128,7 +127,7 @@ export const handler = async (
       `[getUsersClinics] Scoped to ${accessibleClinics.length} accessible clinics for user ${userSub}`
     );
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       clinics: accessibleClinics,
       totalCount: accessibleClinics.length,
@@ -149,7 +148,7 @@ export const handler = async (
   } catch (error: any) {
     console.error("❌ Error retrieving clinics:", error);
 
-    return json(500, {
+    return json(event, 500, {
       error: "Failed to retrieve clinics. Please try again.",
       details: error.message
     });

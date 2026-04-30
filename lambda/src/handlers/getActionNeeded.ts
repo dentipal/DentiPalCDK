@@ -1,7 +1,7 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { DynamoDBClient, QueryCommand, ScanCommand } from "@aws-sdk/client-dynamodb";
 import { extractUserFromBearerToken, canAccessClinic, isRoot, UserInfo } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-JobApplications";
@@ -15,9 +15,9 @@ const DEFAULT_ACTION_NEEDED_STATUSES =
 
 const ddb = new DynamoDBClient({ region: REGION });
 
-const json = (statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -92,19 +92,18 @@ function itemToObject(item: Record<string, any>): any {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   const method = (event.requestContext as any).http?.method || event.httpMethod || "GET";
 
-  if (method === "OPTIONS") return { statusCode: 204, headers: CORS_HEADERS, body: "" };
-  if (method !== "GET") return json(405, { error: "Method not allowed" });
+  if (method === "OPTIONS") return { statusCode: 204, headers: corsHeaders(event), body: "" };
+  if (method !== "GET") return json(event, 405, { error: "Method not allowed" });
 
   let userInfo: UserInfo;
   try {
     const authHeader = event.headers?.Authorization || event.headers?.authorization;
-    if (!authHeader) return json(401, { error: "Unauthorized", reason: "Missing Authorization header" });
+    if (!authHeader) return json(event, 401, { error: "Unauthorized", reason: "Missing Authorization header" });
     userInfo = extractUserFromBearerToken(authHeader);
   } catch (e: any) {
-    return json(401, { error: "Unauthorized", reason: e?.message || "Invalid token" });
+    return json(event, 401, { error: "Unauthorized", reason: e?.message || "Invalid token" });
   }
 
   const requesterSub = userInfo?.sub || "";
@@ -117,10 +116,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   if (clinicId) {
     if (!(await canAccessClinic(requesterSub, groups, clinicId))) {
       console.warn(`[getActionNeeded] Access denied: sub=${requesterSub} clinicId=${clinicId}`);
-      return json(403, { error: "Forbidden: you are not a member of this clinic" });
+      return json(event, 403, { error: "Forbidden: you are not a member of this clinic" });
     }
   } else if (aggregateByClinic && !isRoot(groups)) {
-    return json(403, { error: "Forbidden: aggregate view is Root-only" });
+    return json(event, 403, { error: "Forbidden: aggregate view is Root-only" });
   }
 
   const statusesParam = event.queryStringParameters?.statuses;
@@ -151,7 +150,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       );
       allApplications = resp.Items || [];
     } else {
-      return json(400, { error: "clinicId is required or set ?aggregate=true to get all clinics" });
+      return json(event, 400, { error: "clinicId is required or set ?aggregate=true to get all clinics" });
     }
 
     const filtered = allApplications.filter((item) => {
@@ -198,7 +197,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         (a, b) => b.totalApplications - a.totalApplications
       );
 
-      return json(200, {
+      return json(event, 200, {
         type: "aggregated",
         totalClinics: clinicSummaries.length,
         statuses,
@@ -224,7 +223,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       })
     );
 
-    return json(200, {
+    return json(event, 200, {
       type: "single_clinic",
       clinicId,
       statuses,
@@ -233,6 +232,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     });
   } catch (err: any) {
     console.error("getActionNeeded error:", err);
-    return json(500, { error: "Failed to fetch action needed data", details: err?.message });
+    return json(event, 500, { error: "Failed to fetch action needed data", details: err?.message });
   }
 };

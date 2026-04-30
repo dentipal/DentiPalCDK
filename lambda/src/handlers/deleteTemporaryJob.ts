@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -19,18 +19,17 @@ const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
 // Helper
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -43,7 +42,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             userSub = userInfo.sub;
             userGroups = userInfo.groups || [];
         } catch (authError: any) {
-            return json(401, { error: authError.message || "Invalid access token" });
+            return json(event, 401, { error: authError.message || "Invalid access token" });
         }
 
         // 2. Extract Job ID
@@ -54,7 +53,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (!jobId) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Job ID is required",
                 details: { pathFormat: "/jobs/temporary/{jobId}" }
@@ -74,7 +73,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const job = jobResponse.Item;
 
         if (!job) {
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 message: "Temporary job not found",
                 details: { jobId: jobId }
@@ -85,7 +84,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         //     Blocks a creator whose role was later downgraded to ClinicViewer.
         const jobClinicId = (job as any).clinicId;
         if (jobClinicId && !(await canWriteClinic(userSub, userGroups, jobClinicId, "manageJobs"))) {
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 message: "Your current role cannot delete jobs for this clinic"
             });
@@ -93,7 +92,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 4. Verify Job Type
         if (job.job_type !== 'temporary') {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid job type",
                 details: { expected: "temporary", received: job.job_type }
@@ -123,7 +122,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (err instanceof Error) { // Narrowing 'err' to Error type
                 if (err.name === "ValidationException" && err.message.includes("specified index")) {
                     console.error("The specified index 'JobIndex' does not exist on the table.");
-                    return json(500, {
+                    return json(event, 500, {
                         error: "Internal Server Error",
                         message: "The table does not have the specified index: JobIndex",
                         details: { reason: err.message }
@@ -184,7 +183,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await ddbDoc.send(deleteCommand);
 
         // 8. Success
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             message: "Temporary job deleted successfully",
             data: {
@@ -200,7 +199,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error;
         console.error("Error deleting temporary job:", err);
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             message: "Failed to delete temporary job",
             details: { reason: err.message }

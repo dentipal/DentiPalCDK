@@ -3,7 +3,7 @@ import { CognitoIdentityProvider } from '@aws-sdk/client-cognito-identity-provid
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Initialization ---
 
@@ -113,7 +113,6 @@ function deriveUserTypeFromIdPayload(payload: JwtPayload | undefined): "professi
  * @returns An API Gateway proxy result.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   console.log("=== /auth/check-email REQUEST START ===");
   console.log("[req] Raw event.httpMethod:", event?.httpMethod);
   console.log("[req] Raw headers:", JSON.stringify(event?.headers || {}, null, 2));
@@ -122,8 +121,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   // Handle preflight OPTIONS request
   if (event.httpMethod === "OPTIONS") {
     console.log("[cors] Preflight OPTIONS handled.");
-    // ✅ Updated to use CORS_HEADERS
-    return { statusCode: 200, headers: CORS_HEADERS, body: "{}" };
+    // ✅ Updated to use corsHeaders(event)
+    return { statusCode: 200, headers: corsHeaders(event), body: "{}" };
   }
 
   try {
@@ -136,7 +135,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       console.warn("[validate] Missing email in body.");
       return {
         statusCode: 400,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({
           error: "Bad Request",
           statusCode: 400,
@@ -155,7 +154,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       console.warn("[auth] Missing or invalid Bearer token.");
       return {
         statusCode: 401,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({
           error: "Unauthorized",
           statusCode: 401,
@@ -172,7 +171,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       console.warn("[decode] Access token does not have 3 JWT parts.");
       return {
         statusCode: 400,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({
           error: "Bad Request",
           statusCode: 400,
@@ -232,7 +231,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         status: "success",
         statusCode: 200,
@@ -261,7 +260,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     return {
       statusCode: statusCode,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         error: errorName,
         statusCode: statusCode,

@@ -12,15 +12,15 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Changed import to use the new token utility
 import { extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -128,19 +128,24 @@ async function getAppliedJobIdsForUser(userSub: string): Promise<Set<string>> {
             TableName: table,
             IndexName: index,
             KeyConditionExpression: "professionalUserSub = :sub",
-            ProjectionExpression: "jobId",
+            ProjectionExpression: "jobId, applicationStatus",
             ExpressionAttributeValues: { ":sub": { S: userSub } },
             ExclusiveStartKey,
         };
-        
+
         const resp: QueryCommandOutput = await dynamodb.send(new QueryCommand(queryInput));
-        
-        // Extract jobId strings from items
-        (resp.Items || []).forEach(it => it.jobId?.S && ids.add(it.jobId.S!));
-        
+
+        // Rejected applications must not exclude the job — the clinic may invite
+        // the pro back, and the job has to be applyable again.
+        (resp.Items || []).forEach(it => {
+            const status = String(it.applicationStatus?.S || "").toLowerCase();
+            if (status === "rejected") return;
+            if (it.jobId?.S) ids.add(it.jobId.S);
+        });
+
         ExclusiveStartKey = resp.LastEvaluatedKey;
     } while (ExclusiveStartKey);
-    
+
     return ids;
 }
 
@@ -173,12 +178,11 @@ function toStrArr(attr: AttributeValue | undefined): string[] {
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -206,7 +210,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const items: DynamoDBJobItem[] = (jobResponse.Items as DynamoDBJobItem[] || []);
 
         if (items.length === 0) {
-            return json(200, {
+            return json(event, 200, {
                 message: "Multi-day consulting jobs retrieved successfully",
                 excludedCount: 0,
                 jobs: []
@@ -283,7 +287,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
 
         // 5. Success Response
-        return json(200, {
+        return json(event, 200, {
             message: "Multi-day consulting jobs retrieved successfully",
             excludedCount: appliedJobIds.size,
             jobs
@@ -299,13 +303,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: "Failed to retrieve multi-day consulting jobs. Please try again.",
             details: error?.message || String(error)
         });

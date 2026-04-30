@@ -9,7 +9,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 
@@ -19,9 +19,9 @@ const dynamodb: DynamoDBClient = new DynamoDBClient({ region: REGION });
 const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; 
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -56,13 +56,12 @@ interface JobItem {
  * Enforces ownership and job type validation.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     // Check standard REST method or HTTP API v2 method
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -81,11 +80,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (!jobId) {
-            return json(400, { error: "jobId is required in path parameters" });
+            return json(event, 400, { error: "jobId is required in path parameters" });
         }
 
         if (!event.body) {
-             return json(400, { error: "Request body is required." });
+             return json(event, 400, { error: "Request body is required." });
         }
 
         const updateData: UpdateTemporaryJobBody = JSON.parse(event.body);
@@ -127,12 +126,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existingJob: JobItem | undefined = jobResponse.Item as JobItem | undefined;
 
         if (!existingJob) {
-            return json(404, { error: "Temporary job not found or access denied" });
+            return json(event, 404, { error: "Temporary job not found or access denied" });
         }
         
         // Verify it's the correct job type
         if (existingJob.job_type?.S !== 'temporary') {
-            return json(400, {
+            return json(event, 400, {
                 error: "This is not a temporary job. Use the appropriate endpoint for this job type."
             });
         }
@@ -192,7 +191,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Check if any fields were provided
         if (fieldsUpdatedCount === 0) {
-            return json(400, { error: "No updateable fields provided in the request body." });
+            return json(event, 400, { error: "No updateable fields provided in the request body." });
         }
         
         // Always update the timestamp
@@ -221,7 +220,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const updatedJob = updateResponse.Attributes;
 
         // --- Step 4: Return structured response ---
-        return json(200, {
+        return json(event, 200, {
             message: "Temporary job updated successfully",
             job: {
                 jobId: updatedJob?.jobId?.S || jobId,
@@ -251,13 +250,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Invalid access token format" ||
             error.message === "Failed to decode access token") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: err.message || "Failed to update temporary job due to an unexpected server error."
         });
     }

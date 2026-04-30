@@ -10,7 +10,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -24,10 +24,9 @@ interface FavoriteRequestBody {
 
 // Define the Lambda handler function with proper TypeScript types
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     /* Preflight */
     if (event && event.httpMethod === "OPTIONS") {
-        return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 204, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -40,7 +39,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         } catch (authError: any) {
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: authError.message || "Invalid access token"
                 })
@@ -54,7 +53,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!favoriteData.professionalUserSub) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Required field: professionalUserSub"
                 })
@@ -73,7 +72,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!professionalCheck.Item) {
             return {
                 statusCode: 404,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Professional not found"
                 })
@@ -93,7 +92,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (existingFavorite.Item) {
             return {
                 statusCode: 409,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Professional is already in favorites"
                 })
@@ -129,7 +128,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Step 6: Return success response
         return {
             statusCode: 201,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 message: "Professional added to favorites successfully",
                 clinicUserSub: userSub,
@@ -147,7 +146,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("Error adding professional to favorites:", err);
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({ error: err.message })
         };
     }

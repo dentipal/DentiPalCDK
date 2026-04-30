@@ -11,7 +11,7 @@ import {
 } from "@aws-sdk/client-eventbridge";
 import { APIGatewayProxyResult, APIGatewayProxyEvent } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Initialization ---
 const REGION: string = process.env.AWS_REGION || process.env.REGION || "us-east-1";
@@ -21,9 +21,9 @@ const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE!;
 const dynamo = new DynamoDBClient({ region: REGION });
 const eb = new EventBridgeClient({ region: REGION });
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -54,7 +54,6 @@ interface RequestBody {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     try {
         // 🔍 DEBUG LOGS
         console.log("--- DEBUG START ---");
@@ -63,7 +62,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("Raw Body Type:", typeof event.body);
         
         if (event.httpMethod === "OPTIONS") {
-            return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+            return { statusCode: 200, headers: corsHeaders(event), body: "" };
         }
 
         // --- Step 1: Authentication ---
@@ -78,11 +77,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const isAllowed = groups.some((g) => ALLOWED.has(g.toLowerCase()));
 
             if (!isAllowed) {
-                return json(403, { status: "error", statusCode: 403, error: "Forbidden", message: "Access denied: insufficient permissions" });
+                return json(event, 403, { status: "error", statusCode: 403, error: "Forbidden", message: "Access denied: insufficient permissions" });
             }
         } catch (authError) {
             console.error("Authentication failed:", authError instanceof Error ? authError.message : authError);
-            return json(401, { status: "error", statusCode: 401, error: "Unauthorized", message: "Authentication required" });
+            return json(event, 401, { status: "error", statusCode: 401, error: "Unauthorized", message: "Authentication required" });
         }
 
         // --- Step 2: Extract Job ID ---
@@ -98,7 +97,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (!jobId) {
-            return json(400, { error: "Missing or invalid jobId in path" });
+            return json(event, 400, { error: "Missing or invalid jobId in path" });
         }
 
         // --- ✅ Step 3: Parse Request Body (STRICT CHECK) ---
@@ -108,7 +107,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 🛑 FIX 1: Fail fast if body is completely missing
         if (bodyString === null || bodyString === undefined || bodyString === "") {
              console.error("❌ ERROR: Body is null or empty string");
-             return json(400, { 
+             return json(event, 400, { 
                  error: "Request body is empty", 
                  hint: "Ensure you are sending JSON in the request body, not as Query Params." 
              });
@@ -122,7 +121,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             try {
                 body = JSON.parse(bodyString);
             } catch (e) {
-                return json(400, { error: "Invalid JSON format in body", rawBody: bodyString });
+                return json(event, 400, { error: "Invalid JSON format in body", rawBody: bodyString });
             }
         } else if (typeof bodyString === 'object') {
             body = bodyString;
@@ -133,7 +132,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const professionalUserSub = body.professionalUserSub || body.professional_user_sub;
 
         if (!professionalUserSub) {
-            return json(400, { 
+            return json(event, 400, { 
                 error: "Missing professionalUserSub in request body",
                 details: { receivedKeys: Object.keys(body) }
             });
@@ -152,7 +151,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const matchingItem = getResult.Item;
 
         if (!matchingItem) {
-            return json(404, { error: "No matching application found" });
+            return json(event, 404, { error: "No matching application found" });
         }
 
         // --- Step 5: Update Status ---
@@ -191,6 +190,36 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 jobItem = (jobRes.Items || [])[0] || null;
             } catch (e) {
                 console.warn("Failed to fetch job posting for shift details:", (e as Error).message);
+            }
+        }
+
+        // Mark the JobPostings row as filled. Best-effort: a failure here is
+        // non-fatal so the hire still completes — the existing behavior was
+        // for this write to never happen, so any failure mode here just lands
+        // back at today's stale-status state.
+        if (jobItem) {
+            const jobItemClinicUserSub = jobItem.clinicUserSub?.S;
+            if (jobItemClinicUserSub) {
+                try {
+                    await dynamo.send(new UpdateItemCommand({
+                        TableName: JOB_POSTINGS_TABLE,
+                        Key: {
+                            clinicUserSub: { S: jobItemClinicUserSub },
+                            jobId: { S: jobId },
+                        },
+                        UpdateExpression: "SET #s = :filled, updatedAt = :now",
+                        ExpressionAttributeNames: { "#s": "status" },
+                        ExpressionAttributeValues: {
+                            ":filled": { S: "filled" },
+                            ":now": { S: new Date().toISOString() },
+                        },
+                    }));
+                } catch (err) {
+                    console.error("[acceptProf] Failed to mark JobPostings as filled (non-fatal):", {
+                        jobId,
+                        error: (err as Error).message,
+                    });
+                }
             }
         }
 
@@ -246,7 +275,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        return json(200, {
+        return json(event, 200, {
             message: "Professional accepted and status updated to scheduled",
             jobId,
             professionalUserSub,
@@ -257,8 +286,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         console.error("Error in handler:", error);
         if (isAuthError(error)) {
-            return json(401, { status: "error", statusCode: 401, error: "Unauthorized", message: "Authentication required" });
+            return json(event, 401, { status: "error", statusCode: 401, error: "Unauthorized", message: "Authentication required" });
         }
-        return json(500, { status: "error", statusCode: 500, error: "Internal Server Error", message: "Failed to accept applicant" });
+        return json(event, 500, { status: "error", statusCode: 500, error: "Internal Server Error", message: "Failed to accept applicant" });
     }
 };

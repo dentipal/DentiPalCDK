@@ -20,16 +20,16 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { VALID_ROLE_VALUES, getRoleByDbValue } from "./professionalRoles";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const REFERRALS_TABLE = process.env.REFERRALS_TABLE || "DentiPal-Referrals";
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -48,15 +48,14 @@ interface RegistrationData {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
     if (!event.body) {
-      return json(400, {
+      return json(event, 400, {
         error: "Bad Request",
         statusCode: 400,
         message: "Request body is missing",
@@ -83,7 +82,7 @@ export const handler = async (
         !registrationData.password && "password",
       ].filter(Boolean);
 
-      return json(400, {
+      return json(event, 400, {
         error: "Bad Request",
         statusCode: 400,
         message: "Required fields are missing",
@@ -95,7 +94,7 @@ export const handler = async (
     // Validate professional role if userType is professional
     if (registrationData.userType === "professional") {
       if (!registrationData.role) {
-        return json(400, {
+        return json(event, 400, {
           error: "Bad Request",
           statusCode: 400,
           message: "Role is required for professional users",
@@ -104,7 +103,7 @@ export const handler = async (
         });
       }
       if (!VALID_ROLE_VALUES.includes(registrationData.role)) {
-        return json(400, {
+        return json(event, 400, {
           error: "Bad Request",
           statusCode: 400,
           message: `Invalid role: ${registrationData.role}`,
@@ -267,7 +266,7 @@ export const handler = async (
       console.warn(`Failed to add user to group ${cognitoGroup}:`, groupError);
     }
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       statusCode: 201,
       message: "Registration initiated successfully. Please check your email for verification code.",
@@ -304,7 +303,7 @@ export const handler = async (
       details.suggestion = "Check all required fields";
     }
 
-    return json(statusCode, {
+    return json(event, statusCode, {
       error: statusCode === 400 ? "Bad Request" : statusCode === 409 ? "Conflict" : "Internal Server Error",
       statusCode: statusCode,
       message: message,

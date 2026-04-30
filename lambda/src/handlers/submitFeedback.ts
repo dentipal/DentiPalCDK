@@ -3,7 +3,7 @@ import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import * as crypto from "crypto";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers and utils
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 
 // --- Type Definitions ---
@@ -39,9 +39,9 @@ const ddb = new DynamoDBClient({ region: REGION });
 const ses = new SESClient({ region: REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj)
 });
 
@@ -128,16 +128,15 @@ function deriveUserTypeFromClaims(claims: Claims | undefined): "Professional" | 
 
 // The main handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   const method = getMethod(event);
   
   // CORS Preflight
   if (method === "OPTIONS") {
-      return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+      return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
   
   if (method !== "POST") {
-      return json(405, { error: "Use POST" });
+      return json(event, 405, { error: "Use POST" });
   }
 
   try {
@@ -175,7 +174,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (msg.length > 5000) errors.push("message too long (max 5000 chars)");
     if (!SES_FROM) errors.push("SES_FROM not configured");
     if (!SES_TO) errors.push("SES_TO not configured");
-    if (errors.length) return json(400, { error: "Invalid payload", details: errors });
+    if (errors.length) return json(event, 400, { error: "Invalid payload", details: errors });
 
     // Persist in DynamoDB
     const nowIso: string = new Date().toISOString();
@@ -316,7 +315,7 @@ User ID: ${userSub || "anonymous"}
       console.error("SES email failed (feedback still saved):", (sesErr as Error).message);
     }
 
-    return json(201, {
+    return json(event, 201, {
       message: emailSent ? "Feedback submitted & emailed." : "Feedback submitted (email notification failed).",
       feedbackId: id,
       createdAt: nowIso,
@@ -326,13 +325,13 @@ User ID: ${userSub || "anonymous"}
     const errId = crypto.randomUUID?.() || Date.now().toString();
     console.error("submitWebsiteFeedback error:", errId, error);
 
-    if (error.name === "ConditionalCheckFailedException") return json(409, { error: "Duplicate feedback ID.", errId });
+    if (error.name === "ConditionalCheckFailedException") return json(event, 409, { error: "Duplicate feedback ID.", errId });
 
     if (process.env.DEBUG === "true") {
       const name = (error && (error.name || error.code)) || "Error";
       const msg = (error && error.message) || "Unknown error";
-      return json(500, { error: "Internal Server Error", errId, name, message: msg });
+      return json(event, 500, { error: "Internal Server Error", errId, name, message: msg });
     }
-    return json(500, { error: "Internal Server Error", errId });
+    return json(event, 500, { error: "Internal Server Error", errId });
   }
 };

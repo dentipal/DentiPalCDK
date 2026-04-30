@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE;
@@ -116,12 +116,11 @@ const makeJobDetailsFetcher = () => {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   try {
     if (event.httpMethod === "OPTIONS") {
       return {
         statusCode: 200,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({ message: "CORS preflight OK" }),
       };
     }
@@ -137,7 +136,7 @@ export const handler = async (
     if (!clinicId) {
       return {
         statusCode: 400,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({ error: "clinicId is required in path parameters" }),
       };
     }
@@ -156,7 +155,7 @@ export const handler = async (
     if (!appsRes.Items || appsRes.Items.length === 0) {
       return {
         statusCode: 404,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({ error: "No jobs found for this clinic" }),
       };
     }
@@ -208,7 +207,7 @@ export const handler = async (
 
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         message: "Scheduled jobs retrieved successfully",
         jobs: scheduledJobs,
@@ -219,7 +218,7 @@ export const handler = async (
 
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         error: "Failed to retrieve scheduled jobs. Please try again.",
         details: error.message,

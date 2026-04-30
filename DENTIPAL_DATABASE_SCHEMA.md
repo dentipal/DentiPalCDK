@@ -18,8 +18,8 @@
 | 9 | DentiPal-V5-JobNegotiations | `applicationId` (S) | `negotiationId` (S) | 3 |
 | 10 | DentiPal-V5-JobPostings | `clinicUserSub` (S) | `jobId` (S) | 4 |
 | 11 | DentiPal-V5-Messages | `conversationId` (S) | `messageId` (S) | 1 |
-| 12 | DentiPal-V5-Notifications | `recipientUserSub` (S) | `notificationId` (S) | 0 |
-| 13 | DentiPal-V5-OTPVerification | `email` (S) | -- | 0 |
+| 12 | ~~DentiPal-V5-Notifications~~ | RETIRED 2026-04-28 | -- | -- |
+| 13 | ~~DentiPal-V5-OTPVerification~~ | RETIRED 2026-04-28 | -- | -- |
 | 14 | DentiPal-V5-ProfessionalProfiles | `userSub` (S) | -- | 0 |
 | 15 | DentiPal-V5-Referrals | `referralId` (S) | -- | 2 |
 | 16 | DentiPal-V5-UserAddresses | `userSub` (S) | -- | 0 |
@@ -485,56 +485,21 @@
 
 ---
 
-### 12. DentiPal-V5-Notifications
+### 12. DentiPal-V5-Notifications — RETIRED 2026-04-28
 
-**Purpose**: Push/in-app notifications sent to users about job applications, invitations, messages, etc.
-
-| Key Type | Attribute | Type |
-|----------|-----------|------|
-| **Partition Key** | `recipientUserSub` | STRING |
-| **Sort Key** | `notificationId` | STRING |
-
-**Attributes**:
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `recipientUserSub` | S | Target user's Cognito sub (PK) |
-| `notificationId` | S | UUID notification identifier (SK) |
-| `message` | S | Notification text |
-| `type` | S | Notification category |
-| `relatedItemId` | S | ID of related entity (job, application, etc.) |
-| `isRead` | BOOL | Read/unread status |
-| `createdAt` | S | ISO timestamp |
-
-**GSIs**: None
-
-**Foreign Key References**:
-| Attribute | References Table | Referenced Key |
-|-----------|-----------------|----------------|
-| `recipientUserSub` | AWS Cognito User Pool | User Sub |
+This table was provisioned but never read by any handler. The UI rendered
+notification-like data from other tables (JobInvitations, JobApplications,
+JobNegotiations) instead. Removed from CDK; physical table to be manually
+deleted via the AWS Console after the deploy grace period.
 
 ---
 
-### 13. DentiPal-V5-OTPVerification
+### 13. DentiPal-V5-OTPVerification — RETIRED 2026-04-28
 
-**Purpose**: Temporary storage for email OTP codes during user registration.
-
-| Key Type | Attribute | Type |
-|----------|-----------|------|
-| **Partition Key** | `email` | STRING |
-| **Sort Key** | -- | -- |
-
-**Attributes**:
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `email` | S | User's email address (PK) |
-| `otp` | S | One-time password code |
-| `expiresAt` | N | Unix timestamp for expiry |
-| `attempts` | N | Number of verification attempts |
-| `createdAt` | S | ISO timestamp |
-
-**GSIs**: None
-
-**Foreign Key References**: None (pre-registration, no user exists yet)
+This table duplicated Cognito's native OTP / `ConfirmSignUp` flow and was
+never read by any handler. Cognito handles OTP issuance, expiry, and attempt
+throttling natively. Removed from CDK; physical table to be manually deleted
+via the AWS Console after the deploy grace period.
 
 ---
 
@@ -842,8 +807,6 @@ Lambda handlers reference tables via environment variables:
 | `JOB_NEGOTIATIONS_TABLE` | DentiPal-V5-JobNegotiations |
 | `JOB_POSTINGS_TABLE` | DentiPal-V5-JobPostings |
 | `MESSAGES_TABLE` | DentiPal-V5-Messages |
-| `NOTIFICATIONS_TABLE` | DentiPal-V5-Notifications |
-| `OTP_VERIFICATION_TABLE` | DentiPal-V5-OTPVerification |
 | `PROFESSIONAL_PROFILES_TABLE` | DentiPal-V5-ProfessionalProfiles |
 | `REFERRALS_TABLE` | DentiPal-V5-Referrals |
 | `USER_ADDRESSES_TABLE` | DentiPal-V5-UserAddresses |

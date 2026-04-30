@@ -9,7 +9,7 @@ import {
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, canAccessClinic } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 
@@ -17,7 +17,6 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   console.log("📥 Incoming Event:", JSON.stringify(event, null, 2));
 
   try {
@@ -32,7 +31,7 @@ export const handler = async (
       console.warn("🚫 Token validation failed:", authErr);
       return {
         statusCode: 403,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({
           error: "Forbidden: invalid or missing authorization"
         })
@@ -70,7 +69,7 @@ export const handler = async (
     if (!clinicId) {
       return {
         statusCode: 400,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({
           error: "clinicId is required in path or query string"
         })
@@ -94,7 +93,7 @@ export const handler = async (
     if (!allowed) {
       return {
         statusCode: 403,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({
           error: "Unauthorized: no access to this clinic's jobs"
         })
@@ -151,7 +150,7 @@ export const handler = async (
 
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         message: `Retrieved ${formattedJobs.length} temporary job(s) for clinicId: ${clinicId}`,
         jobs: formattedJobs
@@ -161,7 +160,7 @@ export const handler = async (
     console.error("❌ Error during Lambda execution:", error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         error: "Failed to retrieve temporary jobs",
         details: error.message

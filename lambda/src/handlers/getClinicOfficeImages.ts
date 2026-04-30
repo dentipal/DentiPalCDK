@@ -5,14 +5,14 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 
 const s3Client = new S3Client({ region: process.env.REGION });
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj),
 });
 
@@ -22,9 +22,8 @@ const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
  * and returns a presigned URL for the latest image.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -33,12 +32,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const clinicId = event.queryStringParameters?.clinicId;
         if (!clinicId) {
-            return json(400, { error: "clinicId query parameter is required" });
+            return json(event, 400, { error: "clinicId query parameter is required" });
         }
 
         const bucket = process.env.CLINIC_OFFICE_IMAGES_BUCKET;
         if (!bucket) {
-            return json(500, { error: "Server configuration error: Missing bucket" });
+            return json(event, 500, { error: "Server configuration error: Missing bucket" });
         }
 
         const prefix = `${clinicId}/clinic-office-image/`;
@@ -53,7 +52,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             .sort((a, b) => (b.LastModified?.getTime() ?? 0) - (a.LastModified?.getTime() ?? 0));
 
         if (files.length === 0) {
-            return json(404, { error: "No office image found for this clinic" });
+            return json(event, 404, { error: "No office image found for this clinic" });
         }
 
         const latestKey = files[0].Key!;
@@ -63,7 +62,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             { expiresIn: 3600 }
         );
 
-        return json(200, {
+        return json(event, 200, {
             message: "Clinic office image retrieved successfully",
             fileUrl: presignedUrl,
             objectKey: latestKey,
@@ -79,9 +78,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims"
         ) {
-            return json(401, { error: "Unauthorized", details: error.message });
+            return json(event, 401, { error: "Unauthorized", details: error.message });
         }
 
-        return json(500, { error: "Internal server error" });
+        return json(event, 500, { error: "Internal server error" });
     }
 };

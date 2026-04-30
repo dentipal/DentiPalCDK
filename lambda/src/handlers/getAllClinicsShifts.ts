@@ -11,7 +11,7 @@ import {
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, listAccessibleClinicIds } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
@@ -47,9 +47,9 @@ const TERMINAL_IGNORE_STATUSES = (process.env.TERMINAL_IGNORE_STATUSES || "rejec
 
 /* ----------------------------- Helpers ----------------------------- */
 
-const json = (statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: any): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -133,14 +133,13 @@ async function resolveCreatorName(createdBy: string): Promise<string> {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   try {
     if (event.httpMethod === "OPTIONS") {
-      return json(200, { message: "CORS preflight OK" });
+      return json(event, 200, { message: "CORS preflight OK" });
     }
 
     if (!JOB_POSTINGS_TABLE || !JOB_APPLICATIONS_TABLE) {
-      return json(500, { error: "Missing DynamoDB table env vars" });
+      return json(event, 500, { error: "Missing DynamoDB table env vars" });
     }
 
     // 1. Authentication & Authorization
@@ -158,7 +157,7 @@ export const handler = async (
     console.log(`[getAllClinicsShifts] ${targetClinicIds.length} accessible clinics for user ${requesterSub}.`);
 
     if (targetClinicIds.length === 0) {
-      return json(200, {
+      return json(event, 200, {
         message: "No clinics accessible for this user.",
         data: {},
       });
@@ -385,7 +384,7 @@ export const handler = async (
 
     const unifiedResponse = {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         message: "All clinics jobs and applications categorized successfully.",
         metadata: {
@@ -596,7 +595,7 @@ export const handler = async (
 
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         message: "All clinics categorized shifts successfully retrieved.",
         data: finalData,
@@ -606,7 +605,7 @@ export const handler = async (
     console.error("Error retrieving all clinic shifts:", error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({ error: "Failed to retrieve shifts.", details: error.message }),
     };
   }

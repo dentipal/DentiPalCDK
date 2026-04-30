@@ -6,7 +6,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { extractUserFromBearerToken } from "./utils";
 import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -41,12 +41,11 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 // Writes address → USER_ADDRESSES_TABLE  (if valid address fields are present)
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = (event.requestContext as any).http?.method || event.httpMethod || "POST";
 
     // CORS preflight
     if (method === "OPTIONS") {
-        return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 204, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -61,7 +60,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("[createProfessionalProfile] Auth error:", authError.message);
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: authError.message || "Invalid access token" }),
             };
         }
@@ -95,7 +94,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error("[createProfessionalProfile] Body parse error:", parseError);
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: "Invalid JSON in request body" }),
             };
         }
@@ -113,7 +112,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("[createProfessionalProfile] Missing fields:", missingFields);
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Required fields are missing or empty",
                     details: { missingFields, received: profileData },
@@ -126,7 +125,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.warn("[createProfessionalProfile] Invalid role:", profileData.role);
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: `Invalid role. Valid options: ${VALID_ROLE_VALUES.map(
                         (r) => DB_TO_DISPLAY_MAPPING[r] || r
@@ -229,7 +228,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // ─── Step 8: Return success ─────────────────────────────────────────────
         return {
             statusCode: 201,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 message: "Professional profile created successfully",
                 userSub,
@@ -247,14 +246,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (err.name === "ConditionalCheckFailedException") {
             return {
                 statusCode: 409,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: "Professional profile already exists for this user" }),
             };
         }
 
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({ error: err.message || "An unexpected error occurred" }),
         };
     }

@@ -64,7 +64,7 @@ const JOB_NEGOTIATIONS_TABLE: string = process.env.JOB_NEGOTIATIONS_TABLE!;
 const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
 const eb = new EventBridgeClient({ region: REGION });
 
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const VALID_RESPONSES: ReadonlyArray<InvitationResponseData['response']> = [
   "accepted",
@@ -76,7 +76,6 @@ const VALID_RESPONSES: ReadonlyArray<InvitationResponseData['response']> = [
 export const handler = async (
   event: APIGatewayProxyEventV2
 ): Promise<HandlerResponse> => {
-    setOriginFromEvent(event);
   
   // LOG: Entry
   console.log("--- HANDLER STARTED ---");
@@ -89,7 +88,7 @@ export const handler = async (
 
   // Handle CORS preflight
   if (method === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -110,7 +109,7 @@ export const handler = async (
       console.warn("Error: Missing invitationId in path");
       return {
         statusCode: 400,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({ error: "invitationId is required in path" }),
       };
     }
@@ -123,7 +122,7 @@ export const handler = async (
     if (!responseData.response || !VALID_RESPONSES.includes(responseData.response)) {
       return {
         statusCode: 400,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({
           error: `Invalid or missing 'response' field. Valid options: ${VALID_RESPONSES.join(", ")}`
         }),
@@ -154,7 +153,7 @@ export const handler = async (
     if (!invitation) {
       return {
         statusCode: 404,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({ error: "Invitation not found" }),
       };
     }
@@ -169,7 +168,7 @@ export const handler = async (
       console.warn(`Auth Error: Token User (${userSub}) !== Invitation User (${professionalUserSub})`);
       return {
         statusCode: 403,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({ error: "You can only respond to your own invitations" }),
       };
     }
@@ -178,7 +177,7 @@ export const handler = async (
       console.error("Data Integrity Error: Missing FKs in invitation item");
       return {
         statusCode: 500,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({
           error: "Invalid invitation data - missing jobId, clinicUserSub, or clinicId"
         }),
@@ -191,7 +190,7 @@ export const handler = async (
     if (currentStatus === "accepted" || currentStatus === "declined") {
       return {
         statusCode: 409,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({ error: `Invitation has already been ${currentStatus}` }),
       };
     }
@@ -222,7 +221,7 @@ export const handler = async (
     if (!job) {
       return {
         statusCode: 404,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: JSON.stringify({ error: "Job not found" }),
       };
     }
@@ -340,7 +339,7 @@ export const handler = async (
         ) {
           return {
             statusCode: 400,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
               error: "proposedSalaryMin and proposedSalaryMax are required for permanent job negotiations"
             }),
@@ -352,7 +351,7 @@ export const handler = async (
         ) {
           return {
             statusCode: 400,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
               error: "proposedSalaryMax must be greater than proposedSalaryMin"
             }),
@@ -362,7 +361,7 @@ export const handler = async (
         if (responseData.proposedHourlyRate == null) {
           return {
             statusCode: 400,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
               error: "proposedHourlyRate is required for hourly job negotiations"
             }),
@@ -472,7 +471,7 @@ export const handler = async (
     console.log("--- HANDLER FINISHED SUCCESS ---");
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         message: `Invitation ${responseData.response} successfully`,
         invitationId,

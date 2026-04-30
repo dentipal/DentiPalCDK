@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -16,9 +16,9 @@ const dynamodb: DynamoDBClient = new DynamoDBClient({ region: REGION });
 const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; 
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -54,12 +54,11 @@ interface JobItem {
 // --- 3. Handler Function ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -90,7 +89,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("DEBUG: Extracted Job ID:", jobId);
 
         if (!event.body) {
-             return json(400, {
+             return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Request body is required",
@@ -100,7 +99,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const statusData: UpdateStatusBody = JSON.parse(event.body);
 
         if (!jobId) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Job ID is required",
@@ -108,7 +107,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
         
         if (!statusData.status) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Status is required",
@@ -116,7 +115,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         if (!(VALID_STATUSES as string[]).includes(statusData.status)) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Invalid status",
@@ -137,7 +136,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const currentJobItem: JobItem | undefined = currentJobResponse.Item as JobItem | undefined;
 
         if (!currentJobItem) {
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 statusCode: 404,
                 message: "Job not found",
@@ -145,7 +144,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
         
         if (!currentJobItem.clinicUserSub?.S || currentJobItem.clinicUserSub.S !== userSub) {
-             return json(403, {
+             return json(event, 403, {
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Access denied",
@@ -171,7 +170,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             
             // If validTransitions is undefined (shouldn't happen now due to fix) or doesn't include new status
             if (!validTransitions || !validTransitions.includes(newStatus)) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Bad Request",
                     statusCode: 400,
                     message: "Invalid status transition",
@@ -187,7 +186,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Step 4: Validate required fields ---
         if (newStatus === 'scheduled') {
             if (!statusData.acceptedProfessionalUserSub) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Bad Request",
                     statusCode: 400,
                     message: "Missing required field for scheduled status",
@@ -195,7 +194,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 });
             }
             if (!statusData.scheduledDate) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Bad Request",
                     statusCode: 400,
                     message: "Missing required field for scheduled status",
@@ -279,7 +278,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         await dynamodb.send(new UpdateItemCommand(updateParams));
 
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             statusCode: 200,
             message: "Job status updated successfully",
@@ -300,13 +299,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message?.startsWith("Invalid authorization header") ||
             error.message === "Invalid access token format") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to update job status",

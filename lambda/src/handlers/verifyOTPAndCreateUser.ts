@@ -19,7 +19,7 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -173,13 +173,12 @@ Need help? Contact support@dentipal.com
 // --- 4. Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     console.log('📥 Received event:', JSON.stringify(event, null, 2));
     
  
     if (event.httpMethod === "OPTIONS") {
         // ✅ Uses imported headers
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
     
     try {
@@ -194,7 +193,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             console.error('❌ Failed to parse request body:', parseError);
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Bad Request",
                     statusCode: 400,
@@ -216,7 +215,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Bad Request",
                     statusCode: 400,
@@ -280,7 +279,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
             return {
                 statusCode,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: errorName,
                     statusCode: statusCode,
@@ -401,7 +400,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 201,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify(successResponse)
         };
 
@@ -410,7 +409,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 error: "Internal Server Error",
                 statusCode: 500,

@@ -2,24 +2,23 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -30,7 +29,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
         } catch (authError: any) {
-            return json(401, { 
+            return json(event, 401, { 
                 error: "Unauthorized", 
                 message: "Invalid or expired token", 
                 details: { issue: authError.message } 
@@ -38,7 +37,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         const tableName = process.env.PROFESSIONAL_PROFILES_TABLE;
-        if (!tableName) return json(500, { error: "Server configuration error" });
+        if (!tableName) return json(event, 500, { error: "Server configuration error" });
 
         // 2. Check if the user has a profile
         const getCommand = new GetCommand({
@@ -48,7 +47,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const existingProfile = await ddbDoc.send(getCommand);
 
         if (!existingProfile.Item) {
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 message: "Professional profile not found",
                 details: { userSub }
@@ -59,7 +58,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isDefault = existingProfile.Item.isDefault === true || existingProfile.Item.isDefault === "true";
 
         if (isDefault) {
-            return json(409, {
+            return json(event, 409, {
                 error: "Conflict",
                 message: "Cannot delete default profile",
                 details: { reason: "Set another profile as default first" }
@@ -74,7 +73,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await ddbDoc.send(deleteCommand);
 
         // 5. Success
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             message: "Professional profile deleted successfully",
             data: {
@@ -86,7 +85,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error;
         console.error("Error deleting professional profile:", err);
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             message: "Failed to delete professional profile",
             details: { reason: err.message }
