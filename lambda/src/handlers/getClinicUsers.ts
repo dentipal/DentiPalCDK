@@ -14,15 +14,15 @@ import {
 // IMPORTANT: Use .js because Lambda runs JS, not TS
 import { extractUserFromBearerToken, canAccessClinic } from "./utils.js";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize DynamoDB
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj)
 });
 
@@ -55,7 +55,6 @@ function extractClinicId(event: APIGatewayProxyEvent): string | null {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // REST API → httpMethod only
   const method = event.httpMethod || "";
 
@@ -63,7 +62,7 @@ export const handler = async (
   if (method === "OPTIONS") {
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: "",
     };
   }
@@ -78,14 +77,14 @@ export const handler = async (
       requesterSub = userInfo.sub;
       requesterGroups = userInfo.groups || [];
     } catch (authError: any) {
-      return json(401, { error: authError.message || "Invalid access token" });
+      return json(event, 401, { error: authError.message || "Invalid access token" });
     }
 
     // Get clinicId
     const clinicId = extractClinicId(event);
 
     if (!clinicId) {
-      return json(400, {
+      return json(event, 400, {
         error: "clinicId is required in the path (/clinics/{clinicId}/users)",
       });
     }
@@ -93,7 +92,7 @@ export const handler = async (
     // Membership gate — only clinic members (or Root) may list this clinic's users.
     // Previously auth-only: any logged-in user could list any clinic's roster.
     if (!(await canAccessClinic(requesterSub, requesterGroups, clinicId))) {
-      return json(403, { error: "Forbidden: you are not a member of this clinic" });
+      return json(event, 403, { error: "Forbidden: you are not a member of this clinic" });
     }
 
     // Query DynamoDB
@@ -105,7 +104,7 @@ export const handler = async (
     );
 
     if (!res.Item) {
-      return json(404, { error: "Clinic not found" });
+      return json(event, 404, { error: "Clinic not found" });
     }
 
     // Extract AssociatedUsers from DynamoDB item
@@ -122,14 +121,14 @@ export const handler = async (
     }
 
     // Success Response
-    return json(200, {
+    return json(event, 200, {
       clinicId,
       associatedUsers,
     });
     
   } catch (err: any) {
     console.error("Error fetching clinic users:", err);
-    return json(500, {
+    return json(event, 500, {
       error: err?.message || "Internal server error",
     });
   }

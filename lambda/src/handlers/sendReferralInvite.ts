@@ -19,7 +19,7 @@ import {
 import { v4 as uuidv4 } from "uuid";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils"; 
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 // --- Type Definitions ---
 
 type DynamoDBItem = { [key: string]: AttributeValue | undefined };
@@ -176,10 +176,9 @@ function createReferralEmail(
 // --- Main Handler Function ---
 
 export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEvent): Promise<HandlerResponse> => {
-    setOriginFromEvent(event);
     
     // Use the defined CORS headers
-    const headers = CORS_HEADERS;
+    const headers = corsHeaders(event);
 
     try {
         // Handle CORS preflight request
@@ -303,7 +302,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
             
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Unauthorized",
                     details: error.message
@@ -315,7 +314,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         
         return {
             statusCode: 500,
-            headers: CORS_HEADERS, // Use constants for error response headers
+            headers: corsHeaders(event), // Use constants for error response headers
             body: JSON.stringify({ error: errorMessage })
         };
     }

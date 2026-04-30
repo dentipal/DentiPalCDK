@@ -12,7 +12,7 @@ import {
     AttributeType
 } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 // ✅ ADDED: Import auth utility
 import { extractUserFromBearerToken } from "./utils";
 
@@ -53,17 +53,16 @@ const getAttribute = (attributes: AttributeType[] = [], name: string): string | 
 };
 
 // Helper to build JSON responses
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // Handle OPTIONS preflight requests
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -105,7 +104,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (clinicsAccessibleByRequester.length === 0) {
             console.log(`Requester ${requesterSub} is not associated with any clinics.`);
-            return json(200, {
+            return json(event, 200, {
                 status: "success",
                 statusCode: 200,
                 message: "No clinics found for requester",
@@ -129,7 +128,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         });
 
         if (uniqueUserSubsToFetch.size === 0) {
-            return json(200, {
+            return json(event, 200, {
                 status: "success",
                 statusCode: 200,
                 message: "No associated users found",
@@ -146,7 +145,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Step 4: Fetch user details from Cognito
         if (!USER_POOL_ID) {
             console.error("USER_POOL_ID environment variable is not set.");
-            return json(500, { error: "Configuration error: USER_POOL_ID missing" });
+            return json(event, 500, { error: "Configuration error: USER_POOL_ID missing" });
         }
 
         // Step 3.5: Pre-calculate the assigned clinics count and IDs for all users
@@ -228,7 +227,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Step 5: Return final response
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             statusCode: 200,
             message: `Retrieved ${successfulUsers.length} user(s)`,
@@ -250,13 +249,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims") {
             
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 details: error.message
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to retrieve user(s) details",

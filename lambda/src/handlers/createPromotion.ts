@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, PutCommand, QueryCommand } from "@aws-sdk/lib-d
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-V5-JobPostings";
@@ -15,24 +15,23 @@ const ddbDoc = DynamoDBDocumentClient.from(client);
 const VALID_PLANS = ["basic", "featured", "premium"];
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  setOriginFromEvent(event);
 
   try {
     // Auth
     const user = extractUserFromBearerToken(event.headers?.Authorization || event.headers?.authorization);
     if (!user?.sub) {
-      return { statusCode: 401, headers: CORS_HEADERS, body: JSON.stringify({ error: "Unauthorized" }) };
+      return { statusCode: 401, headers: corsHeaders(event), body: JSON.stringify({ error: "Unauthorized" }) };
     }
 
     const body = JSON.parse(event.body || "{}");
     const { jobId, planId } = body;
 
     if (!jobId || !planId) {
-      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "jobId and planId are required" }) };
+      return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "jobId and planId are required" }) };
     }
 
     if (!VALID_PLANS.includes(planId)) {
-      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: `Invalid planId. Must be one of: ${VALID_PLANS.join(", ")}` }) };
+      return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: `Invalid planId. Must be one of: ${VALID_PLANS.join(", ")}` }) };
     }
 
     // Verify the job exists and belongs to this user
@@ -46,23 +45,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const job = jobQuery.Items?.[0];
     if (!job) {
-      return { statusCode: 404, headers: CORS_HEADERS, body: JSON.stringify({ error: "Job not found" }) };
+      return { statusCode: 404, headers: corsHeaders(event), body: JSON.stringify({ error: "Job not found" }) };
     }
 
     // The job must belong to a clinic; promotions are queried by clinicId so an
     // empty partition would hide the record from the dashboard forever.
     if (!job.clinicId) {
-      return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Job has no clinicId and cannot be promoted" }) };
+      return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "Job has no clinicId and cannot be promoted" }) };
     }
 
     const allowed = await canWriteClinic(user.sub, user.groups, job.clinicId, "manageJobs");
     if (!allowed) {
-      return { statusCode: 403, headers: CORS_HEADERS, body: JSON.stringify({ error: "You do not have permission to promote this clinic's jobs" }) };
+      return { statusCode: 403, headers: corsHeaders(event), body: JSON.stringify({ error: "You do not have permission to promote this clinic's jobs" }) };
     }
 
     // Check if job is already promoted
     if (job.isPromoted) {
-      return { statusCode: 409, headers: CORS_HEADERS, body: JSON.stringify({ error: "This job is already promoted" }) };
+      return { statusCode: 409, headers: corsHeaders(event), body: JSON.stringify({ error: "This job is already promoted" }) };
     }
 
     // Create promotion record
@@ -94,7 +93,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     return {
       statusCode: 201,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         status: "success",
         promotion: promotionItem,
@@ -110,7 +109,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.error("Error creating promotion:", error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({ error: `Failed to create promotion: ${error.message || "unknown"}` }),
     };
   }

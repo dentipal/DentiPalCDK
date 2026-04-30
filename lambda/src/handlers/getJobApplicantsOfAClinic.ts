@@ -45,7 +45,7 @@ function decodeNextToken(token?: string | null): Record<string, AttributeValue> 
 
 // ✅ ADDED: Import auth utility
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 async function batchGetAll(request: BatchGetItemCommandInput, maxRetries = 3) {
   let result: any = { Responses: {}, UnprocessedKeys: {} };
@@ -122,9 +122,9 @@ const dedupe = (arr: any[]) => {
 };
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -322,10 +322,9 @@ async function fetchNegotiationsForNegotiatingApps(applications: any[]) {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // ✅ PREFLIGHT CHECK
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -343,7 +342,7 @@ export const handler = async (
     console.log(`🏥 Clinic ID: ${clinicId}`);
 
     if (!clinicId) {
-      return json(400, {
+      return json(event, 400, {
         error: "Bad Request",
         statusCode: 400,
         message: "Clinic ID is required",
@@ -415,7 +414,7 @@ export const handler = async (
     console.log(`📋 Found ${applications.length} applications${nextToken ? " (more available)" : ""}`);
 
     if (!applications.length) {
-      return json(200, {
+      return json(event, 200, {
         status: "success",
         statusCode: 200,
         message: "No job applications found",
@@ -521,7 +520,7 @@ export const handler = async (
     // Strip the private `_job` reference so clients see only { application, negotiation, professional }.
     const applicationsFlat = applicationsJoined.map(({ _job, ...rest }) => rest);
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       statusCode: 200,
       message: "Job applicants retrieved successfully",
@@ -539,7 +538,7 @@ export const handler = async (
 
     if (isAuthError(error)) {
       // Return a generic 401 — server logs above retain the specific reason.
-      return json(401, {
+      return json(event, 401, {
         status: "error",
         statusCode: 401,
         error: "Unauthorized",
@@ -548,7 +547,7 @@ export const handler = async (
       });
     }
 
-    return json(500, {
+    return json(event, 500, {
       status: "error",
       statusCode: 500,
       error: "Internal Server Error",

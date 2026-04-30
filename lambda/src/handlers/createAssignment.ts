@@ -3,16 +3,16 @@ import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
 // Updated imports to use the new token extraction utility
 import { isRoot, extractUserFromBearerToken } from './utils';
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Initialization ---
 
 const dynamoClient = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -34,12 +34,11 @@ interface AssignClinicRequestBody {
  * This operation is restricted to users in the 'Root' Cognito group.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -54,7 +53,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Check if the user is in the 'Root' group
         if (!isRoot(groups)) {
             console.warn(`[AUTH] User groups [${groups.join(',')}] is not a Root user. Access denied.`);
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 message: "Access denied",
                 details: { requiredGroup: "Root", userGroups: groups },
@@ -67,7 +66,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!userSub || !clinicId || !accessLevel) {
             console.warn("[VALIDATION] Missing required fields: userSub, clinicId, or accessLevel.");
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Missing required fields",
                 details: { requiredFields: ["userSub", "clinicId", "accessLevel"] },
@@ -77,7 +76,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!VALID_ACCESS_LEVELS.includes(accessLevel)) {
             console.warn(`[VALIDATION] Invalid access level provided: ${accessLevel}`);
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid access level",
                 details: { validLevels: VALID_ACCESS_LEVELS, providedLevel: accessLevel },
@@ -103,7 +102,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await dynamoClient.send(command);
 
         // 4. Success Response
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             message: "User assigned to clinic successfully",
             data: {
@@ -125,14 +124,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                             err.message.includes("Invalid access token");
 
         if (isAuthError) {
-             return json(401, {
+             return json(event, 401, {
                 error: "Unauthorized",
                 message: err.message,
                 timestamp: new Date().toISOString()
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             message: "Failed to assign user to clinic",
             details: { reason: err.message },

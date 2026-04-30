@@ -665,6 +665,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as location from 'aws-cdk-lib/aws-location';
+import * as eventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as path from 'path';
 
 export class DentiPalCDKStack extends cdk.Stack {
@@ -800,6 +801,9 @@ export class DentiPalCDKStack extends cdk.Stack {
             sortKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
             billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
+            // Stream feeds the cascadeClinicDataUpdate Lambda — keeps denormalized
+            // clinic profile fields on JobPostings in sync after profile edits.
+            stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
         });
         clinicProfilesTable.addGlobalSecondaryIndex({
             indexName: 'userSub-index',
@@ -822,6 +826,9 @@ export class DentiPalCDKStack extends cdk.Stack {
             partitionKey: { name: 'clinicId', type: dynamodb.AttributeType.STRING },
             billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
+            // Stream feeds the cascadeClinicDataUpdate Lambda — keeps denormalized
+            // clinic address fields on JobPostings in sync after address edits.
+            stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
         });
         clinicsTable.addGlobalSecondaryIndex({
             indexName: 'CreatedByIndex',
@@ -976,14 +983,17 @@ export class DentiPalCDKStack extends cdk.Stack {
             sortKey: { name: 'jobId', type: dynamodb.AttributeType.STRING },
             projectionType: dynamodb.ProjectionType.ALL,
         });
-        // Renamed one of the duplicate JobIdIndex definitions
+        // Single GSI keyed on jobId. The previously duplicate `JobIdIndex-2`
+        // has been removed — every handler now queries `jobId-index-1`.
+        //
+        // ⚠ DEPLOY ORDERING: Do NOT deploy this CDK change until the matching
+        // code change in `respondToNegotiation.ts` (which switched from
+        // `JobIdIndex-2` to `jobId-index-1`) is fully live in production.
+        // Recommended: deploy the code change first, wait 24–48 hours for
+        // warm Lambda containers to rotate and CloudWatch metrics to confirm
+        // zero reads on `JobIdIndex-2`, then deploy this stack change.
         jobPostingsTable.addGlobalSecondaryIndex({
             indexName: 'jobId-index-1',
-            partitionKey: { name: 'jobId', type: dynamodb.AttributeType.STRING },
-            projectionType: dynamodb.ProjectionType.ALL,
-        });
-        jobPostingsTable.addGlobalSecondaryIndex({
-            indexName: 'JobIdIndex-2',
             partitionKey: { name: 'jobId', type: dynamodb.AttributeType.STRING },
             projectionType: dynamodb.ProjectionType.ALL,
         });
@@ -1017,22 +1027,18 @@ export class DentiPalCDKStack extends cdk.Stack {
             projectionType: dynamodb.ProjectionType.ALL,
         });
 
-        // 12. DentiPal-Notifications
-        const notificationsTable = new dynamodb.Table(this, 'NotificationsTable', {
-            tableName: 'DentiPal-V5-Notifications',
-            partitionKey: { name: 'recipientUserSub', type: dynamodb.AttributeType.STRING },
-            sortKey: { name: 'notificationId', type: dynamodb.AttributeType.STRING },
-            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-        });
-
-        // 13. DentiPal-OTPVerification
-        const otpVerificationTable = new dynamodb.Table(this, 'OTPVerificationTable', {
-            tableName: 'DentiPal-V5-OTPVerification',
-            partitionKey: { name: 'email', type: dynamodb.AttributeType.STRING },
-            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-        });
+        // 12. DentiPal-Notifications  — REMOVED 2026-04-28. Table was unused.
+        // 13. DentiPal-OTPVerification — REMOVED 2026-04-28. Table duplicated
+        //     Cognito's native OTP/MFA flow and was never read from.
+        //
+        // ⚠ DEPLOY ORDERING: Do NOT deploy this CDK change until the prior
+        // CDK deploy with `removalPolicy: RETAIN` is live. Sequence:
+        //   1. First deploy:  flip RETAIN (already shipped).
+        //   2. This deploy:   remove from allTables / env vars / construct.
+        //                     CloudFormation removes the tables from the stack
+        //                     but leaves the physical DynamoDB tables intact.
+        //   3. Manual:        delete the physical tables in the AWS Console
+        //                     after a 7–30 day grace period.
 
         // 14. DentiPal-ProfessionalProfiles
         const professionalProfilesTable = new dynamodb.Table(this, 'ProfessionalProfilesTable', {
@@ -1117,8 +1123,8 @@ export class DentiPalCDKStack extends cdk.Stack {
         const allTables = [
             clinicProfilesTable, clinicFavoritesTable, clinicsTable, connectionsTable,
             conversationsTable, feedbackTable, jobApplicationsTable, jobInvitationsTable,
-            jobNegotiationsTable, jobPostingsTable, messagesTable, notificationsTable,
-            otpVerificationTable, professionalProfilesTable, referralsTable, userAddressesTable,
+            jobNegotiationsTable, jobPostingsTable, messagesTable,
+            professionalProfilesTable, referralsTable, userAddressesTable,
             userClinicAssignmentsTable, jobPromotionsTable
         ];
 
@@ -1243,8 +1249,6 @@ export class DentiPalCDKStack extends cdk.Stack {
                 JOB_NEGOTIATIONS_TABLE: jobNegotiationsTable.tableName,
                 JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
                 MESSAGES_TABLE: messagesTable.tableName,
-                NOTIFICATIONS_TABLE: notificationsTable.tableName,
-                OTP_VERIFICATION_TABLE: otpVerificationTable.tableName,
                 PROFESSIONAL_PROFILES_TABLE: professionalProfilesTable.tableName,
                 REFERRALS_TABLE: referralsTable.tableName,
                 USER_ADDRESSES_TABLE: userAddressesTable.tableName,
@@ -1400,6 +1404,46 @@ export class DentiPalCDKStack extends cdk.Stack {
                 authorizationType: apigateway.AuthorizationType.NONE,
             }
         });
+
+        // ========================================================================
+        // 5b. Cascade Lambda — keeps denormalized clinic data on JobPostings fresh
+        // ========================================================================
+        // Pure addition — no existing handler is modified. The Lambda subscribes
+        // to DynamoDB Streams from Clinics + Clinic-Profiles. When either is
+        // updated, it queries active JobPostings via ClinicIdIndex and updates
+        // their snapshotted address / profile fields. Failure is non-fatal —
+        // worst case the system continues to behave as it did before this Lambda.
+        const cascadeClinicDataFn = new lambda.Function(this, 'CascadeClinicDataUpdate', {
+            functionName: 'DentiPal-CascadeClinicDataUpdate',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/cascadeClinicDataUpdate.handler',
+            code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
+            timeout: cdk.Duration.seconds(60),
+            memorySize: 256,
+            environment: {
+                REGION: this.region,
+                JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
+                CLINICS_TABLE: clinicsTable.tableName,
+                CLINIC_PROFILES_TABLE: clinicProfilesTable.tableName,
+            },
+        });
+
+        // Read jobs by ClinicIdIndex; update jobs by primary key.
+        jobPostingsTable.grantReadWriteData(cascadeClinicDataFn);
+
+        // Wire each source table's stream as an event source for the cascade.
+        cascadeClinicDataFn.addEventSource(new eventSources.DynamoEventSource(clinicsTable, {
+            startingPosition: lambda.StartingPosition.LATEST,
+            batchSize: 10,
+            retryAttempts: 3,
+            bisectBatchOnError: true,
+        }));
+        cascadeClinicDataFn.addEventSource(new eventSources.DynamoEventSource(clinicProfilesTable, {
+            startingPosition: lambda.StartingPosition.LATEST,
+            batchSize: 10,
+            retryAttempts: 3,
+            bisectBatchOnError: true,
+        }));
 
 
         // ========================================================================

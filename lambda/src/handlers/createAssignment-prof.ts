@@ -13,15 +13,15 @@ import { v4 as uuid } from "uuid"; // Import v4 for UUID generation
 import { extractUserFromBearerToken } from "./utils"; // Import extractUserFromBearerToken function (assuming it's in utils.ts)
 
 // ✅ ADDED THIS LINE:
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -57,10 +57,9 @@ interface ClinicInfo {
 
 // Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // ✅ ADDED PREFLIGHT CHECK
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -75,7 +74,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!jobId) {
             console.error("jobId is missing in the path parameters");
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Job ID is required",
@@ -94,7 +93,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
         } catch (authError: any) {
-            return json(401, {
+            return json(event, 401, {
                 error: authError.message || "Invalid access token"
             });
         }
@@ -104,7 +103,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Simple check for body presence
         if (Object.keys(applicationData).length === 0 && !event.body) {
-             return json(400, {
+             return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Application data is missing",
@@ -124,7 +123,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobExists = await dynamodb.send(jobExistsCommand);
 
         if (!jobExists.Item) {
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 statusCode: 404,
                 message: "Job posting not found",
@@ -138,7 +137,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // In the original JS, clinicIdFromJob is sometimes referred to as 'clinicId' and sometimes as 'clinicUserSub' 
         // in the Key for CLINIC_PROFILES_TABLE. We assume clinicUserSub is the correct identifier for the clinic profile.
         if (!clinicIdFromJob) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Job posting is incomplete",
@@ -152,7 +151,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Check if the job posting is active
         const jobStatus: string = jobExists.Item.status?.S || 'active';
         if (jobStatus !== 'active') {
-            return json(409, {
+            return json(event, 409, {
                 error: "Conflict",
                 statusCode: 409,
                 message: "Cannot apply to this job",
@@ -188,7 +187,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (blockingApp) {
             console.log("User has already applied to this job.");
-            return json(409, {
+            return json(event, 409, {
                 error: "Conflict",
                 statusCode: 409,
                 message: "Duplicate application",
@@ -287,7 +286,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Step 7: Return response with application details
         console.log("Job application submitted successfully.");
-        return json(201, {
+        return json(event, 201, {
             status: "success",
             statusCode: 201,
             message: "Job application submitted successfully",
@@ -305,7 +304,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     catch (error) {
         const err = error as Error;
         console.error("Error creating job application:", err);
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             statusCode: 500,
             message: "Failed to submit job application",

@@ -10,7 +10,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -24,7 +24,9 @@ const LICENSE_REGEX = /^[A-Z0-9-]{4,20}$/i;
 const BIO_MAX = 500;
 const QUALIFICATIONS_MAX = 500;
 const YEARS_MIN = 0;
-const YEARS_MAX = 60;
+// Years-of-experience cap. MUST match the frontend constant YEARS_MAX in
+// dentipal/src/schemas/profileValidation.ts so the UI and server agree.
+const YEARS_MAX = 70;
 
 const SPECIALIZATION_OPTIONS = [
     "General Dentistry",
@@ -140,31 +142,10 @@ const FIELD_VALIDATORS: Record<string, Validator> = {
 };
 
 // --- 4. Handler ---
-// --- 2. Constants and Type Definitions ---
-
-// Years-of-experience allowed range. MUST match the frontend constant
-// YEARS_MAX in src/schemas/profileValidation.ts so the UI slider/input
-// caps at the same value the server accepts. Bumping this from 60 to 70.
-const YEARS_MIN = 0;
-const YEARS_MAX = 70;
-
-/** Interface for the data expected in the request body */
-interface UpdateProfileBody {
-    role?: string;
-    full_name?: string;
-    email?: string;
-    is_active?: boolean;
-    hourly_rate?: number;
-    yearsExperience?: number | string;
-    [key: string]: any;
-}
-
-// --- 3. Handler Function ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     if (event.httpMethod === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -174,14 +155,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const userSub = userInfo.sub;
 
         if (!event.body) {
-            return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Request body is required." }) };
+            return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "Request body is required." }) };
         }
 
         let updateData: Record<string, unknown>;
         try {
             updateData = JSON.parse(event.body);
         } catch {
-            return { statusCode: 400, headers: CORS_HEADERS, body: JSON.stringify({ error: "Invalid JSON body" }) };
+            return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "Invalid JSON body" }) };
         }
 
         // Reject attempts to change immutable/locked fields
@@ -189,7 +170,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (blocked.length > 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Some fields cannot be changed through this endpoint",
                     blockedFields: blocked,
@@ -198,58 +179,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
-        // Reject unknown fields outright (defense against field injection)
+        // Reject unknown fields outright (defense against field injection).
+        // The FIELD_VALIDATORS map at the top of this file is the allowlist;
+        // yearsExperience is already validated there by validateNumber(
+        // YEARS_MIN, YEARS_MAX), so changing YEARS_MAX above is all that's
+        // needed to move the cap.
         const unknown = Object.keys(updateData).filter(
             (k) => !FIELD_VALIDATORS[k] && !BLOCKED_FIELDS.has(k)
         );
         if (unknown.length > 0) {
-        
-        const updateData: UpdateProfileBody = JSON.parse(event.body);
-
-        // Validate role if provided
-        if (updateData.role && !VALID_ROLE_VALUES.includes(updateData.role)) {
-            const validDisplayRoles = VALID_ROLE_VALUES.map(
-                role => DB_TO_DISPLAY_MAPPING[role] || role
-            ).join(', ');
-
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Unknown fields are not accepted",
                     unknownFields: unknown,
                 }),
             };
-        }
-
-        // Validate yearsExperience if provided. Accepts either a number or a
-        // numeric string (the frontend sends a JS number but older clients
-        // may send a string). Range: 0–70 inclusive, must be a finite number.
-        if (updateData.yearsExperience !== undefined && updateData.yearsExperience !== null && updateData.yearsExperience !== "") {
-            const years = typeof updateData.yearsExperience === "number"
-                ? updateData.yearsExperience
-                : Number(updateData.yearsExperience);
-
-            const isInvalid =
-                !Number.isFinite(years) ||
-                years < YEARS_MIN ||
-                years > YEARS_MAX;
-
-            if (isInvalid) {
-                return {
-                    statusCode: 400,
-                    headers: CORS_HEADERS,
-                    body: JSON.stringify({
-                        error: "Validation failed",
-                        fieldErrors: {
-                            yearsExperience: `Must be between ${YEARS_MIN} and ${YEARS_MAX}`,
-                        },
-                    }),
-                };
-            }
-
-            // Normalize to a number so DynamoDB writes a Number attribute.
-            updateData.yearsExperience = years;
         }
 
         // Ensure profile exists
@@ -261,7 +207,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (!existing.Item) {
             return {
                 statusCode: 404,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: "Professional profile not found" }),
             };
         }
@@ -295,7 +241,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (Object.keys(fieldErrors).length > 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: "Validation failed", fieldErrors }),
             };
         }
@@ -303,7 +249,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (setPairs.length === 0 && removeNames.length === 0) {
             return {
                 statusCode: 400,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: "No fields to update" }),
             };
         }
@@ -332,7 +278,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         return {
             statusCode: 200,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 message: "Professional profile updated successfully",
                 profile: {
@@ -354,14 +300,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token") {
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({ error: error.message, details: error.message }),
             };
         }
 
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({
                 error: "Failed to update professional profile. Please try again.",
                 details: err.message,

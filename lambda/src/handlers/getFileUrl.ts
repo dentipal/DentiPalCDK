@@ -7,16 +7,16 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 
 const s3Client = new S3Client({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
@@ -25,18 +25,17 @@ const generateFileUrl = async (
   event: APIGatewayProxyEvent,
   fileType: string
 ): Promise<APIGatewayProxyResult> => {
-  // IMPORTANT: call this FIRST on every entry point. `CORS_HEADERS` is backed
+  // IMPORTANT: call this FIRST on every entry point. `corsHeaders(event)` is backed
   // by a module-level `_currentOrigin` that Lambda warm-start containers share
   // across invocations. Without this, a previous request from one origin
   // leaks its Access-Control-Allow-Origin into the next request from another
   // origin — which is exactly what caused the CORS error for localhost:5173.
-  setOriginFromEvent(event);
 
   let objectKeyToUse: string | undefined;
   try {
     // CORS Preflight
     if (event.httpMethod === "OPTIONS") {
-      return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+      return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     // Auth
@@ -46,13 +45,13 @@ const generateFileUrl = async (
     const userType = userInfo.userType;
 
     if (event.httpMethod !== "GET") {
-      return json(405, { error: "Method not allowed" });
+      return json(event, 405, { error: "Method not allowed" });
     }
 
     // Query params
     const encodedObjectKey = event.queryStringParameters?.key;
     if (!encodedObjectKey) {
-      return json(400, { error: "Object key is required" });
+      return json(event, 400, { error: "Object key is required" });
     }
 
     objectKeyToUse = decodeURIComponent(encodedObjectKey);
@@ -66,7 +65,7 @@ const generateFileUrl = async (
 
     // Security check: only clinic users can access other users' files
     if (userSubToAccess !== userSub && !isClinicUser) {
-      return json(403, { error: "Access denied" });
+      return json(event, 403, { error: "Access denied" });
     }
 
     // Bucket selection
@@ -83,7 +82,7 @@ const generateFileUrl = async (
 
     if (!bucket) {
       console.error(`Bucket environment variable not set for fileType: ${fileType}`);
-      return json(500, { error: `Server configuration error: Missing bucket for ${fileType}` });
+      return json(event, 500, { error: `Server configuration error: Missing bucket for ${fileType}` });
     }
 
     // --- CORE LOGIC ---
@@ -102,7 +101,7 @@ const generateFileUrl = async (
 
       if (uploadedBy && uploadedBy !== userSubToAccess && !isClinicUser) {
         console.warn(`Access denied: uploadedBy (${uploadedBy}) does not match userSubToAccess (${userSubToAccess})`);
-        return json(403, { error: "Access denied - file not owned by specified user" });
+        return json(event, 403, { error: "Access denied - file not owned by specified user" });
       }
 
       // Generate presigned URL. Use a 24h lifetime so users scrolling through
@@ -115,7 +114,7 @@ const generateFileUrl = async (
         expiresIn: PRESIGN_TTL_SECONDS,
       });
 
-      return json(200, {
+      return json(event, 200, {
         message: "File URL retrieved successfully",
         fileUrl: presignedUrl,
         objectKey: objectKeyToUse,
@@ -134,11 +133,11 @@ const generateFileUrl = async (
     } catch (error: any) {
       if (error.name === "NoSuchKey" || error.name === "NotFound") {
         console.error(`S3 error: File not found for Key: ${objectKeyToUse} in Bucket: ${bucket}`);
-        return json(404, { error: "File not found" });
+        return json(event, 404, { error: "File not found" });
       }
 
       console.error("Unhandled S3 Error during Head/Get command:", error);
-      return json(500, { error: `Failed to retrieve file: ${error.message || "Internal error"}` });
+      return json(event, 500, { error: `Failed to retrieve file: ${error.message || "Internal error"}` });
     }
   } catch (error: any) {
     console.error("Error getting file URL:", error);
@@ -148,10 +147,10 @@ const generateFileUrl = async (
         error.message === "Invalid access token format" ||
         error.message === "Failed to decode access token" ||
         error.message === "User sub not found in token claims") {
-      return json(401, { error: "Unauthorized", details: error.message });
+      return json(event, 401, { error: "Unauthorized", details: error.message });
     }
 
-    return json(500, { error: "Internal server error" });
+    return json(event, 500, { error: "Internal server error" });
   }
 };
 
@@ -165,7 +164,6 @@ export const getClinicOfficeImage = async (event: APIGatewayProxyEvent) => gener
 
 // Keep generic handler for backward compatibility; it will route based on path segments.
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // try to infer fileType from path for older routes
   try {
     const pathParts = event.path.split("/");
@@ -180,10 +178,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     };
     const fileType = map[pathFileType];
     if (fileType) return generateFileUrl(event, fileType);
-    return json(400, { error: "Invalid file type in path" });
+    return json(event, 400, { error: "Invalid file type in path" });
   } catch (err: any) {
     console.error("Handler routing error:", err);
-    return json(500, { error: "Internal server error" });
+    return json(event, 500, { error: "Internal server error" });
   }
 };
  

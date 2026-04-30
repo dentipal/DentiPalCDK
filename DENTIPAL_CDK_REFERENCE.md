@@ -1,3 +1,5 @@
+> ⚠ **NOTE — 2026-04-28**: `DentiPal-V5-Notifications` and `DentiPal-V5-OTPVerification` tables and their `NOTIFICATIONS_TABLE` / `OTP_VERIFICATION_TABLE` env vars have been retired. References below to those tables are historical — they no longer exist in the deployed stack. Notifications were never read by any handler; OTPVerification duplicated Cognito's native flow.
+
 # DentiPal CDK — Complete Reference
 
 Stack: `DentiPalCDKStackV5` | Region: `us-east-1` | Stage: `prod`

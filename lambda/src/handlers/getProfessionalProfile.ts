@@ -11,27 +11,26 @@ import {
 
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj),
 });
 
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   try {
     // Handle preflight
     if (event.httpMethod === "OPTIONS") {
       return {
         statusCode: 200,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(event),
         body: "",
       };
     }
@@ -85,7 +84,7 @@ export const handler = async (
         return profile;
       }) || [];
 
-    return json(200, {
+    return json(event, 200, {
       status: "success",
       statusCode: 200,
       message: profileId ? "Profile retrieved successfully" : "Profiles retrieved successfully",
@@ -98,7 +97,7 @@ export const handler = async (
   } catch (error: any) {
     console.error("Error getting professional profile:", error);
 
-    return json(500, {
+    return json(event, 500, {
       error: "Internal Server Error",
       statusCode: 500,
       message: "Failed to retrieve professional profile",

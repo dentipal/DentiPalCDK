@@ -66,8 +66,45 @@ const MAX_CONVO_PAGE = 100;
 const DEFAULT_HISTORY_PAGE = 50;
 const MAX_HISTORY_PAGE = 200;
 
-// Cognito lookup concurrency when hydrating conversation rows
-const COGNITO_CONCURRENCY = 10;
+// Cognito lookup concurrency when hydrating conversation rows.
+// Cognito's per-user-pool TPS for AdminGetUser is low; keeping this conservative
+// avoids correlated 429s during chat bursts.
+const COGNITO_CONCURRENCY = 3;
+
+// Retry policy for AdminGetUser. Only retry on transient/throttle errors —
+// permanent errors (UserNotFoundException etc.) are not retried.
+const COGNITO_RETRY_ATTEMPTS = 3;
+const COGNITO_RETRY_BASE_MS = 200;
+const RETRYABLE_COGNITO_ERRORS = new Set([
+    "TooManyRequestsException",
+    "ThrottlingException",
+    "LimitExceededException",
+    "ServiceUnavailableException",
+    "InternalErrorException",
+]);
+
+function isRetryableCognitoError(err: unknown): boolean {
+    const name = (err as { name?: string })?.name;
+    return !!name && RETRYABLE_COGNITO_ERRORS.has(name);
+}
+
+async function retryCognito<T>(fn: () => Promise<T>): Promise<T> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < COGNITO_RETRY_ATTEMPTS; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastErr = err;
+            if (!isRetryableCognitoError(err) || attempt === COGNITO_RETRY_ATTEMPTS - 1) {
+                throw err;
+            }
+            const jitter = Math.random() * 100;
+            const delay = COGNITO_RETRY_BASE_MS * Math.pow(2, attempt) + jitter;
+            await new Promise((r) => setTimeout(r, delay));
+        }
+    }
+    throw lastErr;
+}
 
 // Cognito JWT verifier (signature + exp + iss + token_use). Shared, reused across invocations.
 // Note: clientId=null accepts any app client in this user pool. If you later want to pin
@@ -218,11 +255,13 @@ async function getCognitoNameBySub(sub: string): Promise<string> {
     if (cached !== undefined) return cached;
 
     try {
-        const out = await cognitoIdp.send(
-            new AdminGetUserCommand({
-                UserPoolId: USER_POOL_ID,
-                Username: sub,
-            })
+        const out = await retryCognito(() =>
+            cognitoIdp.send(
+                new AdminGetUserCommand({
+                    UserPoolId: USER_POOL_ID,
+                    Username: sub,
+                })
+            )
         );
         const given = pickAttr(out.UserAttributes, "given_name");
         const fullname = pickAttr(out.UserAttributes, "name");

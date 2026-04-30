@@ -9,7 +9,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -23,9 +23,9 @@ const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
 // --- Helpers ---
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -36,16 +36,15 @@ interface DeleteItem {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     if (method !== 'DELETE') {
-        return json(405, { error: "Method Not Allowed", details: { allowedMethods: ["DELETE"] } });
+        return json(event, 405, { error: "Method Not Allowed", details: { allowedMethods: ["DELETE"] } });
     }
 
     try {
@@ -58,7 +57,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             userSub = userInfo.sub;
             userGroups = userInfo.groups || [];
         } catch (authError: any) {
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 message: authError.message || "Invalid access token"
             });
@@ -67,7 +66,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 3. Extract job ID
         const jobId = event.pathParameters?.jobId;
         if (!jobId) {
-            return json(400, { error: "Bad Request", message: "Job ID is required" });
+            return json(event, 400, { error: "Bad Request", message: "Job ID is required" });
         }
 
         // 4. Get existing job to verify ownership and status
@@ -77,7 +76,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }));
 
         if (!jobResult.Item) {
-            return json(404, { error: "Not Found", message: "Job not found", details: { jobId } });
+            return json(event, 404, { error: "Not Found", message: "Job not found", details: { jobId } });
         }
 
         const job = jobResult.Item;
@@ -86,7 +85,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 5. Security check (existing: creator-only)
         if (userSub !== clinicUserSub) {
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 message: "Only job owner can delete this job",
                 details: { requiredOwner: clinicUserSub }
@@ -97,7 +96,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Blocks a creator whose role was later downgraded to ClinicViewer.
         const jobClinicId = job.clinicId;
         if (jobClinicId && !(await canWriteClinic(userSub, userGroups, jobClinicId, "manageJobs"))) {
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 message: "Your current role cannot delete jobs for this clinic"
             });
@@ -105,14 +104,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 6. Business Logic Checks
         if (currentStatus === 'scheduled') {
-            return json(409, { 
+            return json(event, 409, { 
                 error: "Conflict", 
                 message: "Cannot delete scheduled jobs",
                 details: { suggestion: "Please complete or cancel the job first" } 
             });
         }
         if (currentStatus === 'action_needed') {
-            return json(409, { 
+            return json(event, 409, { 
                 error: "Conflict", 
                 message: "Cannot delete jobs with pending negotiations",
                 details: { suggestion: "Please resolve negotiations first" } 
@@ -141,7 +140,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
 
             if (activeApps.length > 0) {
-                return json(400, { 
+                return json(event, 400, { 
                     error: "Bad Request", 
                     message: `Cannot delete job with ${activeApps.length} active application(s). Please handle applications first.` 
                 });
@@ -178,7 +177,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
 
             if (activeInvites.length > 0) {
-                return json(400, { 
+                return json(event, 400, { 
                     error: "Bad Request", 
                     message: `Cannot delete job with ${activeInvites.length} active invitation(s). Please cancel invitations first.` 
                 });
@@ -200,7 +199,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const forceDelete = event.queryStringParameters?.force === 'true';
 
         if (!forceDelete && currentStatus === 'completed') {
-            return json(400, { 
+            return json(event, 400, { 
                 error: "Bad Request", 
                 message: 'Cannot delete completed jobs. Use ?force=true to force deletion.' 
             });
@@ -271,7 +270,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             message: "Job deleted successfully",
             data: {
@@ -285,7 +284,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error;
         console.error("Error deleting job:", err);
-        return json(500, { 
+        return json(event, 500, { 
             error: "Internal Server Error", 
             message: "Failed to delete job posting", 
             details: err.message 

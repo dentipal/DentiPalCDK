@@ -9,7 +9,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Assuming the utility file exports the necessary functions and types
 import { extractUserFromBearerToken, canAccessClinic } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -17,9 +17,9 @@ const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE as string;
 const CLINICS_TABLE = process.env.CLINICS_TABLE as string;
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -180,13 +180,12 @@ const unmarshallClinic = (clinic: DynamoDBClinicItem | undefined): ClinicProfile
 // --- Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     // Check standard REST method or HTTP API v2 method
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -199,7 +198,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             userSub = userInfo.sub;
             userGroups = userInfo.groups || [];
         } catch (authError: any) {
-            return json(401, { error: authError.message || "Invalid access token" });
+            return json(event, 401, { error: authError.message || "Invalid access token" });
         }
 
         // 2. Extract Clinic ID from Path
@@ -209,7 +208,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         if (!clinicId) {
             console.error("Clinic ID is missing from the path.");
-            return json(400, { error: "Clinic ID missing in request path." });
+            return json(event, 400, { error: "Clinic ID missing in request path." });
         }
 
         // 3. Authorization — any clinic member can READ the profile (Root bypasses).
@@ -218,7 +217,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         //    was added to the clinic later — including all ClinicViewers.
         if (!(await canAccessClinic(userSub, userGroups, clinicId))) {
             console.warn(`[getClinicProfileDetails] Access denied: sub=${userSub} clinicId=${clinicId}`);
-            return json(403, { error: "Forbidden: you are not a member of this clinic" });
+            return json(event, 403, { error: "Forbidden: you are not a member of this clinic" });
         }
 
         // 4. Query by clinicId only — profile is stored once per clinic (PK=clinicId, SK=userSub).
@@ -236,7 +235,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // 5. Check Existence
         if (!item) {
             console.warn(`No profile row exists for clinicId=${clinicId}`);
-            return json(404, { error: `Clinic profile not found` });
+            return json(event, 404, { error: `Clinic profile not found` });
         }
 
         // 6. Format Data and Respond
@@ -279,14 +278,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
-        return json(200, {
+        return json(event, 200, {
             message: "Clinic profile retrieved successfully",
             profile: clinicData,
         });
 
     } catch (error: any) {
         console.error("DETAILED ERROR:", error);
-        return json(500, { 
+        return json(event, 500, { 
             error: "Failed to retrieve clinic profile",
             details: error.message
         });

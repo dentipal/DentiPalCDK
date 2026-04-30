@@ -1,5 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Placeholder promotion plans - pricing/duration to be finalized later
 const PROMOTION_PLANS = [
@@ -30,12 +30,11 @@ const PROMOTION_PLANS = [
 ];
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  setOriginFromEvent(event);
 
   try {
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({
         status: "success",
         plans: PROMOTION_PLANS,
@@ -45,7 +44,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.error("Error fetching promotion plans:", error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(event),
       body: JSON.stringify({ error: `Failed to fetch promotion plans: ${error.message || "unknown"}` }),
     };
   }

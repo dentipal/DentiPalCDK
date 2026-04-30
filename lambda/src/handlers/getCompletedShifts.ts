@@ -12,7 +12,7 @@ import {
 } from "aws-lambda";
 
 import { extractUserFromBearerToken } from "./utils.js";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -21,9 +21,9 @@ const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE!; // Use Env Var
 const dynamodb = new DynamoDBClient({ region: REGION });
 
 // Helper to build JSON responses
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj)
 });
 
@@ -84,11 +84,10 @@ function mapPostingItem(item: Record<string, AttributeValue>) {
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   try {
     // CORS Preflight
     if (event.httpMethod === "OPTIONS") {
-      return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+      return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     // 1. Auth & Identity Extraction
@@ -98,7 +97,7 @@ export const handler = async (
       const userInfo = extractUserFromBearerToken(authHeader);
       userSub = userInfo.sub;
     } catch (authError: any) {
-      return json(401, { error: authError.message || "Invalid access token" });
+      return json(event, 401, { error: authError.message || "Invalid access token" });
     }
 
     // 2. Query DynamoDB (More efficient than Scan)
@@ -141,7 +140,7 @@ export const handler = async (
       return String(aKey).localeCompare(String(bKey));
     });
 
-    return json(200, {
+    return json(event, 200, {
       message: "Completed shifts retrieved successfully",
       clinicUserSub: userSub,
       count: jobs.length,
@@ -150,7 +149,7 @@ export const handler = async (
     
   } catch (err: any) {
     console.error("Error retrieving completed shifts:", err);
-    return json(500, {
+    return json(event, 500, {
       error: "Failed to retrieve completed shifts.",
       details: err?.message || String(err),
     });

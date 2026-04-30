@@ -21,7 +21,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 
@@ -34,9 +34,9 @@ const cognito = new CognitoIdentityProviderClient({ region: REGION });
 const dynamodb = new DynamoDBClient({ region: REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -194,17 +194,16 @@ function extractUsername(event: APIGatewayProxyEvent, bodyEmail: string | undefi
 // --- 4. Main Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     // --- CORS preflight ---
     // Check standard REST method or HTTP API v2 method
     const method = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
     
     if (method !== "PUT") {
-         return json(405, {
+         return json(event, 405, {
             error: "Method Not Allowed",
             statusCode: 405,
             message: "Only PUT method is supported",
@@ -225,7 +224,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isClinicAdmin: boolean = lowerGroups.includes("clinicadmin");
         
         if (!isRootUser && !isClinicAdmin) {
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 statusCode: 403,
                 message: "Only Root or ClinicAdmin can update users",
@@ -241,14 +240,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Validate password fields if provided
         if (password || verifyPassword) {
             if (password !== verifyPassword) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Bad Request",
                     message: "Passwords do not match",
                     timestamp: new Date().toISOString()
                 });
             }
             if (!password || password.length < 6) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Bad Request",
                     message: "Password must be at least 6 characters",
                     timestamp: new Date().toISOString()
@@ -258,14 +257,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // --- Block fields that cannot be edited ---
         if ((body as any).phoneNumber || (body as any).phone_number) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Not Editable",
                 message: "Phone number cannot be changed through this endpoint.",
                 timestamp: new Date().toISOString()
             });
         }
         if ((body as any).username) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Not Editable",
                 message: "Username cannot be changed.",
                 timestamp: new Date().toISOString()
@@ -280,7 +279,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const hasPassword = !!password;
 
         if (!hasFirstName && !hasLastName && !hasSubgroup && !hasClinicIds && !hasPassword) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Nothing to Update",
                 message: "Please provide at least one field to update.",
                 editableFields: ["firstName", "lastName", "subgroup", "clinicIds", "password"],
@@ -292,7 +291,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const username: string | null = extractUsername(event, email);
 
         if (!username) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Missing Username",
                 message: "Could not determine which user to update. Provide the user's email in the URL path (PUT /users/{email}) or in the request body.",
                 timestamp: new Date().toISOString()
@@ -303,7 +302,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         try {
             await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username }));
         } catch (e) {
-            return json(404, {
+            return json(event, 404, {
                 error: "User Not Found",
                 message: `No user found with username "${username}" in the system.`,
                 timestamp: new Date().toISOString()
@@ -318,21 +317,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Validate firstName ---
         if (hasFirstName) {
             if (typeof firstName !== "string" || firstName.trim().length === 0) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Invalid First Name",
                     message: "First name must be a non-empty string.",
                     timestamp: new Date().toISOString()
                 });
             }
             if (firstName.trim().length < 2) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Invalid First Name",
                     message: "First name must be at least 2 characters long.",
                     timestamp: new Date().toISOString()
                 });
             }
             if (!/^[a-zA-Z\s'-]+$/.test(firstName.trim())) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Invalid First Name",
                     message: "First name can only contain letters, spaces, hyphens, and apostrophes.",
                     timestamp: new Date().toISOString()
@@ -343,21 +342,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Validate lastName ---
         if (hasLastName) {
             if (typeof lastName !== "string" || lastName.trim().length === 0) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Invalid Last Name",
                     message: "Last name must be a non-empty string.",
                     timestamp: new Date().toISOString()
                 });
             }
             if (lastName.trim().length < 2) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Invalid Last Name",
                     message: "Last name must be at least 2 characters long.",
                     timestamp: new Date().toISOString()
                 });
             }
             if (!/^[a-zA-Z\s'-]+$/.test(lastName.trim())) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Invalid Last Name",
                     message: "Last name can only contain letters, spaces, hyphens, and apostrophes.",
                     timestamp: new Date().toISOString()
@@ -368,7 +367,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Validate subgroup ---
         if (hasSubgroup) {
             if (typeof subgroup !== "string" || subgroup.trim().length === 0) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Invalid Subgroup",
                     message: "Subgroup must be a non-empty string.",
                     validOptions: ["ClinicAdmin", "ClinicManager", "ClinicViewer"],
@@ -376,7 +375,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 });
             }
             if (!VALID_SUBGROUPS.includes(subgroup.toLowerCase())) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Invalid Subgroup",
                     message: `"${subgroup}" is not a valid role. Choose one of: ClinicAdmin, ClinicManager, ClinicViewer.`,
                     validOptions: ["ClinicAdmin", "ClinicManager", "ClinicViewer"],
@@ -388,7 +387,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // --- Validate clinicIds ---
         if (hasClinicIds) {
             if (!Array.isArray(clinicIds)) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Invalid Clinic IDs",
                     message: "clinicIds must be an array of clinic ID strings.",
                     example: { clinicIds: ["clinic-id-1", "clinic-id-2"] },
@@ -397,7 +396,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
             for (let i = 0; i < clinicIds.length; i++) {
                 if (typeof clinicIds[i] !== "string" || clinicIds[i].trim().length === 0) {
-                    return json(400, {
+                    return json(event, 400, {
                         error: "Invalid Clinic ID",
                         message: `clinicIds[${i}] is invalid. Each clinic ID must be a non-empty string.`,
                         timestamp: new Date().toISOString()
@@ -407,7 +406,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             // Check for duplicates
             const uniqueIds = new Set(clinicIds);
             if (uniqueIds.size !== clinicIds.length) {
-                return json(400, {
+                return json(event, 400, {
                     error: "Duplicate Clinic IDs",
                     message: "clinicIds contains duplicate values. Each clinic ID must be unique.",
                     timestamp: new Date().toISOString()
@@ -456,7 +455,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userSub: string | null = await getUserSubByUsername(username);
 
             if (!userSub) {
-                return json(500, {
+                return json(event, 500, {
                     error: "Internal Error",
                     message: "Could not find the user's internal ID (sub). This user may have been created incorrectly in Cognito.",
                     timestamp: new Date().toISOString()
@@ -535,7 +534,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             response.warnings = [`The following clinic IDs were not found and were skipped: ${notFoundClinics.join(", ")}`];
         }
 
-        return json(200, response);
+        return json(event, 200, response);
 
     } catch (error: any) {
         console.error("Error updating user:", error);
@@ -546,7 +545,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             error.message === "Failed to decode access token" ||
             error.message === "User sub not found in token claims") {
 
-            return json(401, {
+            return json(event, 401, {
                 error: "Unauthorized",
                 message: "Your session has expired or your token is invalid. Please log in again.",
                 details: error.message,
@@ -554,7 +553,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             message: "Something went wrong while updating the user. Please try again later.",
             details: { reason: error.message },

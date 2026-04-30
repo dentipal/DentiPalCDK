@@ -13,7 +13,7 @@ import {
 } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
 import { v4 as uuidv4 } from "uuid"; 
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Type Definitions ---
 
@@ -67,9 +67,8 @@ const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
 
 // --- Main Handler Function ---
 export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEvent): Promise<HandlerResponse> => {
-    setOriginFromEvent(event);
     try {
-        const headers = CORS_HEADERS;
+        const headers = corsHeaders(event);
         
         // Handle CORS preflight
         const method = (event as APIGatewayProxyEventV2)?.requestContext?.http?.method || (event as APIGatewayProxyEvent)?.httpMethod;
@@ -291,7 +290,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
             
             return {
                 statusCode: 401,
-                headers: CORS_HEADERS,
+                headers: corsHeaders(event),
                 body: JSON.stringify({
                     error: "Unauthorized",
                     details: error.message
@@ -303,7 +302,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         
         return {
             statusCode: 500,
-            headers: CORS_HEADERS,
+            headers: corsHeaders(event),
             body: JSON.stringify({ error: errorMessage }),
         };
     }

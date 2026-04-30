@@ -12,7 +12,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -20,9 +20,9 @@ const dynamodb: DynamoDBClient = new DynamoDBClient({ region: REGION });
 const JOB_APPLICATIONS_TABLE: string = process.env.JOB_APPLICATIONS_TABLE!; // Non-null assertion for environment variable
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj)
 });
 
@@ -54,10 +54,9 @@ interface ApplicationItem {
  * It verifies token, ownership, and application status before applying updates.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
   // CORS Preflight
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -67,14 +66,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const userSub = userInfo.sub;
 
     if (!event.body) {
-      return json(400, { error: "Request body is required." });
+      return json(event, 400, { error: "Request body is required." });
     }
 
     const updateData: UpdateApplicationBody = JSON.parse(event.body);
 
     // Validate required fields
     if (!updateData.applicationId) {
-      return json(400, { error: "Required field: applicationId" });
+      return json(event, 400, { error: "Required field: applicationId" });
     }
 
     let applicationFound: ApplicationItem | null = null;
@@ -113,18 +112,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     if (!applicationFound) {
-      return json(404, { error: "Job application not found" });
+      return json(event, 404, { error: "Job application not found" });
     }
 
     // Step 2: Verify the application belongs to the authenticated user
     if (applicationFound.professionalUserSub?.S !== userSub) {
-      return json(403, { error: "You can only update your own job applications" });
+      return json(event, 403, { error: "You can only update your own job applications" });
     }
 
     // Step 3: Check if application can be updated (not accepted/declined)
     const currentStatus: string = applicationFound.applicationStatus?.S || 'pending';
     if (currentStatus === 'accepted' || currentStatus === 'declined' || currentStatus === 'canceled' || currentStatus === 'completed') {
-      return json(400, {
+      return json(event, 400, {
         error: `Cannot update application with status: ${currentStatus}`
       });
     }
@@ -163,7 +162,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     attributeValues[":updated"] = { S: nowIso };
 
     if (updateExpressions.length === 1) {
-      return json(400, {
+      return json(event, 400, {
         error: "No fields to update. Provide at least one field: message, proposedRate, availability, startDate, notes"
       });
     }
@@ -172,7 +171,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const jobId: string | undefined = applicationFound.jobId?.S;
 
     if (!jobId) {
-      return json(400, {
+      return json(event, 400, {
         error: "Invalid application data: missing jobId required for key"
       });
     }
@@ -191,7 +190,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     await dynamodb.send(new UpdateItemCommand(updateCommand));
 
-    return json(200, {
+    return json(event, 200, {
       message: "Job application updated successfully",
       applicationId: updateData.applicationId,
       updatedFields: Object.keys(updateData).filter(key => key !== 'applicationId'),
@@ -207,13 +206,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         error.message === "Invalid access token format" ||
         error.message === "Failed to decode access token") {
         
-        return json(401, {
+        return json(event, 401, {
             error: "Unauthorized",
             details: error.message
         });
     }
 
-    return json(500, {
+    return json(event, 500, {
       error: "Failed to update job application. Please try again.",
       details: error.message
     });

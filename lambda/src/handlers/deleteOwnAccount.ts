@@ -5,7 +5,7 @@ import {
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 
 // --- AWS SDK Clients Initialization ---
@@ -15,9 +15,9 @@ const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -28,11 +28,10 @@ interface UserClinicAssignmentItem {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -43,12 +42,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userInfo = extractUserFromBearerToken(authHeader);
             userSub = userInfo.sub;
         } catch (authError: any) {
-            return json(401, { error: authError.message || "Invalid access token" });
+            return json(event, 401, { error: authError.message || "Invalid access token" });
         }
 
         const assignmentsTable = process.env.USER_CLINIC_ASSIGNMENTS_TABLE;
         if (!assignmentsTable) {
-            return json(500, { error: "Server error: USER_CLINIC_ASSIGNMENTS_TABLE not defined" });
+            return json(event, 500, { error: "Server error: USER_CLINIC_ASSIGNMENTS_TABLE not defined" });
         }
 
         // 2. Clean up clinic assignments
@@ -83,7 +82,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             Username: userSub 
         }));
 
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             message: "Account deleted successfully"
         });
@@ -91,7 +90,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (error) {
         const err = error as Error;
         console.error("Error deleting account:", err);
-        return json(500, {
+        return json(event, 500, {
             error: `Failed to delete account: ${err.message}`
         });
     }

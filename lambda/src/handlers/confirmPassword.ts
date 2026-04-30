@@ -8,15 +8,15 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // Initialize the Cognito Identity Provider Client
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -49,7 +49,6 @@ async function findUsernameByEmail(userPoolId: string, emailLower: string): Prom
 
 // Define the Lambda handler function
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     console.log("=== /auth/confirm-forgot-password START ===");
     console.log("[req] method:", event?.httpMethod);
     console.log("[req] headers:", JSON.stringify(event?.headers || {}));
@@ -60,7 +59,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
     
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
@@ -73,7 +72,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Input validation
         if (!email || !code || !newPassword) {
             console.warn("[confirm] missing fields");
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 statusCode: 400,
                 message: "Email, verification code, and new password are required",
@@ -96,7 +95,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const userPoolId = process.env.USER_POOL_ID;
             if (!userPoolId) {
                 console.error("[confirm] Missing USER_POOL_ID for username lookup");
-                return json(500, {
+                return json(event, 500, {
                     error: "Internal Server Error",
                     statusCode: 500,
                     message: "Server configuration error. Please contact support.",
@@ -127,7 +126,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.log("[confirm] success for:", username);
 
         // Successful response
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             statusCode: 200,
             message: "Password reset successful",
@@ -179,7 +178,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Return error response
-        return json(status, {
+        return json(event, status, {
             error: status === 400 ? "Bad Request" : status === 401 ? "Unauthorized" : status === 404 ? "Not Found" : status === 429 ? "Too Many Requests" : "Internal Server Error",
             statusCode: status,
             message: message,

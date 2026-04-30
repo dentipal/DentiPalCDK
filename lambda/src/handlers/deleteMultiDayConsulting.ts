@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Configuration and Initialization ---
 const REGION = process.env.REGION || "us-east-1";
@@ -25,9 +25,9 @@ const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
 
 // --- Helpers ---
 
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
-    headers: CORS_HEADERS,
+    headers: corsHeaders(event),
     body: JSON.stringify(bodyObj)
 });
 
@@ -36,16 +36,15 @@ const normalizeGroup = (g: string) => g.toLowerCase().replace(/[^a-z0-9]/g, "");
 // --- Lambda Handler ---
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-    setOriginFromEvent(event);
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
     // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
-        return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+        return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     if (method !== 'DELETE') {
-        return json(405, { error: "Method not allowed" });
+        return json(event, 405, { error: "Method not allowed" });
     }
 
     try {
@@ -59,7 +58,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             userSub = userInfo.sub;
             userGroups = userInfo.groups || [];
         } catch (authError: any) {
-            return json(401, { 
+            return json(event, 401, { 
                 error: "Unauthorized", 
                 message: authError.message || "Invalid access token" 
             });
@@ -70,7 +69,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const isAllowed = normalizedGroups.some(g => ALLOWED_GROUPS.has(g));
 
         if (!isAllowed) {
-            return json(403, {
+            return json(event, 403, {
                 error: "Forbidden",
                 message: "Access denied",
                 details: { requiredGroups: Array.from(ALLOWED_GROUPS), userGroups }
@@ -83,7 +82,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobId = event.pathParameters?.jobId || pathParts[pathParts.length - 1]; 
         
         if (!jobId) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Job ID is required",
                 details: { pathFormat: "/jobs/multi_day_consulting/{jobId}" }
@@ -101,7 +100,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const jobResponse = await ddbDoc.send(getJobCommand);
 
         if (!jobResponse.Item) {
-            return json(404, {
+            return json(event, 404, {
                 error: "Not Found",
                 message: "Multi-day consulting job not found",
                 details: { jobId }
@@ -112,7 +111,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 6. Ensure it's a multi_day_consulting job
         if (job.job_type !== MULTI_DAY_JOB_TYPE) {
-            return json(400, {
+            return json(event, 400, {
                 error: "Bad Request",
                 message: "Invalid job type for this operation",
                 details: { expected: MULTI_DAY_JOB_TYPE, received: job.job_type }
@@ -180,7 +179,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         await ddbDoc.send(deleteJobCommand);
 
         // 10. Return success
-        return json(200, {
+        return json(event, 200, {
             status: "success",
             message: "Multi-day consulting job deleted successfully",
             data: {
@@ -197,7 +196,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const err = error as Error;
         console.error("Error deleting multi-day consulting job:", err);
         
-        return json(500, {
+        return json(event, 500, {
             error: "Internal Server Error",
             message: "Failed to delete multi-day consulting job",
             details: { reason: err.message }

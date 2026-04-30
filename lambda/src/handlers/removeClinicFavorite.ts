@@ -11,7 +11,7 @@ import {
 // ✅ UPDATE: Added extractUserFromBearerToken
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
-import { CORS_HEADERS, setOriginFromEvent } from "./corsHeaders";
+import { corsHeaders } from "./corsHeaders";
 
 // --- Constants and Initialization ---
 
@@ -23,19 +23,18 @@ const clientConfig: DynamoDBClientConfig = { region: REGION };
 const dynamodb = new DynamoDBClient(clientConfig);
 
 // Helper to build JSON responses with shared CORS
-const json = (statusCode: number, bodyObj: object): APIGatewayProxyStructuredResultV2 => ({
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyStructuredResultV2 => ({
   statusCode,
-  headers: CORS_HEADERS,
+  headers: corsHeaders(event),
   body: JSON.stringify(bodyObj)
 });
 
 // --- Main Handler Function ---
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> => {
-    setOriginFromEvent(event);
 
   // Check for Preflight OPTIONS request
   if (event.requestContext?.http?.method === "OPTIONS") {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 200, headers: corsHeaders(event), body: "" };
   }
 
   try {
@@ -60,7 +59,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     const professionalUserSub: string | undefined = pathParts[pathParts.length - 1];
 
     if (!professionalUserSub) {
-      return json(400, {
+      return json(event, 400, {
         error: "professionalUserSub is required in the path (e.g., /favorites/user-id-123)"
       });
     }
@@ -75,7 +74,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     }));
 
     if (!existingFavorite.Item) {
-      return json(404, {
+      return json(event, 404, {
         error: `Professional with ID ${professionalUserSub} not found in favorites for user ${userSub}`
       });
     }
@@ -90,7 +89,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     }));
 
     // 5. Success Response
-    return json(200, {
+    return json(event, 200, {
       message: "Professional removed from favorites successfully",
       clinicUserSub: userSub,
       professionalUserSub: professionalUserSub,
@@ -107,7 +106,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
         error.message === "Failed to decode access token" ||
         error.message === "User sub not found in token claims") {
         
-        return json(401, {
+        return json(event, 401, {
             error: "Unauthorized",
             details: error.message
         });
@@ -117,6 +116,6 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     const errorMessage: string = error.message || "An unknown error occurred";
 
     // 6. Error Response
-    return json(500, { error: errorMessage });
+    return json(event, 500, { error: errorMessage });
   }
 };
