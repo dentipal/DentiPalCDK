@@ -327,9 +327,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        // Validate pay type if provided
+        // Validate pay type if provided (not used for permanent jobs)
         const VALID_PAY_TYPES = ['per_hour', 'per_transaction', 'percentage_of_revenue'];
-        if (jobData.pay_type && !VALID_PAY_TYPES.includes(jobData.pay_type)) {
+        if (jobData.job_type !== "permanent" && jobData.pay_type && !VALID_PAY_TYPES.includes(jobData.pay_type)) {
             return json(400, {
                 error: "Bad Request",
                 message: "Invalid pay type",
@@ -338,7 +338,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // per_transaction is not allowed for doctor roles
-        if (jobData.pay_type === 'per_transaction' && professionalRoles.some(r => isDoctorRole(r))) {
+        if (jobData.job_type !== "permanent" && jobData.pay_type === 'per_transaction' && professionalRoles.some(r => isDoctorRole(r))) {
             return json(400, {
                 error: "Bad Request",
                 message: "Per-transaction pay type is not available for doctor roles",
@@ -463,10 +463,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     parkingType: profileData.parkingType,
                     practiceType: profileData.practiceType,
                     primaryPracticeArea: profileData.primaryPracticeArea,
-                    // Work location & pay
+                    // Work location & pay (pay_type / rate are not used for permanent jobs)
                     ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
-                    ...(jobData.pay_type && { pay_type: jobData.pay_type }),
-                    ...(jobData.rate !== undefined && { rate: jobData.rate }),
+                    ...(jobData.job_type !== "permanent" && jobData.pay_type && { pay_type: jobData.pay_type }),
+                    ...(jobData.job_type !== "permanent" && jobData.rate !== undefined && { rate: jobData.rate }),
                 };
 
                 // Optional common fields

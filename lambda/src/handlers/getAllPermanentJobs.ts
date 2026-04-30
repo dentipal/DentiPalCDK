@@ -85,7 +85,6 @@ interface JobResponseItem {
     jobTitle: string;
     description: string;
     requirements: string[];
-    payType: string;
     startDate: string;
     shiftSpeciality: string;
     SoftwareRequired: string;
@@ -261,7 +260,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 jobTitle: job.job_title?.S || `${job.professional_role?.S || 'Professional'} Permanent Position`,
                 description: job.job_description?.S || '',
                 requirements: getSS(job.requirements),
-                payType: job.work_schedule?.S || '',
                 startDate: job.start_date?.S || '',
                 shiftSpeciality: job.shift_speciality?.S || "",
                 SoftwareRequired: job.clinicSoftware?.S || "",
