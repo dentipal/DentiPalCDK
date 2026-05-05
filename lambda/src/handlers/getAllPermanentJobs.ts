@@ -85,7 +85,6 @@ interface JobResponseItem {
     jobTitle: string;
     description: string;
     requirements: string[];
-    payType: string;
     startDate: string;
     shiftSpeciality: string;
     SoftwareRequired: string;
@@ -153,16 +152,21 @@ async function getAppliedJobIdsForUser(userSub: string): Promise<Set<string>> {
             TableName: table,
             IndexName: index,
             KeyConditionExpression: "professionalUserSub = :sub",
-            ProjectionExpression: "jobId",
+            ProjectionExpression: "jobId, applicationStatus",
             ExpressionAttributeValues: { ":sub": { S: userSub } },
             ExclusiveStartKey,
         };
-        
+
         const resp: QueryCommandOutput = await dynamodb.send(new QueryCommand(queryInput));
-        
-        // Extract jobId strings from items
-        (resp.Items || []).forEach(it => it.jobId?.S && ids.add(it.jobId.S!));
-        
+
+        // Rejected applications must not exclude the job — the clinic may invite
+        // the pro back, and the job has to be applyable again.
+        (resp.Items || []).forEach(it => {
+            const status = String(it.applicationStatus?.S || "").toLowerCase();
+            if (status === "rejected") return;
+            if (it.jobId?.S) ids.add(it.jobId.S);
+        });
+
         ExclusiveStartKey = resp.LastEvaluatedKey;
     } while (ExclusiveStartKey);
 
@@ -260,7 +264,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 jobTitle: job.job_title?.S || `${job.professional_role?.S || 'Professional'} Permanent Position`,
                 description: job.job_description?.S || '',
                 requirements: getSS(job.requirements),
-                payType: job.work_schedule?.S || '',
                 startDate: job.start_date?.S || '',
                 shiftSpeciality: job.shift_speciality?.S || "",
                 SoftwareRequired: job.clinicSoftware?.S || "",

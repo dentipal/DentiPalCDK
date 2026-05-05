@@ -67,44 +67,12 @@ const DEFAULT_HISTORY_PAGE = 50;
 const MAX_HISTORY_PAGE = 200;
 
 // Cognito lookup concurrency when hydrating conversation rows.
-// Cognito's per-user-pool TPS for AdminGetUser is low; keeping this conservative
-// avoids correlated 429s during chat bursts.
+// Cognito's per-pool TPS for AdminGetUser is low; keep this small so a burst of
+// chats doesn't trip ThrottlingException across the whole batch.
 const COGNITO_CONCURRENCY = 3;
-
-// Retry policy for AdminGetUser. Only retry on transient/throttle errors —
-// permanent errors (UserNotFoundException etc.) are not retried.
 const COGNITO_RETRY_ATTEMPTS = 3;
 const COGNITO_RETRY_BASE_MS = 200;
-const RETRYABLE_COGNITO_ERRORS = new Set([
-    "TooManyRequestsException",
-    "ThrottlingException",
-    "LimitExceededException",
-    "ServiceUnavailableException",
-    "InternalErrorException",
-]);
-
-function isRetryableCognitoError(err: unknown): boolean {
-    const name = (err as { name?: string })?.name;
-    return !!name && RETRYABLE_COGNITO_ERRORS.has(name);
-}
-
-async function retryCognito<T>(fn: () => Promise<T>): Promise<T> {
-    let lastErr: unknown;
-    for (let attempt = 0; attempt < COGNITO_RETRY_ATTEMPTS; attempt++) {
-        try {
-            return await fn();
-        } catch (err) {
-            lastErr = err;
-            if (!isRetryableCognitoError(err) || attempt === COGNITO_RETRY_ATTEMPTS - 1) {
-                throw err;
-            }
-            const jitter = Math.random() * 100;
-            const delay = COGNITO_RETRY_BASE_MS * Math.pow(2, attempt) + jitter;
-            await new Promise((r) => setTimeout(r, delay));
-        }
-    }
-    throw lastErr;
-}
+const NAME_CACHE_FAILURE_TTL_MS = 60 * 1000; // 1 minute — don't pin transient throttles for 30 min
 
 // Cognito JWT verifier (signature + exp + iss + token_use). Shared, reused across invocations.
 // Note: clientId=null accepts any app client in this user pool. If you later want to pin
@@ -119,12 +87,12 @@ const accessVerifier = CognitoJwtVerifier.create({
 // Entries expire after NAME_CACHE_TTL_MS and we trim to MAX_NAME_CACHE_ENTRIES.
 const NAME_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_NAME_CACHE_ENTRIES = 500;
-const nameCache = new Map<string, { value: string; cachedAt: number }>();
+const nameCache = new Map<string, { value: string; cachedAt: number; ttlMs: number }>();
 
 function getNameFromCache(key: string): string | undefined {
     const hit = nameCache.get(key);
     if (!hit) return undefined;
-    if (Date.now() - hit.cachedAt > NAME_CACHE_TTL_MS) {
+    if (Date.now() - hit.cachedAt > hit.ttlMs) {
         nameCache.delete(key);
         return undefined;
     }
@@ -134,9 +102,9 @@ function getNameFromCache(key: string): string | undefined {
     return hit.value;
 }
 
-function setNameInCache(key: string, value: string): void {
+function setNameInCache(key: string, value: string, ttlMs: number = NAME_CACHE_TTL_MS): void {
     if (nameCache.has(key)) nameCache.delete(key);
-    nameCache.set(key, { value, cachedAt: Date.now() });
+    nameCache.set(key, { value, cachedAt: Date.now(), ttlMs });
     while (nameCache.size > MAX_NAME_CACHE_ENTRIES) {
         const firstKey = nameCache.keys().next().value as string | undefined;
         if (!firstKey) break;
@@ -248,6 +216,32 @@ function displayFromTokenPayload(payload: any): string {
     return gn || nm || (em && em.split("@")[0]) || "";
 }
 
+// Retry an AWS SDK call with exponential backoff + jitter on throttling errors.
+// Non-throttling errors (e.g. UserNotFound) bypass retry and propagate immediately.
+const COGNITO_RETRYABLE = new Set([
+    "ThrottlingException",
+    "TooManyRequestsException",
+    "InternalErrorException",
+    "ServiceUnavailableException",
+]);
+
+async function retryWithBackoff<T>(fn: () => Promise<T>, attempts: number, baseMs: number): Promise<T> {
+    let lastErr: any;
+    for (let i = 0; i < attempts; i++) {
+        try {
+            return await fn();
+        } catch (e: any) {
+            lastErr = e;
+            const name = e?.name || e?.Code;
+            if (!COGNITO_RETRYABLE.has(name) || i === attempts - 1) throw e;
+            const expo = baseMs * Math.pow(2, i);
+            const jitter = expo * (0.5 + Math.random()); // ±50%
+            await new Promise((r) => setTimeout(r, jitter));
+        }
+    }
+    throw lastErr;
+}
+
 // Get human name for a professional from Cognito (cached with TTL + LRU)
 async function getCognitoNameBySub(sub: string): Promise<string> {
     const cacheKey = `prof#${sub}`;
@@ -255,13 +249,15 @@ async function getCognitoNameBySub(sub: string): Promise<string> {
     if (cached !== undefined) return cached;
 
     try {
-        const out = await retryCognito(() =>
-            cognitoIdp.send(
+        const out = await retryWithBackoff(
+            () => cognitoIdp.send(
                 new AdminGetUserCommand({
                     UserPoolId: USER_POOL_ID,
                     Username: sub,
                 })
-            )
+            ),
+            COGNITO_RETRY_ATTEMPTS,
+            COGNITO_RETRY_BASE_MS,
         );
         const given = pickAttr(out.UserAttributes, "given_name");
         const fullname = pickAttr(out.UserAttributes, "name");
@@ -280,7 +276,8 @@ async function getCognitoNameBySub(sub: string): Promise<string> {
     } catch (e) {
         console.error("getCognitoNameBySub failed", { sub, error: (e as Error).message });
         const fallback = `User ${String(sub).slice(0, 6)}`;
-        setNameInCache(cacheKey, fallback);
+        // Short TTL on failure so a transient throttle doesn't pin a fallback name for 30 min.
+        setNameInCache(cacheKey, fallback, NAME_CACHE_FAILURE_TTL_MS);
         return fallback;
     }
 }

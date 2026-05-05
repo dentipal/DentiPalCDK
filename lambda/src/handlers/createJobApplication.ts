@@ -29,6 +29,8 @@ interface ApplyJobBody {
     jobId?: string; // Can be in body or path
     message?: string;
     proposedRate?: number;
+    proposedSalaryMin?: number;
+    proposedSalaryMax?: number;
     availability?: string;
     startDate?: string;
     notes?: string;
@@ -118,6 +120,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // 6. Check for Duplicate Application
+        // A "rejected" application does NOT block re-application: if the clinic
+        // rejected the pro and later invited them back, the stale rejected record
+        // must not stand in the way. The PutCommand below will overwrite it.
         const existingAppsResponse = await ddbDoc.send(new QueryCommand({
             TableName: APPLICATIONS_TABLE,
             KeyConditionExpression: "jobId = :jobId AND professionalUserSub = :userSub",
@@ -127,10 +132,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }));
 
-        if (existingAppsResponse.Items && existingAppsResponse.Items.length > 0) {
-            return json(event, 409, { 
-                error: "Conflict", 
-                message: "Duplicate application", 
+        const blockingApp = existingAppsResponse.Items?.find(
+            (item) => String(item.applicationStatus || "").toLowerCase() !== "rejected"
+        );
+
+        if (blockingApp) {
+            return json(409, {
+                error: "Conflict",
+                message: "Duplicate application",
                 details: { reason: "You have already applied to this job", jobId }
             });
         }
@@ -139,30 +148,48 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const applicationId = uuidv4();
         const timestamp = new Date().toISOString();
         const hasProposedRate = applicationData.proposedRate !== undefined && applicationData.proposedRate !== null;
+        const hasSalaryRange =
+            applicationData.proposedSalaryMin !== undefined && applicationData.proposedSalaryMin !== null &&
+            applicationData.proposedSalaryMax !== undefined && applicationData.proposedSalaryMax !== null;
+
+        if (hasSalaryRange) {
+            const minNum = Number(applicationData.proposedSalaryMin);
+            const maxNum = Number(applicationData.proposedSalaryMax);
+            if (!Number.isFinite(minNum) || !Number.isFinite(maxNum) || minNum <= 0 || maxNum <= 0) {
+                return json(400, { error: "Bad Request", message: "Invalid salary range values" });
+            }
+            if (minNum > maxNum) {
+                return json(400, { error: "Bad Request", message: "Minimum salary cannot exceed maximum salary" });
+            }
+        }
+
+        const isNegotiating = hasProposedRate || hasSalaryRange;
 
         const applicationItem: Record<string, any> = {
             jobId: jobId,               // Partition Key
             professionalUserSub: userSub, // Sort Key
             applicationId: applicationId,
             clinicId: clinicIdFromJob,
-            // Status logic: 'negotiating' if rate proposed, else 'pending'
-            applicationStatus: hasProposedRate ? "negotiating" : "pending",
+            // Status logic: 'negotiating' if rate or salary range proposed, else 'pending'
+            applicationStatus: isNegotiating ? "negotiating" : "pending",
             appliedAt: timestamp,
             updatedAt: timestamp,
-            
+
             // Optional Fields
             applicationMessage: applicationData.message || null,
             availability: applicationData.availability || null,
             startDate: applicationData.startDate || null,
             notes: applicationData.notes || null,
             proposedRate: hasProposedRate ? Number(applicationData.proposedRate) : null,
+            proposedSalaryMin: hasSalaryRange ? Number(applicationData.proposedSalaryMin) : null,
+            proposedSalaryMax: hasSalaryRange ? Number(applicationData.proposedSalaryMax) : null,
             negotiationId: null
         };
 
         let negotiationId: string | undefined;
-        
+
         // 8. Handle Negotiation Logic
-        if (hasProposedRate) {
+        if (isNegotiating) {
             negotiationId = uuidv4();
             applicationItem.negotiationId = negotiationId;
 
@@ -176,12 +203,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 professionalUserSub: userSub,
                 clinicId: clinicIdFromJob,
                 negotiationStatus: 'pending',
-                proposedRate: Number(applicationData.proposedRate),
                 payType: jobPayType,
                 createdAt: timestamp,
                 updatedAt: timestamp,
                 message: applicationData.message || 'Negotiation initiated by professional during application'
             };
+
+            if (hasProposedRate) {
+                negotiationItem.proposedRate = Number(applicationData.proposedRate);
+            }
+            if (hasSalaryRange) {
+                negotiationItem.proposedSalaryMin = Number(applicationData.proposedSalaryMin);
+                negotiationItem.proposedSalaryMax = Number(applicationData.proposedSalaryMax);
+            }
 
             // Save Negotiation
             await ddbDoc.send(new PutCommand({
@@ -251,7 +285,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             data: {
                 applicationId,
                 jobId,
-                applicationStatus: hasProposedRate ? "negotiating" : "pending",
+                applicationStatus: isNegotiating ? "negotiating" : "pending",
                 appliedAt: timestamp,
                 job: jobInfo,
                 clinic: clinicInfo
