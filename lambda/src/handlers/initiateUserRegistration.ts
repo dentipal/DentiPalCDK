@@ -40,7 +40,6 @@ interface RegistrationData {
   userType: string;
   password: string;
   role?: string;
-  clinicName?: string;
   phoneNumber?: string;
   referrerUserSub?: string;
 }
@@ -123,9 +122,7 @@ export const handler = async (
       { Name: "family_name", Value: familyName },
       {
         Name: "address",
-        Value: `userType:${registrationData.userType}|role:${registrationData.role || "none"}|clinic:${
-          registrationData.clinicName || "none"
-        }`,
+        Value: `userType:${registrationData.userType}|role:${registrationData.role || "none"}`,
       },
     ];
 

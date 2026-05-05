@@ -1,7 +1,6 @@
 import {
     DynamoDBClient,
     GetItemCommand,
-    GetItemCommandInput,
     GetItemCommandOutput,
     ScanCommand,
     ScanCommandInput,
@@ -12,7 +11,6 @@ import { APIGatewayProxyEvent } from "aws-lambda";
 // --- 1. AWS Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
 const dynamoClient: DynamoDBClient = new DynamoDBClient({ region: REGION });
-const USER_CLINIC_ASSIGNMENTS_TABLE: string = process.env.USER_CLINIC_ASSIGNMENTS_TABLE!;
 const CLINICS_TABLE: string = process.env.CLINICS_TABLE!;
 
 // --- 2. Type Definitions ---
@@ -50,13 +48,6 @@ export type ClinicWriteAction =
     | "manageApplicants" // accept / reject / negotiate applications
     | "manageClinic"     // edit clinic profile, settings
     | "manageUsers";     // add / remove / update clinic users
-
-/**
- * @deprecated Legacy access level used by hasClinicAccess() against UserClinicAssignments.
- * The Add User flow does not populate UserClinicAssignments, so these labels are effectively dead.
- * New code should use ClinicRole + canAccessClinic / canWriteClinic.
- */
-export type AccessLevel = "ClinicAdmin" | "Doctor" | "Receptionist";
 
 // --- 3. Exported Utility Functions ---
 
@@ -219,41 +210,6 @@ export const listAccessibleClinicIds = async (
     return clinicIds;
 };
 
-/**
- * @deprecated Reads the UserClinicAssignments table, which is not populated by the Add User flow.
- * New code should use `canAccessClinic` (reads) or `canWriteClinic` (writes) instead.
- * Retained as a thin legacy helper so any existing callers keep compiling.
- */
-export const hasClinicAccess = async (userSub: string, clinicId: string, requiredAccess: AccessLevel | null = null): Promise<boolean> => {
-    const command: GetItemCommandInput = {
-        TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
-        Key: {
-            userSub: { S: userSub },
-            clinicId: { S: clinicId }
-        },
-        ProjectionExpression: requiredAccess ? "accessLevel" : undefined
-    };
-
-    try {
-        const response: GetItemCommandOutput = await dynamoClient.send(new GetItemCommand(command));
-
-        if (!response.Item) {
-            return false;
-        }
-
-        if (!requiredAccess) {
-            return true; // Item exists, access granted
-        }
-
-        const accessLevel: string | undefined = response.Item.accessLevel?.S;
-        return accessLevel === requiredAccess;
-    } catch (error) {
-        console.error("Error checking clinic access:", error);
-        return false;
-    }
-};
-
-
 export const validateToken = (event: APIGatewayProxyEvent): string => {
     // Cast to any to handle both REST Authorizer structure and HTTP API JWT structure
     const authorizer = (event.requestContext as any).authorizer;
@@ -314,12 +270,21 @@ export const verifyToken = async (event: APIGatewayProxyEvent): Promise<UserInfo
         ? groupsClaim
         : [];
         
+    const userType: string = claims['custom:user_type']
+        || parseUserTypeFromAddress(claims.address)
+        || deriveUserTypeFromGroups(groups);
+
+    if (!userType) {
+        throw new Error(
+            `userType could not be derived for sub=${claims.sub}: ` +
+            `custom:user_type missing, address has no userType marker, and no clinic-role groups present. ` +
+            `Run the Cognito user_type backfill.`
+        );
+    }
+
     return {
         sub: claims.sub,
-        userType: claims['custom:user_type']
-            || parseUserTypeFromAddress(claims.address)
-            || deriveUserTypeFromGroups(groups)
-            || 'professional',
+        userType,
         email: claims.email,
         groups: groups,
     };
@@ -424,12 +389,22 @@ export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo
     console.log('>>> extractUserInfoFromClaims - Final groups array:', JSON.stringify(groups));
     console.log('>>> extractUserInfoFromClaims - Final groups count:', groups.length);
     
+    const userType: string = claims['custom:user_type']
+        || parseUserTypeFromAddress(claims.address)
+        || deriveUserTypeFromGroups(groups);
+
+    if (!userType) {
+        console.log('>>> extractUserInfoFromClaims - ERROR: userType could not be derived');
+        throw new Error(
+            `userType could not be derived for sub=${claims.sub}: ` +
+            `custom:user_type missing, address has no userType marker, and no clinic-role groups present. ` +
+            `Run the Cognito user_type backfill.`
+        );
+    }
+
     const userInfo: UserInfo = {
         sub: claims.sub,
-        userType: claims['custom:user_type']
-            || parseUserTypeFromAddress(claims.address)
-            || deriveUserTypeFromGroups(groups)
-            || 'professional',
+        userType,
         email: claims.email,
         groups,
     };
