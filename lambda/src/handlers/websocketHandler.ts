@@ -352,6 +352,35 @@ async function hasClinicAccess(userSub: string, clinicId: string): Promise<boole
     return allowed;
 }
 
+// Returns every Cognito sub associated with a clinic (admins, managers, etc.)
+// Used by pro→clinic fan-out so multi-clinic users still receive realtime
+// messages even when their connection-time `clinicId` differs from the
+// conversation's `clinicId`. Reads `Clinics.AssociatedUsers` (Set or List)
+// plus `createdBy` (Root/owner). Failures return an empty list — the
+// canonical `clinic#${clinicId}` lookup still runs as a baseline.
+async function getClinicMemberSubs(clinicId: string): Promise<string[]> {
+    if (!clinicId) return [];
+    const subs = new Set<string>();
+    try {
+        const clinicRow = await ddb.send(new GetItemCommand({
+            TableName: CLINICS_TABLE,
+            Key: { clinicId: { S: clinicId } },
+            ProjectionExpression: "AssociatedUsers, createdBy",
+        }));
+        const associated = clinicRow.Item?.AssociatedUsers;
+        if (associated?.SS) associated.SS.forEach((s) => subs.add(s));
+        else if (associated?.L) associated.L.forEach((x) => x.S && subs.add(x.S));
+        const createdBy = clinicRow.Item?.createdBy?.S;
+        if (createdBy) subs.add(createdBy);
+    } catch (e) {
+        console.warn("[ws] getClinicMemberSubs failed", {
+            clinicId,
+            error: (e as Error).message,
+        });
+    }
+    return Array.from(subs);
+}
+
 // Resolve a batch of professional sub → display name with bounded concurrency.
 // Replaces the sequential await-per-row pattern in onGetConversations.
 async function getCognitoNamesBySubs(subs: string[]): Promise<Record<string, string>> {
@@ -714,6 +743,23 @@ async function onConnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayP
         claims.sub || "",
         claims.email || ""
     );
+
+    // Clinic users register under TWO keys: the canonical `clinic#${clinicId}`
+    // (above) AND `user#${sub}`. The second row lets pro→clinic fan-out find
+    // the connection by Cognito sub even when the user's connection-time
+    // `clinicId` differs from the conversation's `clinicId` (multi-clinic
+    // admin case). $disconnect already deletes ALL rows for a given
+    // connectionId via the connectionId-index, so cleanup is automatic.
+    if (claims.userType === "Clinic" && claims.sub) {
+        await putConnection(
+            `user#${claims.sub}`,
+            connectionId,
+            claims.userType,
+            claims.name || claims.email || "",
+            claims.sub,
+            claims.email || ""
+        );
+    }
 
     console.log("[ws] $connect OK", {
         connectionId,
@@ -1503,10 +1549,29 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
         const senderConnKey = isSenderClinic ? `clinic#${clinicId}` : `prof#${professionalSub}`;
         const currentConnectionId = event.requestContext.connectionId;
 
-        const [recipientConnections, senderConnections] = await Promise.all([
+        const [primaryRecipientConns, senderConnections] = await Promise.all([
             getConnections(recipientKey),
             getConnections(senderConnKey),
         ]);
+
+        // Pro → Clinic widening: a clinic user may have connected with a
+        // different clinicId than this conversation's, so the canonical
+        // `clinic#${clinicId}` lookup can return zero connections even though
+        // the recipient is online. Fan out to every clinic member's
+        // `user#${sub}` row as well, then dedupe. Clinic → Pro is unaffected
+        // (prof's key is stable per user).
+        let recipientConnections: string[] = primaryRecipientConns;
+        if (!isSenderClinic) {
+            const memberSubs = await getClinicMemberSubs(clinicId);
+            if (memberSubs.length) {
+                const memberConnLists = await Promise.all(
+                    memberSubs.map((sub) => getConnections(`user#${sub}`))
+                );
+                recipientConnections = Array.from(
+                    new Set([...primaryRecipientConns, ...memberConnLists.flat()])
+                );
+            }
+        }
 
         const connClient = wsClientFromEvent(event);
 
