@@ -156,10 +156,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const minNum = Number(applicationData.proposedSalaryMin);
             const maxNum = Number(applicationData.proposedSalaryMax);
             if (!Number.isFinite(minNum) || !Number.isFinite(maxNum) || minNum <= 0 || maxNum <= 0) {
-                return json(400, { error: "Bad Request", message: "Invalid salary range values" });
+                return json(event, 400, { error: "Bad Request", message: "Invalid salary range values" });
             }
             if (minNum > maxNum) {
-                return json(400, { error: "Bad Request", message: "Minimum salary cannot exceed maximum salary" });
+                return json(event, 400, { error: "Bad Request", message: "Minimum salary cannot exceed maximum salary" });
             }
         }
 
