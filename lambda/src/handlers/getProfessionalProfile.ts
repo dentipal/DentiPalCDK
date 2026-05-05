@@ -8,6 +8,7 @@ import {
   QueryCommand,
   QueryCommandInput,
 } from "@aws-sdk/client-dynamodb";
+import { unmarshall } from "@aws-sdk/util-dynamodb";
 
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
@@ -66,23 +67,7 @@ export const handler = async (
 
     const result = await dynamodb.send(new QueryCommand(commandInput));
 
-    const profiles =
-      result.Items?.map((item) => {
-        const profile: Record<string, any> = {};
-
-        Object.entries(item).forEach(([key, value]) => {
-          if ("S" in value && value.S !== undefined)
-            profile[key] = value.S;
-          else if ("N" in value && value.N !== undefined)
-            profile[key] = Number(value.N);
-          else if ("BOOL" in value && value.BOOL !== undefined)
-            profile[key] = value.BOOL;
-          else if ("SS" in value && value.SS !== undefined)
-            profile[key] = value.SS;
-        });
-
-        return profile;
-      }) || [];
+    const profiles = result.Items?.map((item) => unmarshall(item)) || [];
 
     return json(event, 200, {
       status: "success",

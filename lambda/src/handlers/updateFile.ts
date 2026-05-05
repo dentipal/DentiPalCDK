@@ -81,7 +81,13 @@ const updateFileForType = async (event: APIGatewayProxyEvent, fileType: string):
                 expressionAttributeValues = { ":key": [body.objectKey], ":empty_list": [], ":ts": now };
                 break;
             case "video-resume":
-                updateExpression = "SET videoResumeKey = :key, updatedAt = :ts";
+                // Write to `introVideoKey` (singular). This is the same column
+                // updateProfessionalProfile.ts validates (FIELD_VALIDATORS map)
+                // AND the first column useProfileQuery reads on the frontend.
+                // The earlier `videoResumeKey` name was a column nobody read,
+                // so successful uploads were invisible after refresh and the
+                // user saw a stale key from an older flow → 404 on GET.
+                updateExpression = "SET introVideoKey = :key, updatedAt = :ts";
                 expressionAttributeValues = { ":key": body.objectKey, ":ts": now };
                 break;
             default:

@@ -137,7 +137,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         );
 
         if (blockingApp) {
-            return json(409, {
+            return json(event, 409, {
                 error: "Conflict",
                 message: "Duplicate application",
                 details: { reason: "You have already applied to this job", jobId }

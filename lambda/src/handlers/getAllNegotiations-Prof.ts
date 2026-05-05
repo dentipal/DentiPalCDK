@@ -45,6 +45,9 @@ interface EnrichedNegotiation {
     professionalUserSub: string;
     negotiationStatus: string;
     clinicResponse: string;
+    professionalResponse: string;
+    clinicRespondedAt: string;
+    professionalRespondedAt: string;
     proposedRate: number | null;
     clinicCounterRate: number | null;
     professionalCounterRate: number | null;
@@ -172,7 +175,7 @@ async function fetchAllForProfessional(professionalUserSub: string, statusFilter
  * @returns The enriched negotiation object.
  */
 async function enrichWithClinicAndJob(neg: DynamoDBNegotiationItem): Promise<EnrichedNegotiation> {
-    const negotiation: Partial<EnrichedNegotiation> & Pick<EnrichedNegotiation, 'negotiationId' | 'applicationId' | 'jobId' | 'clinicId' | 'professionalUserSub' | 'negotiationStatus' | 'clinicResponse' | 'message' | 'createdAt' | 'updatedAt'> = {
+    const negotiation: Partial<EnrichedNegotiation> & Pick<EnrichedNegotiation, 'negotiationId' | 'applicationId' | 'jobId' | 'clinicId' | 'professionalUserSub' | 'negotiationStatus' | 'clinicResponse' | 'professionalResponse' | 'clinicRespondedAt' | 'professionalRespondedAt' | 'message' | 'createdAt' | 'updatedAt'> = {
         negotiationId: neg.negotiationId?.S || "",
         applicationId: neg.applicationId?.S || "",
         jobId: neg.jobId?.S || "",
@@ -180,6 +183,9 @@ async function enrichWithClinicAndJob(neg: DynamoDBNegotiationItem): Promise<Enr
         professionalUserSub: neg.professionalUserSub?.S || "",
         negotiationStatus: neg.negotiationStatus?.S || "",
         clinicResponse: neg.clinicResponse?.S || "",
+        professionalResponse: (neg as any).professionalResponse?.S || "",
+        clinicRespondedAt: (neg as any).clinicRespondedAt?.S || "",
+        professionalRespondedAt: (neg as any).professionalRespondedAt?.S || "",
         proposedRate: parseFloat((neg.proposedRate?.N ?? neg.proposedHourlyRate?.N) || "") || null,
         clinicCounterRate: parseFloat((neg.clinicCounterRate?.N ?? (neg as any).clinicCounterHourlyRate?.N) || "") || null,
         professionalCounterRate: parseFloat((neg.professionalCounterRate?.N ?? (neg as any).professionalCounterHourlyRate?.N) || "") || null,

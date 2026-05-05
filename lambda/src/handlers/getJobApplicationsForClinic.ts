@@ -309,6 +309,8 @@
                 negotiationStatus: rawNeg.negotiationStatus?.S || null,
                 clinicResponse: rawNeg.clinicResponse?.S || null,
                 professionalResponse: rawNeg.professionalResponse?.S || null,
+                clinicRespondedAt: rawNeg.clinicRespondedAt?.S || null,
+                professionalRespondedAt: rawNeg.professionalRespondedAt?.S || null,
                 clinicCounterRate: parseFloat((rawNeg.clinicCounterRate?.N ?? rawNeg.clinicCounterHourlyRate?.N) || "") || null,
                 professionalCounterRate: parseFloat((rawNeg.professionalCounterRate?.N ?? rawNeg.professionalCounterHourlyRate?.N) || "") || null,
                 proposedRate: parseFloat((rawNeg.proposedRate?.N ?? rawNeg.proposedHourlyRate?.N) || "") || null,
