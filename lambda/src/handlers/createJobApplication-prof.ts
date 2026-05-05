@@ -129,7 +129,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }));
 
         if (existingAppsResponse.Items && existingAppsResponse.Items.length > 0) {
-            return json(409, { error: "You have already applied to this job" });
+            return json(event, 409, { error: "You have already applied to this job" });
         }
 
         // 7. Create Application

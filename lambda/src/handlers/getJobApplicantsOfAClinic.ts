@@ -223,6 +223,13 @@ function formatNegotiation(item: any) {
     clinic: clinicField,
     updatedAt: item?.updatedAt ?? null,
     createdAt: item?.createdAt ?? null,
+    // Per-actor response timestamps — let the UI tell who acted last (clinic vs professional)
+    // when both sides have countered. Without these, the badge can't switch between
+    // "Negotiating" (their turn) and "Waiting for …" (our turn) past the first round.
+    clinicRespondedAt: item?.clinicRespondedAt ?? null,
+    professionalRespondedAt: item?.professionalRespondedAt ?? null,
+    clinicResponse: item?.clinicResponse ?? null,
+    professionalResponse: item?.professionalResponse ?? null,
   };
 }
 
