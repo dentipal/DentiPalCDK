@@ -147,6 +147,23 @@ import { handler as cancelPromotionHandler } from "./handlers/cancelPromotion";
 import { handler as activatePromotionHandler } from "./handlers/activatePromotion";
 import { handler as trackPromotionClickHandler } from "./handlers/trackPromotionClick";
 
+import { corsHeaders } from "./handlers/corsHeaders";
+
+// Inline handler — the frontend calls GET /jobs/user-clinics from useHeaderData,
+// but the backend has no implementation. Without an explicit route, the request
+// pattern-matched /jobs/{jobId} and crashed inside getJobPostingHandler with
+// "user-clinics" as a fake jobId, returning 500. Returning a clean 404 here
+// preserves frontend behavior (it already treats any !res.ok as failure and
+// uses fallback data) while eliminating the CloudWatch 500 noise.
+const userClinicsJobsNotImplemented = async (event: any) => ({
+    statusCode: 404,
+    headers: corsHeaders(event),
+    body: JSON.stringify({
+        error: "Not Found",
+        message: "Endpoint /jobs/user-clinics is not implemented",
+    }),
+});
+
 // --- TYPE DEFINITIONS ---
 
 // FIX: Use 'any' for RouteHandler to prevent TypeScript errors when mixing
@@ -232,6 +249,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
 
         // Job postings routes - Generic endpoint
         "POST:/jobs": createJobPostingHandler,
+        // Reserve "/jobs/user-clinics" as an exact match BEFORE the {jobId}
+        // pattern so it doesn't accidentally route to getJobPostingHandler
+        // with "user-clinics" as a fake jobId (which previously caused 500s).
+        "GET:/jobs/user-clinics": userClinicsJobsNotImplemented,
         "GET:/jobs/{jobId}": getJobPostingHandler,
         "PUT:/jobs/{jobId}": updateJobPostingHandler,
         "DELETE:/jobs/{jobId}": deleteJobPostingHandler,
