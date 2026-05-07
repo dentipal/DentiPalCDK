@@ -42,6 +42,15 @@ export interface UserInfo {
 export const CLINIC_ROLES = ["root", "clinicadmin", "clinicmanager", "clinicviewer"] as const;
 export type ClinicRole = typeof CLINIC_ROLES[number];
 
+/**
+ * Internal-team Cognito group names (the /admin portal). Stored in canonical
+ * Pascal-case as Cognito has them; comparisons against JWT groups use a
+ * case-insensitive set below.
+ */
+export const INTERNAL_GROUPS = ["Admin", "Sales", "Marketing", "HR"] as const;
+export type InternalRole = typeof INTERNAL_GROUPS[number];
+const INTERNAL_GROUPS_LOWER = new Set(INTERNAL_GROUPS.map(g => g.toLowerCase()));
+
 /** Mutating actions that need a role gate. Read actions don't go through canWriteClinic. */
 export type ClinicWriteAction =
     | "manageJobs"       // create / edit / delete job postings, shifts
@@ -74,6 +83,37 @@ export const buildAddress = (parts: AddressParts): string => {
  */
 export const isRoot = (groups: string[] | undefined | null): boolean =>
     (groups ?? []).some(g => typeof g === "string" && g.toLowerCase() === "root");
+
+/**
+ * Case-insensitive: does this group list contain any internal-team group?
+ */
+export const isInternalUser = (groups: string[] | undefined | null): boolean =>
+    (groups ?? []).some(g => typeof g === "string" && INTERNAL_GROUPS_LOWER.has(g.toLowerCase()));
+
+/**
+ * Return the canonical-cased internal roles (Admin / Sales / Marketing / HR) the user holds.
+ * Compares case-insensitively against the JWT group claim.
+ */
+export const getInternalRoles = (groups: string[] | undefined | null): InternalRole[] => {
+    const present = new Set(
+        (groups ?? [])
+            .filter((g): g is string => typeof g === "string")
+            .map(g => g.toLowerCase())
+    );
+    return INTERNAL_GROUPS.filter(g => present.has(g.toLowerCase()));
+};
+
+/**
+ * Gate: does the user hold at least one of the allowed internal roles?
+ * Use as the first line in every /admin/* handler.
+ */
+export const requireInternalGroup = (
+    groups: string[] | undefined | null,
+    allowed: readonly InternalRole[],
+): boolean => {
+    const roles = getInternalRoles(groups);
+    return roles.some(r => allowed.includes(r));
+};
 
 /**
  * Normalize a raw Cognito group list to the single highest-privilege ClinicRole the user holds.
@@ -249,6 +289,8 @@ const parseUserTypeFromAddress = (address: unknown): string => {
 const deriveUserTypeFromGroups = (groups: string[]): string => {
     if (!groups || groups.length === 0) return '';
     const lowered = groups.map(g => g.toLowerCase());
+    // Internal first — an internal user must never fall through to "professional".
+    if (lowered.some(g => INTERNAL_GROUPS_LOWER.has(g))) return 'internal';
     return lowered.some(g => (CLINIC_ROLES as readonly string[]).includes(g))
         ? 'clinic'
         : 'professional';

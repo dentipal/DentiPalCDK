@@ -24,6 +24,7 @@ const JOB_POSTINGS_TABLE: string = process.env.JOB_POSTINGS_TABLE!; // Non-null 
 /** Interface for the data expected in the request body (camelCase) */
 interface UpdateMultiDayConsultingBody {
     professionalRole?: string;
+    professionalRoles?: string[]; // Maps to professional_roles (SS)
     jobTitle?: string;
     description?: string;
     requirements?: string[]; // Maps to SS
@@ -34,6 +35,9 @@ interface UpdateMultiDayConsultingBody {
     rate?: number; // Maps to N (unified: hourly rate, per-transaction rate, or revenue %)
     payType?: string; // Maps to S
     totalDays?: number; // Maps to N
+    shiftSpeciality?: string; // Maps to shift_speciality
+    workLocationType?: string; // Maps to work_location_type
+    [key: string]: any;
 }
 
 /** Interface for the DynamoDB Job Item structure (unmarshalled attributes, partial view) */
@@ -113,6 +117,59 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
+        // --- Status gate: only open jobs are editable ---
+        const status = existingJob.status?.S;
+        if (status && status !== 'open' && status !== 'active') {
+            return {
+                statusCode: 409,
+                headers: corsHeaders(event),
+                body: JSON.stringify({
+                    error: `Cannot edit a ${status} job. Only open jobs can be edited; cancel and repost to make changes after a professional is scheduled.`
+                })
+            };
+        }
+
+        // --- Validation parity with create ---
+        if (updateData.rate !== undefined && updateData.rate !== null && Number(updateData.rate) <= 0) {
+            return {
+                statusCode: 400,
+                headers: corsHeaders(event),
+                body: JSON.stringify({ error: "rate must be greater than 0" })
+            };
+        }
+        if (updateData.startTime && updateData.endTime && updateData.startTime >= updateData.endTime) {
+            return {
+                statusCode: 400,
+                headers: corsHeaders(event),
+                body: JSON.stringify({ error: "startTime must be before endTime" })
+            };
+        }
+        if (updateData.dates) {
+            if (!Array.isArray(updateData.dates) || updateData.dates.length === 0) {
+                return {
+                    statusCode: 400,
+                    headers: corsHeaders(event),
+                    body: JSON.stringify({ error: "dates must be a non-empty array" })
+                };
+            }
+            const today = new Date().toISOString().slice(0, 10);
+            const hasPast = updateData.dates.some((d) => typeof d !== 'string' || d < today);
+            if (hasPast) {
+                return {
+                    statusCode: 400,
+                    headers: corsHeaders(event),
+                    body: JSON.stringify({ error: "dates cannot contain past dates" })
+                };
+            }
+            if (updateData.totalDays !== undefined && Number(updateData.totalDays) !== updateData.dates.length) {
+                return {
+                    statusCode: 400,
+                    headers: corsHeaders(event),
+                    body: JSON.stringify({ error: "totalDays must equal dates.length" })
+                };
+            }
+        }
+
         // --- Step 2: Build update expression and attribute values ---
         const updateExpressions: string[] = [];
         const attributeNames: Record<string, string> = {};
@@ -151,6 +208,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Fields mapping from camelCase request body to snake_case DynamoDB
         addUpdateField('professionalRole', 'professional_role', 'S');
+        addUpdateField('professionalRoles', 'professional_roles', 'SS');
         addUpdateField('jobTitle', 'job_title', 'S');
         addUpdateField('description', 'description', 'S');
         addUpdateField('requirements', 'requirements', 'SS');
@@ -161,6 +219,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         addUpdateField('rate', 'rate', 'N');
         addUpdateField('payType', 'pay_type', 'S');
         addUpdateField('totalDays', 'total_days', 'N');
+        addUpdateField('shiftSpeciality', 'shift_speciality', 'S');
+        addUpdateField('workLocationType', 'work_location_type', 'S');
 
         // Check if any fields were provided other than the mandatory timestamp
         if (fieldsUpdatedCount === 0) {
@@ -204,6 +264,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     jobId: updatedJob?.jobId?.S || jobId,
                     jobType: updatedJob?.job_type?.S || 'multi_day_consulting',
                     professionalRole: updatedJob?.professional_role?.S || '',
+                    professionalRoles: updatedJob?.professional_roles?.SS || [],
+                    shiftSpeciality: updatedJob?.shift_speciality?.S || '',
+                    workLocationType: updatedJob?.work_location_type?.S || 'onsite',
                     jobTitle: updatedJob?.job_title?.S || '',
                     description: updatedJob?.description?.S || '',
                     requirements: updatedJob?.requirements?.SS || [],

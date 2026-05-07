@@ -142,6 +142,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             jobId: job.jobId?.S || "",
             jobType: job.job_type?.S || "",
             professionalRole: job.professional_role?.S || "",
+            professionalRoles: job.professional_roles?.SS
+                || (job.professional_role?.S ? [job.professional_role.S] : []),
+            shiftSpeciality: job.shift_speciality?.S || "",
+            workLocationType: job.work_location_type?.S || "onsite",
             jobTitle: job.job_title?.S || `${job.professional_role?.S || "Professional"} Position`,
             description: job.job_description?.S || "",
             requirements: job.requirements?.SS || [],

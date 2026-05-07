@@ -31,11 +31,13 @@ const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyR
 interface UpdatePermanentJobBody {
     // Common fields
     professionalRole?: string;
+    professionalRoles?: string[]; // Maps to professional_roles (SS)
     jobTitle?: string;
     jobDescription?: string;
     shiftSpeciality?: string;
     requirements?: string[]; // Maps to SS
-    
+    workLocationType?: string; // Maps to work_location_type
+
     // Permanent-specific fields
     employmentType?: 'full_time' | 'part_time';
     salaryMin?: number; // Maps to N
@@ -44,8 +46,8 @@ interface UpdatePermanentJobBody {
     vacationDays?: number; // Maps to N
     workSchedule?: string;
     startDate?: string;
-    
-    [key: string]: any; 
+
+    [key: string]: any;
 }
 
 /** Interface for the DynamoDB Job Item structure (partial view) */
@@ -120,6 +122,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
+        // --- Status gate: only open jobs are editable ---
+        const status = existingJob.status?.S;
+        if (status && status !== 'open' && status !== 'active') {
+            return json(event, 409, {
+                error: `Cannot edit a ${status} job. Only open jobs can be edited; cancel and repost to make changes after a professional is scheduled.`
+            });
+        }
+
+        // --- Validation parity with create ---
+        if (updateData.salaryMin !== undefined && updateData.salaryMax !== undefined &&
+            Number(updateData.salaryMin) > Number(updateData.salaryMax)) {
+            return json(event, 400, { error: "salaryMin cannot be greater than salaryMax" });
+        }
+        if (updateData.vacationDays !== undefined &&
+            (Number(updateData.vacationDays) < 0 || Number(updateData.vacationDays) > 50)) {
+            return json(event, 400, { error: "vacationDays must be between 0 and 50" });
+        }
+
         // --- Step 2: Build update expression and attribute values ---
         const updateExpressions: string[] = [];
         const attributeNames: Record<string, string> = {};
@@ -162,6 +182,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // Fields to handle (Mapping camelCase Input -> snake_case DB)
         addUpdateField('professionalRole', 'professional_role', 'S');
+        addUpdateField('professionalRoles', 'professional_roles', 'SS');
         addUpdateField('shiftSpeciality', 'shift_speciality', 'S');
         addUpdateField('employmentType', 'employment_type', 'S');
         addUpdateField('salaryMin', 'salary_min', 'N');
@@ -173,6 +194,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         addUpdateField('jobTitle', 'job_title', 'S');
         addUpdateField('jobDescription', 'job_description', 'S');
         addUpdateField('requirements', 'requirements', 'SS');
+        addUpdateField('workLocationType', 'work_location_type', 'S');
 
         // Check if any fields were provided
         if (fieldsUpdatedCount === 0) {
@@ -208,8 +230,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 jobId: updatedJob?.jobId?.S || jobId,
                 jobType: updatedJob?.job_type?.S || 'permanent',
                 professionalRole: updatedJob?.professional_role?.S || '',
+                professionalRoles: updatedJob?.professional_roles?.SS || [],
                 jobTitle: updatedJob?.job_title?.S || '',
                 shiftSpeciality: updatedJob?.shift_speciality?.S || '',
+                workLocationType: updatedJob?.work_location_type?.S || 'onsite',
                 employmentType: updatedJob?.employment_type?.S || '',
                 salaryMin: updatedJob?.salary_min?.N ? parseFloat(updatedJob.salary_min.N) : 0,
                 salaryMax: updatedJob?.salary_max?.N ? parseFloat(updatedJob.salary_max.N) : 0,

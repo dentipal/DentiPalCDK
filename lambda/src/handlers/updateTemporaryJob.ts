@@ -38,7 +38,11 @@ interface UpdateTemporaryJobBody {
     rate?: number; // Maps to N (unified: hourly rate, per-transaction rate, or revenue %)
     payType?: string; // Maps to S
     mealBreak?: boolean; // Maps to BOOL
-    [key: string]: any; 
+    professionalRole?: string; // Maps to professional_role
+    professionalRoles?: string[]; // Maps to professional_roles (SS)
+    shiftSpeciality?: string; // Maps to shift_speciality
+    workLocationType?: string; // Maps to work_location_type
+    [key: string]: any;
 }
 
 /** Interface for the DynamoDB Job Item structure (partial view) */
@@ -136,6 +140,28 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
+        // --- Status gate: only open jobs are editable ---
+        const status = existingJob.status?.S;
+        if (status && status !== 'open' && status !== 'active') {
+            return json(event, 409, {
+                error: `Cannot edit a ${status} job. Only open jobs can be edited; cancel and repost to make changes after a professional is scheduled.`
+            });
+        }
+
+        // --- Validation parity with create ---
+        if (updateData.rate !== undefined && updateData.rate !== null && Number(updateData.rate) <= 0) {
+            return json(event, 400, { error: "rate must be greater than 0" });
+        }
+        if (updateData.startTime && updateData.endTime && updateData.startTime >= updateData.endTime) {
+            return json(event, 400, { error: "startTime must be before endTime" });
+        }
+        if (updateData.date) {
+            const today = new Date().toISOString().slice(0, 10);
+            if (updateData.date < today) {
+                return json(event, 400, { error: "date cannot be in the past" });
+            }
+        }
+
         // --- Step 2: Build update expression and attribute values ---
         const updateExpressions: string[] = [];
         const attributeNames: Record<string, string> = {};
@@ -188,6 +214,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         addUpdateField('rate', 'rate', 'N');
         addUpdateField('payType', 'pay_type', 'S');
         addUpdateField('mealBreak', 'meal_break', 'BOOL');
+        addUpdateField('professionalRole', 'professional_role', 'S');
+        addUpdateField('professionalRoles', 'professional_roles', 'SS');
+        addUpdateField('shiftSpeciality', 'shift_speciality', 'S');
+        addUpdateField('workLocationType', 'work_location_type', 'S');
 
         // Check if any fields were provided
         if (fieldsUpdatedCount === 0) {
@@ -225,7 +255,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             job: {
                 jobId: updatedJob?.jobId?.S || jobId,
                 jobType: updatedJob?.job_type?.S || 'temporary',
-                professionalRole: updatedJob?.professional_role?.S || '', 
+                professionalRole: updatedJob?.professional_role?.S || '',
+                professionalRoles: updatedJob?.professional_roles?.SS || [],
+                shiftSpeciality: updatedJob?.shift_speciality?.S || '',
+                workLocationType: updatedJob?.work_location_type?.S || 'onsite',
                 jobTitle: updatedJob?.job_title?.S || '',
                 description: updatedJob?.description?.S || '',
                 requirements: updatedJob?.requirements?.SS || [],

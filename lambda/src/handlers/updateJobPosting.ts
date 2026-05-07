@@ -187,12 +187,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        // Prevent updates to completed jobs
-        if (currentStatus === 'completed') {
+        // Only open jobs are editable. Once a professional is scheduled or the job is completed,
+        // edits could change the agreed terms — clinics must cancel and repost instead.
+        if (currentStatus && currentStatus !== 'open' && currentStatus !== 'active') {
             return json(event, 409, {
                 error: "Conflict",
                 statusCode: 409,
-                message: "Cannot update completed jobs",
+                message: `Cannot edit a ${currentStatus} job. Only open jobs can be edited; cancel and repost to make changes after a professional is scheduled.`,
                 details: { currentStatus: currentStatus },
                 timestamp: new Date().toISOString()
             });

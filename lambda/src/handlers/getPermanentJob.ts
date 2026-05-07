@@ -7,6 +7,7 @@ import {
   DynamoDBClient,
   GetItemCommand,
   GetItemCommandInput,
+  QueryCommand,
 } from "@aws-sdk/client-dynamodb";
 
 import { extractUserFromBearerToken } from "./utils";
@@ -72,15 +73,37 @@ export const handler = async (
       });
     }
 
+    let applicationCount = 0;
+    try {
+      const applicationsResponse = await dynamodb.send(new QueryCommand({
+        TableName: process.env.JOB_APPLICATIONS_TABLE,
+        KeyConditionExpression: "jobId = :jobId",
+        ExpressionAttributeValues: { ":jobId": { S: jobId } },
+        Select: "COUNT",
+      }));
+      applicationCount = applicationsResponse.Count || 0;
+    } catch (err) {
+      console.warn("Failed to get application count:", err);
+    }
+
     const permanentJob = {
       jobId: job.jobId?.S || "",
       jobType: job.job_type?.S || "",
       professionalRole: job.professional_role?.S || "",
+      professionalRoles: job.professional_roles?.SS
+        || (job.professional_role?.S ? [job.professional_role.S] : []),
       shiftSpeciality: job.shift_speciality?.S || "",
+      workLocationType: job.work_location_type?.S || "onsite",
+      jobTitle: job.job_title?.S || "",
+      jobDescription: job.job_description?.S || "",
+      requirements: job.requirements?.SS || [],
       employmentType: job.employment_type?.S || "",
       salaryMin: job.salary_min?.N ? parseFloat(job.salary_min.N) : 0,
       salaryMax: job.salary_max?.N ? parseFloat(job.salary_max.N) : 0,
       benefits: job.benefits?.SS || [],
+      vacationDays: job.vacation_days?.N ? parseInt(job.vacation_days.N, 10) : 0,
+      workSchedule: job.work_schedule?.S || "",
+      startDate: job.start_date?.S || "",
       status: job.status?.S || "active",
 
       addressLine1: job.addressLine1?.S || "",
@@ -102,6 +125,8 @@ export const handler = async (
       createdAt: job.createdAt?.S || "",
       updatedAt: job.updatedAt?.S || "",
       created_by: job.created_by?.S || "",
+      applicationCount,
+      applicationsEnabled: job.status?.S === "active" || job.status?.S === "open",
     };
 
     return json(event, 200, {

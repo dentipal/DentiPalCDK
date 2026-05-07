@@ -147,6 +147,36 @@ import { handler as cancelPromotionHandler } from "./handlers/cancelPromotion";
 import { handler as activatePromotionHandler } from "./handlers/activatePromotion";
 import { handler as trackPromotionClickHandler } from "./handlers/trackPromotionClick";
 
+// Internal admin portal — bootstrap public auth + team management.
+import { handler as bootstrapStatusHandler } from "./handlers/admin/bootstrapStatus";
+import { handler as bootstrapAdminHandler } from "./handlers/admin/bootstrapAdmin";
+import { handler as verifyAdminBootstrapHandler } from "./handlers/admin/verifyAdminBootstrap";
+import { handler as resendAdminBootstrapOtpHandler } from "./handlers/admin/resendAdminBootstrapOtp";
+import { handler as inviteTeamMemberHandler } from "./handlers/admin/inviteTeamMember";
+import { handler as listTeamHandler } from "./handlers/admin/listTeam";
+import { handler as removeTeamMemberHandler } from "./handlers/admin/removeTeamMember";
+
+// Internal admin portal — leads (sales pipeline).
+import { handler as createLeadHandler } from "./handlers/admin/createLead";
+import { handler as listLeadsHandler } from "./handlers/admin/listLeads";
+import { handler as getLeadHandler } from "./handlers/admin/getLead";
+import { handler as updateLeadHandler } from "./handlers/admin/updateLead";
+import { handler as updateLeadStatusHandler } from "./handlers/admin/updateLeadStatus";
+import { handler as deleteLeadHandler } from "./handlers/admin/deleteLead";
+import { handler as listLeadActivityHandler } from "./handlers/admin/listLeadActivity";
+import { handler as addLeadActivityHandler } from "./handlers/admin/addLeadActivity";
+import { handler as bulkUploadLeadsHandler } from "./handlers/admin/bulkUploadLeads";
+
+// Internal admin portal — user directory (professionals + clinics) and bans.
+import { handler as listAdminProfessionalsHandler } from "./handlers/admin/listAdminProfessionals";
+import { handler as listAdminClinicsHandler } from "./handlers/admin/listAdminClinics";
+import { handler as banSubjectHandler } from "./handlers/admin/banSubject";
+import { handler as unbanSubjectHandler } from "./handlers/admin/unbanSubject";
+
+// Shared auth — completes the NEW_PASSWORD_REQUIRED challenge that loginUser
+// forwards on first login for invited users (clinic team + internal team).
+import { handler as respondToNewPasswordHandler } from "./handlers/respondToNewPassword";
+
 import { corsHeaders } from "./handlers/corsHeaders";
 
 // Inline handler — the frontend calls GET /jobs/user-clinics from useHeaderData,
@@ -336,6 +366,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "POST:/auth/initiate-registration": initiateUserRegistrationHandler,
         "POST:/auth/verify-otp": verifyOTPAndCreateUserHandler,
         "POST:/auth/resend-otp": resendOtpHandler,
+        "POST:/auth/respond-new-password": respondToNewPasswordHandler,
 
         // Referral system
         "POST:/referrals/invite": sendReferralInviteHandler,
@@ -378,6 +409,38 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
 
         // Geocoding — postal code → city/state (Amazon Location Service)
         "GET:/geocode/postal": geocodePostalHandler,
+
+        // ----------------- INTERNAL ADMIN PORTAL -----------------
+        // Bootstrap routes are PUBLIC. bootstrap-admin is single-shot — it
+        // refuses once any user is in the "Admin" group. All other /admin/*
+        // routes (added in later phases) gate on internal Cognito groups
+        // inside the handler via requireInternalGroup().
+        "GET:/admin/auth/bootstrap-status": bootstrapStatusHandler,
+        "POST:/admin/auth/bootstrap-admin": bootstrapAdminHandler,
+        "POST:/admin/auth/verify-bootstrap-otp": verifyAdminBootstrapHandler,
+        "POST:/admin/auth/resend-bootstrap-otp": resendAdminBootstrapOtpHandler,
+
+        // Team management — Admin role only.
+        "GET:/admin/team": listTeamHandler,
+        "POST:/admin/team": inviteTeamMemberHandler,
+        "DELETE:/admin/team/{userSub}": removeTeamMemberHandler,
+
+        // Leads (sales pipeline). Each handler enforces role gates internally.
+        "GET:/admin/leads": listLeadsHandler,
+        "POST:/admin/leads": createLeadHandler,
+        "POST:/admin/leads/bulk": bulkUploadLeadsHandler,
+        "GET:/admin/leads/{leadId}": getLeadHandler,
+        "PATCH:/admin/leads/{leadId}": updateLeadHandler,
+        "PATCH:/admin/leads/{leadId}/status": updateLeadStatusHandler,
+        "DELETE:/admin/leads/{leadId}": deleteLeadHandler,
+        "GET:/admin/leads/{leadId}/activity": listLeadActivityHandler,
+        "POST:/admin/leads/{leadId}/activity": addLeadActivityHandler,
+
+        // User directory + bans (Admin role only — enforced in each handler).
+        "GET:/admin/professionals": listAdminProfessionalsHandler,
+        "GET:/admin/clinics": listAdminClinicsHandler,
+        "POST:/admin/bans": banSubjectHandler,
+        "DELETE:/admin/bans/{subjectType}/{subjectId}": unbanSubjectHandler,
 
         // Job Promotions
         "GET:/promotions/plans": getPromotionPlansHandler,

@@ -781,6 +781,13 @@ export class DentiPalCDKStack extends cdk.Stack {
             'HIPAATrainee',
             'OSHATrainee',
             'Accounting',
+            // Internal team groups — back-office users (admin portal at /admin).
+            // Disjoint from clinic/professional groups; users in these groups
+            // never appear in clinic associated-users lists.
+            'Admin',
+            'Sales',
+            'Marketing',
+            'HR',
         ];
 
         cognitoGroups.forEach(group => {
@@ -1119,13 +1126,70 @@ export class DentiPalCDKStack extends cdk.Stack {
         });
 
 
+        // 19. DentiPal-Leads — internal sales pipeline.
+        //     Every internal user sees every lead (no per-user scoping). The GSIs
+        //     support pipeline filtering and "leads I imported" lookups; default list
+        //     queries fan out by status via status-lastActivityAt-index.
+        const leadsTable = new dynamodb.Table(this, 'LeadsTable', {
+            tableName: 'DentiPal-V5-Leads',
+            partitionKey: { name: 'leadId', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+        leadsTable.addGlobalSecondaryIndex({
+            indexName: 'status-lastActivityAt-index',
+            partitionKey: { name: 'status', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'lastActivityAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+        leadsTable.addGlobalSecondaryIndex({
+            indexName: 'createdBy-createdAt-index',
+            partitionKey: { name: 'createdBy', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
+        // 20. DentiPal-LeadActivity — append-only audit / timeline per lead.
+        //     activityId is a sortable ULID-like string so SK ordering = chronological.
+        const leadActivityTable = new dynamodb.Table(this, 'LeadActivityTable', {
+            tableName: 'DentiPal-V5-LeadActivity',
+            partitionKey: { name: 'leadId', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'activityId', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+        leadActivityTable.addGlobalSecondaryIndex({
+            indexName: 'performedBy-createdAt-index',
+            partitionKey: { name: 'performedBy', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
+        // 21. DentiPal-Bans — admin-issued login bans for professionals and clinics.
+        //     Composite key so professional bans (subjectId = userSub) and clinic
+        //     bans (subjectId = clinicId) coexist without colliding.
+        const bansTable = new dynamodb.Table(this, 'BansTable', {
+            tableName: 'DentiPal-V5-Bans',
+            partitionKey: { name: 'subjectType', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'subjectId', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+        bansTable.addGlobalSecondaryIndex({
+            indexName: 'subjectType-bannedAt-index',
+            partitionKey: { name: 'subjectType', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'bannedAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
         // Collect all tables for the main REST handler
         const allTables = [
             clinicProfilesTable, clinicFavoritesTable, clinicsTable, connectionsTable,
             conversationsTable, feedbackTable, jobApplicationsTable, jobInvitationsTable,
             jobNegotiationsTable, jobPostingsTable, messagesTable,
             professionalProfilesTable, referralsTable, userAddressesTable,
-            userClinicAssignmentsTable, jobPromotionsTable
+            userClinicAssignmentsTable, jobPromotionsTable,
+            leadsTable, leadActivityTable, bansTable,
         ];
 
         // ========================================================================
@@ -1254,6 +1318,9 @@ export class DentiPalCDKStack extends cdk.Stack {
                 USER_ADDRESSES_TABLE: userAddressesTable.tableName,
                 USER_CLINIC_ASSIGNMENTS_TABLE: userClinicAssignmentsTable.tableName,
                 JOB_PROMOTIONS_TABLE: jobPromotionsTable.tableName,
+                LEADS_TABLE: leadsTable.tableName,
+                LEAD_ACTIVITY_TABLE: leadActivityTable.tableName,
+                BANS_TABLE: bansTable.tableName,
 
                 // Stats/Alias mappings for code compatibility
                 CLINIC_JOBS_POSTED_TABLE: jobPostingsTable.tableName,
@@ -1300,9 +1367,12 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'cognito-idp:DeleteUser',
                 'cognito-idp:AdminRemoveUserFromGroup',
                 'cognito-idp:ListUsers',
+                'cognito-idp:ListUsersInGroup',
                 'cognito-idp:AdminListGroupsForUser',
                 'cognito-idp:AdminInitiateAuth',
-                'cognito-idp:AdminRespondToAuthChallenge'
+                'cognito-idp:AdminRespondToAuthChallenge',
+                'cognito-idp:AdminDisableUser',
+                'cognito-idp:AdminEnableUser'
             ],
             resources: [userPool.userPoolArn],
         }));

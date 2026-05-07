@@ -4,7 +4,15 @@ import {
   AdminGetUserCommand,
   AuthFlowType,
 } from "@aws-sdk/client-cognito-identity-provider";
-import { DynamoDBClient, ScanCommand, ScanCommandInput } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBClient,
+  ScanCommand,
+  ScanCommandInput,
+  GetItemCommand,
+  QueryCommand,
+  BatchGetItemCommand,
+} from "@aws-sdk/client-dynamodb";
+import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
 import { corsHeaders } from "./corsHeaders";
@@ -88,6 +96,21 @@ export const handler = async (
     const tokens = authResponse.AuthenticationResult;
 
     if (!tokens) {
+      // Cognito returned a challenge instead of tokens. The most common case
+      // is NEW_PASSWORD_REQUIRED — fired the first time an admin-invited user
+      // signs in with their temporary password. Forward the challenge so the
+      // client can prompt for a new password and call /auth/respond-new-password.
+      if (authResponse.ChallengeName === "NEW_PASSWORD_REQUIRED") {
+        return json(event, 200, {
+          status: "challenge",
+          challengeName: "NEW_PASSWORD_REQUIRED",
+          session: authResponse.Session,
+          message: "A new password is required to complete sign-in.",
+          // userIdForSrp lets the client target RespondToAuthChallenge precisely
+          // even if the original email differs from Cognito's preferred username.
+          userIdForSrp: authResponse.ChallengeParameters?.USER_ID_FOR_SRP || email,
+        });
+      }
       console.warn("Authentication failed for email:", email);
       return json(event, 401, {
         error: "Unauthorized",
@@ -135,6 +158,81 @@ export const handler = async (
           accountType: "clinic",
           timestamp: new Date().toISOString(),
         });
+      }
+    }
+
+    // ─── Ban check ────────────────────────────────────────────────────────
+    // Two distinct paths because the ban subject differs by user type:
+    //   Branch A — professional: a single GetItem on Bans by their userSub.
+    //   Branch B — clinic owner: query CreatedByIndex for every clinic they own,
+    //              then BatchGetItem against Bans for all those clinicIds. If
+    //              ANY of them is banned, refuse login.
+    // Associated clinic users (ClinicAdmin / ClinicManager / ClinicViewer) are
+    // not currently checked — they aren't `createdBy` on any clinic, so they
+    // sail past Branch B. v1 scope.
+    if (process.env.BANS_TABLE) {
+      try {
+        if (!isClinicRole(userGroups)) {
+          // Branch A — professional ban check.
+          const profBan = await dynamo.send(new GetItemCommand({
+            TableName: process.env.BANS_TABLE,
+            Key: marshall({ subjectType: "professional", subjectId: userSub }),
+            ProjectionExpression: "subjectId, bannedAt",
+          }));
+          if (profBan.Item) {
+            console.warn("[login] Refused login for banned professional", userSub);
+            return json(event, 403, {
+              error: "Forbidden",
+              message: "Your account has been banned by the DentiPal internal team.",
+              statusCode: 403,
+              status: "banned",
+              timestamp: new Date().toISOString(),
+            });
+          }
+        } else {
+          // Branch B — clinic owner: do they own any banned clinic?
+          const myClinics = await dynamo.send(new QueryCommand({
+            TableName: process.env.CLINICS_TABLE!,
+            IndexName: "CreatedByIndex",
+            KeyConditionExpression: "createdBy = :u",
+            ExpressionAttributeValues: { ":u": { S: userSub } },
+            ProjectionExpression: "clinicId",
+          }));
+          const ownedClinicIds = (myClinics.Items || [])
+            .map((it) => it.clinicId?.S)
+            .filter((s): s is string => Boolean(s));
+
+          if (ownedClinicIds.length > 0) {
+            const banLookup = await dynamo.send(new BatchGetItemCommand({
+              RequestItems: {
+                [process.env.BANS_TABLE]: {
+                  Keys: ownedClinicIds.map((id) => marshall({
+                    subjectType: "clinic",
+                    subjectId: id,
+                  })),
+                  ProjectionExpression: "subjectId",
+                },
+              },
+            }));
+            const bannedClinicIds = (banLookup.Responses?.[process.env.BANS_TABLE] || [])
+              .map((it) => unmarshall(it).subjectId as string);
+            if (bannedClinicIds.length > 0) {
+              console.warn("[login] Refused clinic login — banned clinics:", bannedClinicIds);
+              return json(event, 403, {
+                error: "Forbidden",
+                message: "Your clinic has been banned by the DentiPal internal team.",
+                statusCode: 403,
+                status: "banned",
+                timestamp: new Date().toISOString(),
+              });
+            }
+          }
+        }
+      } catch (banCheckError) {
+        // If the ban check itself fails, log loudly but don't block legitimate
+        // users. Cognito AdminDisableUser is the failsafe for professional bans;
+        // a one-off DDB hiccup shouldn't lock the entire platform.
+        console.error("[login] Ban check failed (allowing login):", banCheckError);
       }
     }
 
@@ -289,23 +387,58 @@ export const handler = async (
     let details: any = {};
 
     if (error.name === "NotAuthorizedException") {
-      // Check if this is a Google-only user trying email/password login
+      // Three cases need special-casing, in priority order:
+      //   1. banned professional whose Cognito user we disabled → friendly ban msg
+      //   2. federated (Google) user trying password login → "use Google Sign-In"
+      //   3. anything else → generic "invalid email or password"
+      //
+      // Order matters: a banned user can ALSO have been EXTERNAL_PROVIDER (we
+      // disable them on ban regardless of origin), so the ban check runs FIRST.
+      // Otherwise an admin who banned a Google-authed user would still see the
+      // misleading "use Google Sign-In" message.
       try {
         const loginData = JSON.parse(event.body || "{}");
         const userInfo = await cognito.send(new AdminGetUserCommand({
           UserPoolId: process.env.USER_POOL_ID!,
           Username: String(loginData.email).toLowerCase(),
         }));
-        const address = userInfo.UserAttributes?.find(a => a.Name === "address")?.Value || "";
-        if (address.startsWith("userType:")) {
-          // This user was created via Google login
+
+        // (1) Disabled + has a Bans row → banned message.
+        // The DB ban check that runs on a successful auth path can't fire here
+        // (we never got tokens), so we re-check the Bans table by sub.
+        if (userInfo.Enabled === false && process.env.BANS_TABLE) {
+          const sub = userInfo.UserAttributes?.find(a => a.Name === "sub")?.Value;
+          if (sub) {
+            try {
+              const banLookup = await dynamo.send(new GetItemCommand({
+                TableName: process.env.BANS_TABLE,
+                Key: marshall({ subjectType: "professional", subjectId: sub }),
+                ProjectionExpression: "subjectId",
+              }));
+              if (banLookup.Item) {
+                return json(event, 403, {
+                  error: "Forbidden",
+                  message: "Your account has been banned by the DentiPal internal team.",
+                  statusCode: 403,
+                  status: "banned",
+                  timestamp: new Date().toISOString(),
+                });
+              }
+            } catch (banErr) {
+              console.warn("[login] Ban re-check on disabled user failed:", banErr);
+            }
+          }
+        }
+
+        // (2) Federated identity that hasn't been banned.
+        if (userInfo.UserStatus === "EXTERNAL_PROVIDER") {
           statusCode = 401;
           errorMessage = "Unauthorized";
           details = { message: "This account uses Google Sign-In. Please click the Google button to log in." };
           return json(event, statusCode, { error: errorMessage, statusCode, details, timestamp: new Date().toISOString() });
         }
       } catch {
-        // User lookup failed, continue with default error
+        // User lookup failed, fall through to generic invalid-credentials message.
       }
       statusCode = 401;
       errorMessage = "Unauthorized";
