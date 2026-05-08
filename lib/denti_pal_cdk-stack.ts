@@ -887,6 +887,16 @@ export class DentiPalCDKStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
         });
 
+        // Notification preferences (smart-notifications feature).
+        // PK: userSub (Cognito sub). One row per user. Defaults are all-true so
+        // a missing row = "send everything" — the get/update handlers backfill on read.
+        const notificationPreferencesTable = new dynamodb.Table(this, 'NotificationPreferencesTable', {
+            tableName: 'DentiPal-V5-NotificationPreferences',
+            partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+
         // 7. DentiPal-JobApplications (Used in REST)
         const jobApplicationsTable = new dynamodb.Table(this, 'JobApplicationsTable', {
             tableName: 'DentiPal-V5-JobApplications',
@@ -921,6 +931,15 @@ export class DentiPalCDKStack extends cdk.Stack {
             indexName: 'professionalUserSub-index',
             partitionKey: { name: 'professionalUserSub', type: dynamodb.AttributeType.STRING },
             sortKey: { name: 'jobId', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+        // Sparse GSI for the admin no-show review queue. Only rows where the clinic
+        // has reported a no-show carry `noShowReviewStatus`, so this index stays small.
+        // Sort key `noShowReportedAt` lets the admin UI scan newest-first.
+        jobApplicationsTable.addGlobalSecondaryIndex({
+            indexName: 'noShowReview-index',
+            partitionKey: { name: 'noShowReviewStatus', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'noShowReportedAt', type: dynamodb.AttributeType.STRING },
             projectionType: dynamodb.ProjectionType.ALL,
         });
 
@@ -1190,6 +1209,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             professionalProfilesTable, referralsTable, userAddressesTable,
             userClinicAssignmentsTable, jobPromotionsTable,
             leadsTable, leadActivityTable, bansTable,
+            notificationPreferencesTable,
         ];
 
         // ========================================================================
@@ -1208,6 +1228,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             allowedOrigins: [
                 "http://localhost:5173",
                 "https://main.d3agcvis750ojb.amplifyapp.com",
+                "https://dentipal.com",
             ],
             allowedMethods: [
                 s3.HttpMethods.POST,
@@ -1292,7 +1313,9 @@ export class DentiPalCDKStack extends cdk.Stack {
                 REGION: this.region,
                 CLIENT_ID: client.userPoolClientId,
                 USER_POOL_ID: userPool.userPoolId,
-                SES_FROM: 'viswanadhapallivennela19@gmail.com', // Updated per your env variables
+                SES_FROM: 'DentiPal Notifications <viswanadhapallivennela19@gmail.com>',
+                APP_URL: 'https://dentipal.com',
+                NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
                 SES_REGION: this.region,
                 SES_TO: 'shashitest2004@gmail.com',     // Updated per your env variables
                 SMS_TOPIC_ARN: `arn:aws:sns:${this.region}:${this.account}:DentiPal-SMS-Notifications`, // Dynamic construction
@@ -1456,6 +1479,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 allowOrigins: [
                     'http://localhost:5173',
                     'https://main.d3agcvis750ojb.amplifyapp.com',
+                    'https://dentipal.com',
                 ],
                 allowMethods: apigateway.Cors.ALL_METHODS,
                 allowHeaders: ['Content-Type', 'Authorization', 'X-Amz-Date', 'X-Api-Key', 'X-Amz-Security-Token', 'X-Requested-With'],
@@ -1658,6 +1682,94 @@ export class DentiPalCDKStack extends cdk.Stack {
             },
         });
         shiftEventRule.addTarget(new targets.LambdaFunction(eventToMessageHandler));
+
+        // ========================================================================
+        // 6c. Event-to-Email Lambda (smart-notifications feature)
+        //     Subscribes to the same EventBridge rule alongside event-to-message.
+        //     Looks up the professional's email in Cognito, checks their
+        //     notification preferences, renders an email template, and sends via SES.
+        //     Clinic-targeted events (shift-applied, invite-accepted) are no-ops here.
+        // ========================================================================
+
+        const eventToEmailHandler = new lambda.Function(this, 'EventToEmailHandler', {
+            functionName: 'DentiPal-event-to-email',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/event-to-email.handler',
+            code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
+            environment: {
+                REGION: this.region,
+                USER_POOL_ID: userPool.userPoolId,
+                NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
+                SES_FROM: 'DentiPal Notifications <viswanadhapallivennela19@gmail.com>',
+                SES_REGION: this.region,
+                APP_URL: 'https://dentipal.com',
+            },
+            timeout: cdk.Duration.seconds(30),
+            memorySize: 256,
+        });
+
+        notificationPreferencesTable.grantReadData(eventToEmailHandler);
+
+        eventToEmailHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['cognito-idp:AdminGetUser'],
+            resources: [userPool.userPoolArn],
+        }));
+
+        eventToEmailHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['ses:SendEmail', 'ses:SendRawEmail'],
+            resources: ['*'],
+        }));
+
+        // Fan-out: same EventBridge rule, second target.
+        shiftEventRule.addTarget(new targets.LambdaFunction(eventToEmailHandler));
+
+        // ========================================================================
+        // 6d. Shift Reminder Cron Lambda (smart-notifications feature)
+        //     Fires every 15 minutes. Scans JobApplications for status="scheduled",
+        //     joins to JobPostings, computes UTC reminder time from
+        //     (date, start_time, timezone), and emails 24h-before / 1h-before
+        //     reminders. Idempotency via remindersSent.{h24,h1} flags.
+        // ========================================================================
+
+        const sendShiftRemindersHandler = new lambda.Function(this, 'SendShiftRemindersHandler', {
+            functionName: 'DentiPal-send-shift-reminders',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/sendShiftReminders.handler',
+            code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
+            environment: {
+                REGION: this.region,
+                USER_POOL_ID: userPool.userPoolId,
+                JOB_APPLICATIONS_TABLE: jobApplicationsTable.tableName,
+                JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
+                JOB_ID_INDEX: 'jobId-index-1',
+                NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
+                SES_FROM: 'DentiPal Notifications <viswanadhapallivennela19@gmail.com>',
+                SES_REGION: this.region,
+                APP_URL: 'https://dentipal.com',
+            },
+            timeout: cdk.Duration.minutes(5),
+            memorySize: 512,
+        });
+
+        jobApplicationsTable.grantReadWriteData(sendShiftRemindersHandler);
+        jobPostingsTable.grantReadData(sendShiftRemindersHandler);
+        notificationPreferencesTable.grantReadData(sendShiftRemindersHandler);
+
+        sendShiftRemindersHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['cognito-idp:AdminGetUser'],
+            resources: [userPool.userPoolArn],
+        }));
+
+        sendShiftRemindersHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['ses:SendEmail', 'ses:SendRawEmail'],
+            resources: ['*'],
+        }));
+
+        const reminderRule = new events.Rule(this, 'ShiftReminderCronRule', {
+            ruleName: 'DentiPal-ShiftReminders-Every15Min',
+            schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+        });
+        reminderRule.addTarget(new targets.LambdaFunction(sendShiftRemindersHandler));
 
         // ========================================================================
         // 7. Outputs

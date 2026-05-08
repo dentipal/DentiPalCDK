@@ -33,8 +33,11 @@ const SCHEDULED_STATUSES = (process.env.SCHEDULED_STATUSES || "scheduled,accepte
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
-// 2. Completed: The job is done
-const COMPLETED_STATUSES = (process.env.COMPLETED_STATUSES || "completed,paid")
+// 2. Completed: The job is done.
+// `no_show` is a terminal "shift outcome" set by reportNoShow.ts when the
+// clinic reports a no-show — surfaced in the Completed tab with a distinct
+// badge on the frontend.
+const COMPLETED_STATUSES = (process.env.COMPLETED_STATUSES || "completed,paid,no_show")
   .split(",")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
@@ -303,47 +306,14 @@ export const handler = async (
     });
 
     // 5. Categorize (Bucketing Logic)
-    
-    const now = new Date();
-    // Dynamically mark scheduled jobs as completed if their time has passed
-    appsEnriched.forEach(a => {
-      if (SCHEDULED_STATUSES.includes(a.applicationStatus)) {
-        const jobDate = a.date || a.start_date || a.jobDate || a.shiftDate;
-        const jobEndTime = a.end_time || a.endTime || a.shiftEndTime;
-        
-        if (jobDate) {
-           try {
-              const jobDateTime = new Date(jobDate);
-              if (jobEndTime) {
-                 // Safely parse time considering AM/PM formats
-                 const timeStr = String(jobEndTime).toLowerCase().trim();
-                 const isPM = timeStr.includes('pm') || timeStr.includes('p.m.');
-                 const isAM = timeStr.includes('am') || timeStr.includes('a.m.');
-                 const cleanTime = timeStr.replace(/[^0-9:]/g, ''); // keeps only numbers and colons
-                 
-                 const [hToken, mToken] = cleanTime.split(':');
-                 let hours = parseInt(hToken, 10);
-                 const minutes = parseInt(mToken, 10) || 0;
-
-                 if (!isNaN(hours)) {
-                     if (isPM && hours < 12) hours += 12;
-                     if (isAM && hours === 12) hours = 0;
-                 } else {
-                     hours = 23;
-                 }
-                 jobDateTime.setHours(hours, minutes, 0, 0);
-              } else {
-                 jobDateTime.setHours(23, 59, 59, 0);
-              }
-              
-              if (jobDateTime < now && !isNaN(jobDateTime.getTime())) {
-                 a.applicationStatus = "completed"; 
-                 a.status = "completed";
-              }
-           } catch(e) {}
-        }
-      }
-    });
+    //
+    // Note: legacy time-based recategorization (silently flipping past-due
+    // 'scheduled' rows to 'completed' at read time) was removed when the
+    // clinic-driven post-shift confirmation flow was introduced. Past-due
+    // 'scheduled' rows now stay in Scheduled until a clinic explicitly calls
+    // /jobs/{jobId}/confirm-completion or /jobs/{jobId}/no-show, which is the
+    // single source of truth for the Completed / No-Show outcome. Mirrors the
+    // change in getClinicShifts.ts.
 
     // A. Scheduled Jobs: Confirmed/Booked applications
     const scheduledJobs = appsEnriched.filter((a) =>

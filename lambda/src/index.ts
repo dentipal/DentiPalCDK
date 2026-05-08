@@ -80,7 +80,14 @@ import { handler as getAllNegotiationsProfHandler } from "./handlers/getAllNegot
 import { handler as hireProfHandler } from "./handlers/acceptProf";
 import { handler as rejectProfHandler } from "./handlers/rejectProf";
 
-import { handler as updateCompletedShiftsHandler } from "./handlers/updateCompletedShifts";
+// Shift confirmation & no-show — clinic-driven post-shift attestation.
+import { handler as confirmShiftCompletionHandler } from "./handlers/confirmShiftCompletion";
+import { handler as reportNoShowHandler } from "./handlers/reportNoShow";
+import { handler as listNoShowReportsHandler } from "./handlers/listNoShowReports";
+import { handler as reviewNoShowReportHandler } from "./handlers/reviewNoShowReport";
+
+// updateCompletedShifts.ts is deprecated — kept on disk for one release as rollback safety,
+// but no longer wired into the router or the scheduled-task path.
 import { handler as getScheduledShiftsHandler } from "./handlers/getScheduledShifts";
 import { handler as getCompletedShiftsHandler } from "./handlers/getCompletedShifts";
 import { handler as submitFeedbackHandler } from "./handlers/submitFeedback";
@@ -176,6 +183,10 @@ import { handler as unbanSubjectHandler } from "./handlers/admin/unbanSubject";
 // Shared auth — completes the NEW_PASSWORD_REQUIRED challenge that loginUser
 // forwards on first login for invited users (clinic team + internal team).
 import { handler as respondToNewPasswordHandler } from "./handlers/respondToNewPassword";
+
+// Notification preferences (smart-notifications feature).
+import { handler as getNotificationPreferencesHandler } from "./handlers/getNotificationPreferences";
+import { handler as updateNotificationPreferencesHandler } from "./handlers/updateNotificationPreferences";
 
 import { corsHeaders } from "./handlers/corsHeaders";
 
@@ -328,9 +339,18 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/professionals/public": publicProfessionalsHandler,
 
         // Shift Management
-        "PUT:/professionals/completedshifts": updateCompletedShiftsHandler,
+        // PUT:/professionals/completedshifts removed: time-based auto-completion is
+        // deprecated in favor of clinic-driven /jobs/{jobId}/confirm-completion below.
         "GET:/completed/{clinicId}": getCompletedShiftsHandler,
         "GET:/scheduled/{clinicId}": getScheduledShiftsHandler,
+
+        // Shift confirmation (clinic-driven post-shift attestation).
+        "POST:/jobs/{jobId}/confirm-completion": confirmShiftCompletionHandler,
+        "POST:/jobs/{jobId}/no-show": reportNoShowHandler,
+
+        // Admin no-show review queue.
+        "GET:/admin/no-show-reports": listNoShowReportsHandler,
+        "PATCH:/admin/no-show-reports/{jobId}/{professionalUserSub}": reviewNoShowReportHandler,
 
         // Job status management & Hiring
         "PUT:/jobs/{jobId}/status": updateJobStatusHandler,
@@ -451,6 +471,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "PUT:/promotions/{promotionId}/activate": activatePromotionHandler,
         "POST:/promotions/track-click": trackPromotionClickHandler,
 
+        // Notification preferences
+        "GET:/notifications/preferences": getNotificationPreferencesHandler,
+        "PUT:/notifications/preferences": updateNotificationPreferencesHandler,
+
     };
 
     // First try exact match
@@ -520,19 +544,17 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
     console.log(`[Router] ${logMethod} ${logPath}`);
 
     // --- STEP 1: EventBridge Scheduled Task Check ---
+    // Deprecated: time-based auto-completion has been replaced by clinic-driven
+    // post-shift confirmation (see confirmShiftCompletion / reportNoShow handlers).
+    // We swallow any lingering EventBridge schedule firings as a no-op so the
+    // monolith doesn't auto-flip 'scheduled' -> 'completed' anymore.
     if (event.source === 'aws.events') {
-        console.log("✅ SUCCESS: EventBridge trigger DETECTED. Routing to shift completion handler.");
-        try {
-            // FIX: Removed 'context' to match expected signature of 1 argument, 
-            // or if updateCompletedShiftsHandler uses context, ensure its file definition matches.
-            // Assuming standard 1-arg handler here to fix the "Expected 1 argument, got 2" error.
-            return await updateCompletedShiftsHandler(event);
-        } catch (error) {
-            console.error("❌ ERROR inside scheduled task (updateCompletedShifts):", error);
-            throw error;
-        }
-    } else {
-        console.log("⚠️ WARNING: This was NOT an EventBridge event. Proceeding with API Gateway router logic.");
+        console.log("[deprecated] aws.events tick received; updateCompletedShifts is disabled — no-op.");
+        return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: 'noop', reason: 'updateCompletedShifts deprecated' }),
+        };
     }
 
     // --- STEP 2: API Gateway Routing Logic ---

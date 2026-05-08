@@ -16,11 +16,29 @@ import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 
+// `unmarshall` from @aws-sdk/util-dynamodb returns DynamoDB SS attributes as
+// JavaScript `Set` objects. JSON.stringify on a Set emits "{}" (no enumerable
+// own properties), so array-shaped fields like `specializations`, `skills`,
+// and `certificates` arrive at the client as `{}` and fail Array.isArray
+// checks — making the UI think the saved values are empty.
+const setsToArrays = (value: unknown): unknown => {
+  if (value instanceof Set) return Array.from(value);
+  if (Array.isArray(value)) return value.map(setsToArrays);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = setsToArrays(v);
+    }
+    return out;
+  }
+  return value;
+};
+
 // Helper to build JSON responses with shared CORS
 const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
   headers: corsHeaders(event),
-  body: JSON.stringify(bodyObj),
+  body: JSON.stringify(setsToArrays(bodyObj)),
 });
 
 export const handler = async (

@@ -132,7 +132,7 @@ function createCongratulationsEmail(fullName: string, userType: string): EmailCo
 
         <!-- CTA Button -->
         <tr><td style="padding:0 40px 32px;text-align:center;">
-          <a href="https://app.dentipal.com/login" style="display:inline-block;background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);color:#532b21;padding:14px 36px;border-radius:10px;font-weight:700;font-size:15px;text-decoration:none;letter-spacing:0.3px;">
+          <a href="https://dentipal.com/login" style="display:inline-block;background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);color:#532b21;padding:14px 36px;border-radius:10px;font-weight:700;font-size:15px;text-decoration:none;letter-spacing:0.3px;">
             Get Started Now
           </a>
         </td></tr>
@@ -162,7 +162,7 @@ You're now part of the DentiPal community - the premier platform connecting dent
 What's Next:
 ${featureListText}
 
-Get started: https://app.dentipal.com/login
+Get started: https://dentipal.com/login
 
 Need help? Contact support@dentipal.com
 `;
@@ -357,7 +357,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         let smsSent: boolean = false;
         if (phoneNumber && SMS_TOPIC_ARN) {
             console.log('📱 Sending welcome SMS...');
-            const smsMessage: string = `🎉 Welcome to DentiPal, ${fullName}! Your ${userType} account is ready. Start exploring opportunities at app.dentipal.com`;
+            const smsMessage: string = `🎉 Welcome to DentiPal, ${fullName}! Your ${userType} account is ready. Start exploring opportunities at dentipal.com`;
             
             const smsCommandParams: PublishCommandInput = {
                 TopicArn: SMS_TOPIC_ARN,

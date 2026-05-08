@@ -3,8 +3,8 @@
 
 import {
   DynamoDBClient,
-  ScanCommand,
   QueryCommand,
+  QueryCommandOutput,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { extractUserFromBearerToken } from "./utils";
@@ -95,22 +95,41 @@ export const handler = async (event: any) => {
 
     const status = queryParams.status;
     const jobType = queryParams.jobType;
-    const limit = queryParams.limit ? parseInt(queryParams.limit) : 50;
 
-    // ---- Scan Applications Table ----
-    const applicationsCommand = new ScanCommand({
-      TableName: process.env.JOB_APPLICATIONS_TABLE,
-      FilterExpression:
-        "professionalUserSub = :userSub" +
-        (status ? " AND applicationStatus = :status" : ""),
-      ExpressionAttributeValues: {
-        ":userSub": { S: userSub },
-        ...(status && { ":status": { S: status } }),
-      },
-      Limit: limit,
-    });
+    // ---- Query Applications via professionalUserSub-index GSI ----
+    //
+    // Previously this was a Scan with Limit:50 + FilterExpression — DynamoDB
+    // applies Limit BEFORE the filter, so on any non-trivial table that
+    // returned a near-empty result and randomly hid the user's rows. Switched
+    // to a Query against the GSI (PK=professionalUserSub) which only reads
+    // this user's rows, paginating to completion so we never drop a row.
+    // No artificial cap: every professional's applications must be returned
+    // so the dashboard's tabs (scheduled / completed / pending) are accurate.
+    const allItems: Record<string, AttributeValue>[] = [];
+    let exclusiveStartKey: Record<string, AttributeValue> | undefined = undefined;
+    do {
+      const out: QueryCommandOutput = await dynamodb.send(new QueryCommand({
+        TableName: process.env.JOB_APPLICATIONS_TABLE,
+        IndexName: "professionalUserSub-index",
+        KeyConditionExpression: "professionalUserSub = :userSub",
+        ...(status
+          ? {
+              FilterExpression: "applicationStatus = :status",
+              ExpressionAttributeValues: {
+                ":userSub": { S: userSub },
+                ":status": { S: status },
+              },
+            }
+          : {
+              ExpressionAttributeValues: { ":userSub": { S: userSub } },
+            }),
+        ExclusiveStartKey: exclusiveStartKey,
+      }));
+      if (out.Items) allItems.push(...out.Items);
+      exclusiveStartKey = out.LastEvaluatedKey;
+    } while (exclusiveStartKey);
 
-    const applicationsResponse = await dynamodb.send(applicationsCommand);
+    const applicationsResponse = { Items: allItems };
     const applications: any[] = [];
 
     const toDates = (attr: AttributeValue | undefined): string[] => {
@@ -290,7 +309,6 @@ export const handler = async (event: any) => {
         filters: {
           status: status || "all",
           jobType: jobType || "all",
-          limit: limit
         }
       },
       timestamp: new Date().toISOString()

@@ -7,12 +7,17 @@ import {
     DynamoDBClientConfig,
 } from "@aws-sdk/client-dynamodb";
 import {
+    EventBridgeClient,
+    PutEventsCommand,
+    PutEventsRequestEntry,
+} from "@aws-sdk/client-eventbridge";
+import {
     APIGatewayProxyEventV2,
     APIGatewayProxyResultV2,
     APIGatewayProxyEvent,
 } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils"; 
-import { v4 as uuidv4 } from "uuid"; 
+import { extractUserFromBearerToken } from "./utils";
+import { v4 as uuidv4 } from "uuid";
 import { corsHeaders } from "./corsHeaders";
 
 // --- Type Definitions ---
@@ -64,6 +69,7 @@ const JOB_INVITATIONS_TABLE: string = process.env.JOB_INVITATIONS_TABLE!;
 const JOB_ID_INDEX: string = process.env.JOB_ID_INDEX || "jobId-index-1";
 
 const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
+const eb = new EventBridgeClient({ region: REGION });
 
 // --- Main Handler Function ---
 export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEvent): Promise<HandlerResponse> => {
@@ -206,6 +212,18 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         const invitationResults: InvitationResult[] = [];
         const errors: InvitationError[] = [];
 
+        // Shared shiftDetails for downstream notifications — same job, same details for every invitee.
+        const shiftDetails = {
+            role: job.professional_role?.S,
+            date: job.date?.S || job.start_date?.S,
+            startTime: job.start_time?.S,
+            endTime: job.end_time?.S,
+            location: job.city?.S || job.fullAddress?.S,
+            rate: job.rate?.N ? Number(job.rate.N) : undefined,
+            jobType: job.job_type?.S,
+        };
+        const eventEntries: PutEventsRequestEntry[] = [];
+
         for (const profSub of professionalUserSubs) {
             if (alreadyInvitedSubs.has(profSub)) {
                 errors.push({
@@ -247,9 +265,31 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
                     professionalUserSub: profSub,
                     status: "sent",
                 });
+
+                eventEntries.push({
+                    Source: "denti-pal.api",
+                    DetailType: "ShiftEvent",
+                    Detail: JSON.stringify({
+                        eventType: "invite-sent",
+                        clinicId,
+                        professionalSub: profSub,
+                        shiftDetails,
+                    }),
+                });
             } catch (err) {
                 console.error(`Failed to invite ${profSub}:`, err);
                 errors.push({ professionalUserSub: profSub, error: "Failed to send invitation" });
+            }
+        }
+
+        // Publish invite-sent events in batches of 10 (EventBridge per-call limit).
+        // Best-effort: a failure here is non-fatal so the invitations still complete.
+        for (let i = 0; i < eventEntries.length; i += 10) {
+            const batch = eventEntries.slice(i, i + 10);
+            try {
+                await eb.send(new PutEventsCommand({ Entries: batch }));
+            } catch (publishErr) {
+                console.error("[sendJobInvitations] failed to publish invite-sent batch (non-fatal):", (publishErr as Error).message);
             }
         }
 

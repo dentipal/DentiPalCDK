@@ -1,11 +1,16 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { 
-    DynamoDBDocumentClient, 
-    GetCommand, 
-    QueryCommand, 
-    UpdateCommand, 
-    DeleteCommand 
+import {
+    DynamoDBDocumentClient,
+    GetCommand,
+    QueryCommand,
+    UpdateCommand,
+    DeleteCommand
 } from "@aws-sdk/lib-dynamodb";
+import {
+    EventBridgeClient,
+    PutEventsCommand,
+    PutEventsRequestEntry,
+} from "@aws-sdk/client-eventbridge";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
 import { corsHeaders } from "./corsHeaders";
@@ -17,6 +22,7 @@ const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-J
 
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
+const eb = new EventBridgeClient({ region: REGION });
 
 // Helper
 const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
@@ -99,18 +105,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        // 5. Check for Active Applications
+        // 5. Check for Active Applications.
+        // Includes "scheduled" so an already-hired professional's row is also marked
+        // job_cancelled — and so the shift-cancelled email below has someone to fire for.
         const applicationsCommand = new QueryCommand({
             TableName: JOB_APPLICATIONS_TABLE,
-            // Assuming 'JobIndex' GSI exists where PK=jobId
-            // IndexName: 'JobIndex',
             KeyConditionExpression: "jobId = :jobId",
-            FilterExpression: "applicationStatus IN (:pending, :accepted, :negotiating)",
+            FilterExpression: "applicationStatus IN (:pending, :accepted, :negotiating, :scheduled)",
             ExpressionAttributeValues: {
                 ":jobId": jobId,
                 ":pending": "pending",
                 ":accepted": "accepted",
                 ":negotiating": "negotiating",
+                ":scheduled": "scheduled",
             },
         });
 
@@ -170,6 +177,38 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     console.warn(`Failed to update application ${applicationId}:`, updateError);
                 }
             }));
+        }
+
+        // 6b. Publish shift-cancelled events for any professional who was already scheduled.
+        // Best-effort: a failure here is non-fatal so the delete still completes.
+        const scheduledApps = activeApplications.filter((a) => a.applicationStatus === "scheduled");
+        if (scheduledApps.length > 0) {
+            const shiftDetails = {
+                role: (job as any).professional_role,
+                date: (job as any).date || (job as any).start_date,
+                startTime: (job as any).start_time,
+                endTime: (job as any).end_time,
+                location: (job as any).city || (job as any).fullAddress,
+                rate: (job as any).rate ? Number((job as any).rate) : undefined,
+                jobType: (job as any).job_type,
+            };
+            const entries: PutEventsRequestEntry[] = scheduledApps.map((app) => ({
+                Source: "denti-pal.api",
+                DetailType: "ShiftEvent",
+                Detail: JSON.stringify({
+                    eventType: "shift-cancelled",
+                    clinicId: jobClinicId,
+                    professionalSub: app.professionalUserSub,
+                    shiftDetails,
+                }),
+            }));
+            for (let i = 0; i < entries.length; i += 10) {
+                try {
+                    await eb.send(new PutEventsCommand({ Entries: entries.slice(i, i + 10) }));
+                } catch (publishErr) {
+                    console.error("[deleteTemporaryJob] failed to publish shift-cancelled batch (non-fatal):", (publishErr as Error).message);
+                }
+            }
         }
 
         // 7. Delete the Job

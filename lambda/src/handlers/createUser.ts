@@ -252,7 +252,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         <!-- CTA Button -->
         <tr><td style="padding:0 40px 32px;text-align:center;">
-          <a href="https://app.dentipal.com/login" style="display:inline-block;background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);color:#532b21;padding:14px 36px;border-radius:10px;font-weight:700;font-size:15px;text-decoration:none;">
+          <a href="https://dentipal.com/login" style="display:inline-block;background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);color:#532b21;padding:14px 36px;border-radius:10px;font-weight:700;font-size:15px;text-decoration:none;">
             Sign In Now
           </a>
         </td></tr>
@@ -277,7 +277,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 `Role: ${subgroup}\n` +
                 (clinicsLine ? `Clinics: ${clinicsLine}\n` : "") +
                 `\nFor security, please sign in and change your password immediately.\n` +
-                `Sign in: https://app.dentipal.com/login\n\n` +
+                `Sign in: https://dentipal.com/login\n\n` +
                 `If you did not expect this email, please contact your administrator.\n`;
 
             const emailParams: SendEmailCommandInput = {

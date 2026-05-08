@@ -217,11 +217,23 @@ interface ShiftDetails {
 
 // Define the structure expected from EventBridge 'detail'
 interface EventDetail {
-  eventType: "shift-applied" | "invite-accepted" | "shift-cancelled" | "shift-scheduled";
+  eventType: string;
   clinicId: string; // Changed to string based on makeConversationId usage with string interpolation
   professionalSub: string;
   shiftDetails?: ShiftDetails;
 }
+
+// Event types this handler renders into in-app system messages.
+// New event types added by the email/notifications feature (e.g.
+// "application-rejected", "invite-sent", "shift-modified") are routed only
+// through event-to-email and intentionally produce no in-app message — this
+// handler no-ops on them rather than throwing.
+const HANDLED_EVENT_TYPES = new Set([
+  "shift-applied",
+  "invite-accepted",
+  "shift-cancelled",
+  "shift-scheduled",
+]);
 
 // Define the structure of the incoming EventBridge event
 interface EventBridgeEvent {
@@ -238,7 +250,12 @@ export const handler = async (event: EventBridgeEvent): Promise<{ statusCode: nu
 
     const { detail } = event;
     const { clinicId, professionalSub, shiftDetails = {} } = detail;
-    const eventType = detail.eventType as EventDetail['eventType'];
+    const eventType = detail.eventType;
+
+    if (!HANDLED_EVENT_TYPES.has(eventType)) {
+      console.log(`[event-to-message] no-op for eventType=${eventType} (not rendered as in-app message)`);
+      return { statusCode: 200 };
+    }
 
     if (!clinicId || !professionalSub) {
       throw new Error("Missing clinicId or professionalSub in event detail");
@@ -308,7 +325,10 @@ export const handler = async (event: EventBridgeEvent): Promise<{ statusCode: nu
         break;
 
       default:
-        throw new Error(`Unknown eventType: ${eventType}`);
+        // Unreachable: we early-returned above for unhandled types.
+        // Kept exhaustive so the switch stays a closed system.
+        console.warn(`[event-to-message] reached default branch for eventType=${eventType}`);
+        return { statusCode: 200 };
     }
 
     // --- Store message in DentiPal-Messages ---

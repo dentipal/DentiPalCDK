@@ -2,8 +2,13 @@ import {
   DynamoDBClient,
   UpdateItemCommand,
   UpdateItemCommandInput,
-  DynamoDBClientConfig
+  DynamoDBClientConfig,
+  QueryCommand,
 } from "@aws-sdk/client-dynamodb";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
 import {
   APIGatewayProxyEvent,
   APIGatewayProxyResult
@@ -16,9 +21,12 @@ import { corsHeaders } from "./corsHeaders";
 // --- Constants and Initialization ---
 
 const REGION: string = process.env.REGION!;
+const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-V5-JobPostings";
+const POSTINGS_JOB_INDEX = process.env.JOB_ID_INDEX || "jobId-index-1";
 
 const clientConfig: DynamoDBClientConfig = { region: REGION };
 const dynamodb = new DynamoDBClient(clientConfig);
+const eb = new EventBridgeClient({ region: REGION });
 
 const ALLOWED_GROUPS = new Set<string>(["root", "clinicadmin", "clinicmanager"]);
 
@@ -146,7 +154,43 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     console.log(`Application for job ${jobId} by professional ${professionalUserSub} rejected successfully.`);
 
-    // 5. Success Response
+    // 5. Publish EventBridge event for downstream notification (email).
+    // Best-effort: a failure here is non-fatal so the reject still completes.
+    try {
+      const jobRes = await dynamodb.send(new QueryCommand({
+        TableName: JOB_POSTINGS_TABLE,
+        IndexName: POSTINGS_JOB_INDEX,
+        KeyConditionExpression: "jobId = :jid",
+        ExpressionAttributeValues: { ":jid": { S: jobId } },
+        Limit: 1,
+      }));
+      const jobItem = (jobRes.Items || [])[0];
+      const shiftDetails = {
+        role: jobItem?.professional_role?.S,
+        date: jobItem?.date?.S || jobItem?.start_date?.S,
+        startTime: jobItem?.start_time?.S,
+        endTime: jobItem?.end_time?.S,
+        location: jobItem?.city?.S || jobItem?.fullAddress?.S,
+        rate: jobItem?.rate?.N ? Number(jobItem.rate.N) : undefined,
+        jobType: jobItem?.job_type?.S,
+      };
+      await eb.send(new PutEventsCommand({
+        Entries: [{
+          Source: "denti-pal.api",
+          DetailType: "ShiftEvent",
+          Detail: JSON.stringify({
+            eventType: "application-rejected",
+            clinicId,
+            professionalSub: professionalUserSub,
+            shiftDetails,
+          }),
+        }],
+      }));
+    } catch (publishErr) {
+      console.error("[rejectProf] failed to publish application-rejected event (non-fatal):", (publishErr as Error).message);
+    }
+
+    // 6. Success Response
     return json(event, 200, {
       status: "success",
       statusCode: 200,
