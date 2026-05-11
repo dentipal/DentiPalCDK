@@ -1,0 +1,15 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-SRCH-001","Verify search debounce","Talent search debounce","On talent marketplace","1. Type quickly in search bar","searchTerm: smith (typed in <1s)","Only 1 API call fires ~300ms after typing stops","Reduced API load","",""
+"TC-SRCH-002","Verify multi-filter logic","Find-Jobs multi-filter","On Find Shifts page","1. Apply role, location, and date range filters","role: Hygienist
+location: Austin
+dateRange: 7days","Correct AND-logic; result count accurate","Filtered results","",""
+"TC-SRCH-003","Verify clear filters","Clear filters","Filters currently applied","1. Click Clear button","N/A","All filters reset; default results reload","Filters cleared","",""
+"TC-SRCH-004","Verify URL state persistence","Filter state persists via URL","Filters applied","1. Apply filters
+2. Copy URL
+3. Open URL in new tab","filters in URL params","Same filtered view restored from URL params","State restored","",""
+"TC-SRCH-005","Verify injection protection","Search SQL/NoSQL injection","On any search field","1. Type injection payload","searchTerm: '; DROP TABLE --","Treated as plain text; no error from backend; no data damage","No injection effect","",""
+"TC-SRCH-006","Verify case-insensitive search","Case-insensitive search","On search field","1. Search with uppercase term","searchTerm: SMITH","Matches Smith, smith, sMiTh","Case-insensitive results","",""
+"TC-SRCH-007","Verify unicode and emoji","Unicode / emoji in search","On search field","1. Type unicode or emoji","searchTerm: José or 🦷","Handled correctly; no crash","Search succeeds","",""
+"TC-SRCH-008","Verify sort persistence","Sort persists within session","Sort applied","1. Apply sort
+2. Navigate away
+3. Return to page","sort: rate_desc","Sort preserved within session","Sort state retained","",""

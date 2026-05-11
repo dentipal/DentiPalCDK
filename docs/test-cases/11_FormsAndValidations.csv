@@ -1,0 +1,21 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-FORM-001","Verify required field marker","Required field marker","On any form","1. Open any form","N/A","Asterisk (*) marker on required fields; same style across app","Consistent UI","",""
+"TC-FORM-002","Verify error on blur","Required blank shows error on blur","On a form","1. Focus required field
+2. Blur without typing","N/A","Error shown on blur; cleared when valid value entered","Field validates on blur","",""
+"TC-FORM-003","Verify submit disabled when invalid","Submit disabled while invalid","On a form","1. Open form with empty required fields","N/A","Submit button disabled OR submit attempt shows all errors","No invalid submission","",""
+"TC-FORM-004","Verify submit loading state","Submit shows spinner","On a form","1. Fill valid data
+2. Click Submit","N/A","Button shows loading state; double-click prevented","No duplicate submission","",""
+"TC-FORM-005","Verify server error mapping","Server error surfaces inline","Backend returns 400","1. Submit form that triggers backend 400","N/A","Error mapped to correct field OR top-of-form message","Error visible","",""
+"TC-FORM-006","Verify email format","Email format check","On a form with email field","1. Enter invalid email
+2. Submit","email: not-an-email","Zod validation error shown","No submission","",""
+"TC-FORM-007","Verify phone with country code","Phone validated with country code","On phone-input field","1. Select country US
+2. Enter short number","country: US
+phone: 123","Error ""Invalid phone for country""","No submission","",""
+"TC-FORM-008","Verify XSS in text inputs","XSS in text inputs","On any text input","1. Enter malicious payload
+2. View saved value","input: <img src=x onerror=alert(1)>","Rendered as text in view; not executed","No script runs","",""
+"TC-FORM-009","Verify max length enforcement","Max length enforcement","On a text input with limit","1. Paste very long string","input: A x 10000","Truncated to field max OR rejected with ""Too long""","No overflow","",""
+"TC-FORM-010","Verify unsaved-changes warning","Unsaved-changes warning","Edit form is dirty","1. Make changes
+2. Navigate away","N/A","Browser prompt ""Discard changes?"" shown","User confirms before nav","",""
+"TC-FORM-011","Verify malicious filename sanitized","File upload - malicious filename","Uploading a file","1. Upload file with path-traversal name","filename: ../../etc/passwd.jpg","Filename sanitized; stored safely","No path traversal","",""
+"TC-FORM-012","Verify accessibility labels","Form accessibility - labels for inputs","Any form","1. Inspect DOM with DevTools","N/A","Every input has associated <label for> or aria-label","Forms accessible","",""
+"TC-FORM-013","Verify tab order","Tab order logical","Any form","1. Tab through fields","N/A","Tab order matches visual reading flow","Logical focus order","",""

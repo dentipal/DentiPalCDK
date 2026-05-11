@@ -1,0 +1,15 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-RBAC-001","Verify Root menu visibility","Root sees all menu items","Logged in as Root","1. Open sidebar navigation","role: Root","Users, Add Clinic, Post Job, Talent Marketplace, Inbox all visible","Full menu rendered","",""
+"TC-RBAC-002","Verify ClinicAdmin menu","ClinicAdmin sees admin items but not founder-only","Logged in as ClinicAdmin","1. Open sidebar navigation","role: ClinicAdmin","Users and clinic admin tools visible; founder-only items (e.g., delete clinic) hidden","Reduced menu rendered","",""
+"TC-RBAC-003","Verify Manager blocked from Users","ClinicManager cannot access /users","Logged in as ClinicManager","1. Navigate to /users URL","role: ClinicManager","403 forbidden or redirect to dashboard","No users data shown","",""
+"TC-RBAC-004","Verify Viewer cannot post jobs","ClinicViewer cannot post jobs","Logged in as ClinicViewer","1. Navigate to /post-temporary-job","role: ClinicViewer","403 or redirect; direct API call returns 403","No job created","",""
+"TC-RBAC-005","Verify Viewer cannot delete clinic","ClinicViewer cannot delete clinic","Logged in as ClinicViewer","1. Attempt PUT/DELETE on clinic record via UI or API","role: ClinicViewer
+clinicId: CLINIC-001","403 from backend","Clinic record unchanged","",""
+"TC-RBAC-006","Verify role change effective on relogin","Role change takes effect on next login","Admin changes user role","1. Affected user re-authenticates","oldRole: Viewer
+newRole: Manager","New JWT contains updated cognito:groups; UI reflects new permissions","User has new role privileges","",""
+"TC-RBAC-007","Verify JWT tamper protection","JWT tamper - elevate role","User has valid Viewer token","1. Modify cognito:groups in localStorage JWT
+2. Call protected admin API","modifiedJWT (Viewer claim swapped to Root)","Backend rejects request (signature invalid); no access granted","No privilege escalation","",""
+"TC-RBAC-008","Verify case-insensitive group match","Case-insensitive group match","User assigned to lowercase group ""clinicadmin""","1. Call endpoint that requires ClinicAdmin","group: clinicadmin","Access granted (backend normalizes group case)","Authorized request succeeds","",""
+"TC-RBAC-009","Verify cross-clinic isolation","Cross-clinic isolation","Admin of Clinic A","1. Attempt to access Clinic B data via API","userClinics: [CLINIC-A]
+target: CLINIC-B","403 returned (user not in AssociatedUsers of Clinic B)","No data leak","",""
+"TC-RBAC-010","Verify orphan assignment handling","Orphan UserClinicAssignment ignored","Clinic deleted but assignment record remains","1. Login as user whose only assignment points to deleted clinic","clinicId: CLINIC-DELETED","Orphan assignment not surfaced; no crash; user shown empty/no-clinic state","Stable session","",""

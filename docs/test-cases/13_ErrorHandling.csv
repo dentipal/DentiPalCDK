@@ -1,0 +1,14 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-ERR-001","Verify 400 response shape","400 Bad Request shape","Postman/Bruno ready","1. Submit form missing required field via API","payload missing required field","Returns {error, message, statusCode: 400, requiredFields: [...], timestamp}","Standardized error","",""
+"TC-ERR-002","Verify expired token handling","401 Unauthorized UI","Token expired","1. Trigger any API call","Authorization: Bearer <expired-jwt>","Auto-logout OR silent refresh; if refresh fails, redirect to login","User re-authenticated","",""
+"TC-ERR-003","Verify 403 UI feedback","403 Forbidden UI","Viewer role","1. Attempt forbidden action","role: ClinicViewer","Toast ""You don't have permission""; no partial UI update","Action blocked","",""
+"TC-ERR-004","Verify 404 page","404 page","On a non-existent route","1. Navigate to /does-not-exist","route: /does-not-exist","Custom 404 page; link to dashboard","User sees 404","",""
+"TC-ERR-005","Verify 500 friendly page","500 Internal Server Error","Backend exception","1. Trigger 500","force backend exception","Friendly error page ""Something went wrong""; no stack trace exposed","Error contained","",""
+"TC-ERR-006","Verify offline handling","Network offline","No internet","1. Disable network
+2. Submit form","network: offline","Error ""No internet connection""; form data preserved for retry","Data preserved","",""
+"TC-ERR-007","Verify timeout handling","API timeout","Backend response >30s","1. Trigger long-running call","timeout: 30s","Timeout handled; retry available; UI not frozen","User can retry","",""
+"TC-ERR-008","Verify partial bulk failure","Partial failure in bulk invite","Sending bulk of 50 with one failure","1. Send bulk invite where 1/50 fails","count: 50
+failures: 1","Summary shows ""49 sent, 1 failed"" with retry option","Partial success handled","",""
+"TC-ERR-009","Verify field-level error mapping","Field-level error mapping","Backend returns field errors","1. Trigger backend field-level validation error","fieldErrors: {email: ""invalid""}","Each error attaches to correct form field","Errors attributed","",""
+"TC-ERR-010","Verify toast auto-dismiss","Toast auto-dismiss","Trigger any toast","1. Observe toast","N/A","Dismisses after 5s or on click; multiple toasts stack","Toast UX correct","",""
+"TC-ERR-011","Verify no sensitive info leaked","No sensitive info in errors","Backend error triggered","1. Trigger backend error","force error","User-facing message contains no stack trace, SQL, or internal IDs","No info leak","",""

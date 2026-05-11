@@ -1,0 +1,20 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-INB-001","Verify clinic inbox loads","Inbox loads for clinic","Clinic user logged in","1. Navigate to /clinic-inbox","N/A","Conversation list on left; empty message pane on right","Inbox rendered","",""
+"TC-INB-002","Verify professional inbox loads","Inbox loads for professional","Professional logged in","1. Navigate to /professional-inbox","N/A","Same layout, pro-specific conversations","Inbox rendered","",""
+"TC-INB-003","Verify open conversation","Open a conversation","Conversation exists","1. Click conversation in list","conversationId: CONV-001","Messages render in MessageView; chronological order","Conversation opened","",""
+"TC-INB-004","Verify send message","Send message","Inside an open conversation","1. Type message in input
+2. Click Send","message: Hello!","Message appears immediately (optimistic); delivered via WebSocket","Message sent","",""
+"TC-INB-005","Verify real-time receive","Receive message in real time","Two users both online","1. User A sends a message to User B","message: Hi B!","Message arrives in User B's inbox without page refresh; unread badge increments","Real-time delivery","",""
+"TC-INB-006","Verify conversation search","Search conversations","User has 20+ threads","1. Type search term in inbox search","searchTerm: smith","List filters by participant name","Filtered list shown","",""
+"TC-INB-007","Verify emoji picker","Emoji picker","Inside an open conversation","1. Open emoji picker
+2. Pick emoji","emoji: 🙂","Emoji inserted at cursor","Emoji in input","",""
+"TC-INB-008","Verify long message handling","Message with 10,000 chars","Inside an open conversation","1. Paste 10000-char string
+2. Click Send","messageLength: 10000","Either accepted and truncated with warning OR rejected with clear limit message","Message handled gracefully","",""
+"TC-INB-009","Verify XSS protection","XSS attempt in message","Inside an open conversation","1. Send malicious script as message","message: <script>alert(1)</script>","Rendered as text; script NOT executed","No alert triggered","",""
+"TC-INB-010","Verify Viewer read-only","ClinicViewer read-only","Logged in as ClinicViewer","1. Open inbox","role: ClinicViewer","Can read messages; message input disabled","Cannot send","",""
+"TC-INB-011","Verify WebSocket reconnect","WebSocket reconnect","Connection dropped","1. Kill network
+2. Restore network","N/A","Auto-reconnect; no lost messages","Connection restored","",""
+"TC-INB-012","Verify mobile inbox layout","Mobile layout","Narrow viewport","1. Resize browser to mobile","viewport: 375px","Conversation list and message view stack; back navigation works","Mobile layout active","",""
+"TC-INB-013","Verify notification badge","Notification bell badge","New invite or message arrived","1. Observe header bell","unreadCount: 3","Badge shows unread count; clears on open","Badge accurate","",""
+"TC-INB-014","Verify lazy loading","Inbox lazy-load","First app load","1. Open DevTools Network tab
+2. Navigate to inbox only after other pages","N/A","Inbox JS chunk loaded only when visited","Bundle deferred","",""

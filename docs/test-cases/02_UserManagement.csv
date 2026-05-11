@@ -1,0 +1,44 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-USR-001","Verify Users page access for Root","Open Users page as Root","Logged in as Root user","1. Navigate to /users","N/A","Page loads with list of clinic users; ""Add User"" button visible","Users list rendered","",""
+"TC-USR-002","Verify Users page restricted for Manager","Open Users page as ClinicManager","Logged in as ClinicManager","1. Navigate to /users","N/A","Redirected to dashboard or 403 message; page content not rendered","No user list shown","",""
+"TC-USR-003","Verify Users page restricted for Viewer","Open Users page as ClinicViewer","Logged in as ClinicViewer","1. Navigate to /users","N/A","Redirected to dashboard or 403 message","No user list shown","",""
+"TC-USR-004","Verify add user happy path","Add new user - happy path","Logged in as Root","1. Click ""Add Users""
+2. Fill firstName, lastName, countryCode, phone, email, password, verifyPassword
+3. Set subgroup = ClinicAdmin
+4. Select clinicIds
+5. Check sendWelcomeEmail
+6. Click Submit","firstName: Jane
+lastName: Smith
+countryCode: +1
+phone: 5550101
+email: jane@clinic.com
+password: ValidPass123!
+subgroup: ClinicAdmin
+clinicIds: [CLINIC-001]","User created in Cognito and UserClinicAssignments table; row appears in list; welcome email sent","New user available for login","",""
+"TC-USR-005","Verify duplicate email rejection","Add user with duplicate email","Email already exists","1. Submit Add User form with existing email","email: existing@clinic.com","Error ""Email already in use""; no user created","No new record created","",""
+"TC-USR-006","Verify clinic assignment required","Add user without clinic assignment","User on Add User form","1. Fill all fields
+2. Leave clinicIds empty
+3. Submit","clinicIds: []","Validation error ""At least one clinic required""","No user created","",""
+"TC-USR-007","Verify password match validation","Password vs verifyPassword mismatch","User on Add User form","1. Enter password
+2. Enter different verifyPassword
+3. Submit","password: Abcd1234
+verifyPassword: Abcd9999","Inline error ""Passwords must match""","No user created","",""
+"TC-USR-008","Verify user subgroup edit","Edit user - change subgroup","User exists with role ClinicViewer","1. Click Edit on user row
+2. Change subgroup from ClinicViewer to ClinicManager
+3. Save","subgroup: ClinicManager","Cognito group updated (case-insensitive match); UI list reflects change","User now has Manager permissions","",""
+"TC-USR-009","Verify clinic assignment edit","Edit user - change clinic assignments","User exists with clinic A","1. Click Edit on user row
+2. Deselect clinic A
+3. Add clinic B
+4. Save","oldClinicId: CLINIC-A
+newClinicId: CLINIC-B","UserClinicAssignments updated; orphaned records cleaned","User now linked to clinic B only","",""
+"TC-USR-010","Verify user delete","Delete user","User exists, target is not self","1. Click Delete on user row
+2. Confirm deletion","userId: USR-123","User removed from list; Cognito user deleted; assignments removed","Target user can no longer log in","",""
+"TC-USR-011","Verify self-delete blocked","Delete self blocked","Logged in as Root","1. Attempt delete on own row","userId: (own sub)","Delete button disabled or error ""Cannot delete yourself""","Root user remains","",""
+"TC-USR-012","Verify Admin cannot delete Root","ClinicAdmin deletes Root user","Logged in as ClinicAdmin","1. Attempt to delete Root user","userId: (root sub)","403 Forbidden; action blocked","Root user remains","",""
+"TC-USR-013","Verify user list pagination and sort","User list pagination and sort","More than 25 users exist","1. Scroll list
+2. Change page
+3. Sort by name or date","sortBy: name","Pagination works; sort orders list correctly","List state updated","",""
+"TC-USR-014","Verify invalid country code rejected","Phone with invalid country code","User on Add User form","1. Enter invalid country code
+2. Submit","countryCode: ZZ","Dropdown prevents invalid value; fallback validation rejects","No user created","",""
+"TC-USR-015","Verify backend permission check","Add user without permission via direct API","Manager role token","1. Call POST /users directly via Postman","role: ClinicManager
+Authorization: Bearer <manager-jwt>","403 Forbidden returned","No user created","",""

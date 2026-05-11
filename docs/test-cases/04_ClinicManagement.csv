@@ -1,0 +1,41 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-CLIN-001","Verify Add Clinic modal opens","Open Add Clinic modal","Logged in as Root or ClinicAdmin","1. Click ""+ Add Clinic"" button","N/A","Modal opens; all fields empty; required fields marked with *","Modal visible","",""
+"TC-CLIN-002","Verify clinic creation happy path","Create clinic - happy path","User on Add Clinic modal","1. Fill officeName, street, city, state, zipCode, website
+2. Fill title, firstName, lastName
+3. Select practiceType = independent
+4. Select primaryPractice = general
+5. Enter numberOfOperators, hygienists, assistants, doctors
+6. Optionally add software, parking, notes, image
+7. Click Submit","officeName: Smile Dental
+street: 123 Main St
+city: Austin
+state: TX
+zipCode: 78701
+website: https://smiledental.com
+practiceType: independent
+primaryPractice: general","Clinic created in DynamoDB Clinics table; createdBy = current userSub; redirects to clinic list","Clinic entry visible","",""
+"TC-CLIN-003","Verify required field validation","Submit with missing officeName","User on Add Clinic modal","1. Leave officeName blank
+2. Submit","officeName: (empty)","Inline error ""Office name is required""; no API call","Form remains open","",""
+"TC-CLIN-004","Verify ZIP code validation","Invalid ZIP format","User on Add Clinic modal","1. Enter invalid ZIP
+2. Submit","zipCode: ABCDE","Zod error ""Invalid ZIP code""","No clinic created","",""
+"TC-CLIN-005","Verify website URL validation","Invalid website URL","User on Add Clinic modal","1. Enter invalid URL
+2. Submit","website: not a url","Error ""Enter a valid URL""","No clinic created","",""
+"TC-CLIN-006","Verify numeric field bounds","numberOfOperators negative","User on Add Clinic modal","1. Enter negative number for operators","numberOfOperators: -3","Rejected with validation ""Must be >= 0""","No clinic created","",""
+"TC-CLIN-007","Verify valid image upload","Upload office image - valid","User on Add Clinic modal","1. Click image upload
+2. Select 2MB JPG file","file: office.jpg (2MB)","Presigned URL obtained; S3 upload succeeds; image preview shown","Image attached to draft","",""
+"TC-CLIN-008","Verify oversized image rejection","Upload office image - oversized","User on Add Clinic modal","1. Attempt upload of 20MB file","file: huge.jpg (20MB)","Rejected with size-limit error","No upload performed","",""
+"TC-CLIN-009","Verify non-image file rejection","Upload non-image file","User on Add Clinic modal","1. Attempt upload of executable","file: malicious.exe","Rejected with file-type error","No upload performed","",""
+"TC-CLIN-010","Verify multi-select software","Multi-select softwareUsed","User on Add Clinic modal","1. Select multiple software options
+2. Save","softwareUsed: [Curve, Dentrix, Eaglesoft]","All three values persisted as array on clinic profile","Clinic profile shows all selections","",""
+"TC-CLIN-011","Verify parking conditional fields","parking = no hides parkingCost","User on Add Clinic modal","1. Select parking = no","parking: no","parkingType and parkingCost fields disabled or hidden","Conditional fields hidden","",""
+"TC-CLIN-012","Verify DSO conditional fields","practiceType = dso requires parent fields","User on Add Clinic modal","1. Select practiceType = dso","practiceType: dso","DSO-specific fields appear","DSO fields visible","",""
+"TC-CLIN-013","Verify cancel discards changes","Cancel button discards changes","Form partially filled","1. Start filling form
+2. Click Cancel button","officeName: Test Clinic","Modal closes without saving; reopening shows empty form","No clinic created","",""
+"TC-CLIN-020","Verify edit clinic prepopulation","Edit clinic - load existing data","Clinic record exists","1. Navigate to /edit-clinic/:id","clinicId: CLINIC-001","All fields prepopulated with existing data","Form ready for edit","",""
+"TC-CLIN-021","Verify edit save","Edit clinic - save change","On edit clinic page","1. Modify numberOfOperators
+2. Save","numberOfOperators: 5","PUT request succeeds; updated value displayed","Clinic record updated","",""
+"TC-CLIN-022","Verify edit relaxed validation","Edit clinic - relaxed validation","On edit clinic page","1. Clear optional fields
+2. Save","optionalFields: cleared","Form allows partial updates per current implementation","Clinic record updated","",""
+"TC-CLIN-023","Verify unauthorized edit blocked","Edit clinic not owned by user","Logged in as admin of different clinic","1. Navigate to /edit-clinic/{other-clinic-id}","clinicId: CLINIC-OTHER","403 from backend; UI shows ""Not authorized""","No edit performed","",""
+"TC-CLIN-024","Verify clinic delete","Delete clinic","Logged in as Root","1. Click Delete on clinic
+2. Confirm","clinicId: CLINIC-001","Clinic removed from list; dependent data handled per business rules","Clinic and associations cleaned","",""
