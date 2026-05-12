@@ -1,0 +1,137 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-NEG-001","Verify professional negotiations list loads","Pro can view all of their negotiations","Logged in as Professional with at least one active negotiation","1. Navigate to /professional-dashboard
+2. Open Pending / Action-Needed tab containing negotiation entries","Authorization: Bearer <pro-jwt>","GET /negotiations returns enriched list; rows show clinic name, role, shift date, rate, status","Negotiation list rendered",""," "
+"TC-NEG-002","Verify single negotiation lookup by applicationId","Pro fetches one negotiation by applicationId","Pro has an open application with negotiation","1. GET /negotiations?applicationId={appId}","applicationId: APP-001","Single enriched negotiation returned with clinicResponse, professionalResponse, counters, payType","Detail fetched",""," "
+"TC-NEG-003","Verify negotiation lookup by jobId","Pro fetches negotiation tied to a specific job","Pro has applied to job with active negotiation","1. GET /negotiations?jobId={jobId}&professionalUserSub={sub}","jobId: JOB-100
+professionalUserSub: PRO-123","Negotiation for that job + pro returned via JobIndex GSI","Detail fetched",""," "
+"TC-NEG-004","Verify pro counter-offer (per_hour)","Pro submits counter-offer on hourly job","Invitation/application open; status Pending","1. Click Counter on invite card
+2. Enter new hourly rate in ReCounterModal
+3. Submit","invitationId: INV-001
+payType: per_hour
+professionalCounterRate: 60
+message: ""Available at this rate""","PUT /applications/{appId}/negotiations/{negId}/response with response=counter_offer; status=negotiating; professionalCounterRate persisted","Counter recorded",""," "
+"TC-NEG-005","Verify pro counter-offer (per_transaction)","Pro submits counter on per-transaction job","Invitation open with payType per_transaction","1. Open ReCounterModal
+2. Enter per-transaction amount
+3. Submit","payType: per_transaction
+professionalCounterRate: 45","Counter accepted; payType preserved","Counter recorded",""," "
+"TC-NEG-006","Verify pro counter (percentage_of_revenue, valid)","Pro submits valid percentage counter","Invitation open with payType percentage_of_revenue","1. Open ReCounterModal
+2. Enter 35
+3. Submit","payType: percentage_of_revenue
+professionalCounterRate: 35","Counter accepted (0 < rate <= 100)","Counter recorded",""," "
+"TC-NEG-007","Verify pro counter rejected — percentage > 100","Reject percentage counter over 100","Invitation with percentage_of_revenue payType","1. Enter 150 in ReCounterModal
+2. Submit","professionalCounterRate: 150","Validation error; 400 from API; modal shows error","No change",""," "
+"TC-NEG-008","Verify pro counter rejected — negative rate","Reject negative counter","Invitation open","1. Enter -10 in ReCounterModal
+2. Submit","professionalCounterRate: -10","Validation error; submit blocked","No change",""," "
+"TC-NEG-009","Verify pro counter rejected — zero rate","Reject zero counter","Invitation open","1. Enter 0 in ReCounterModal
+2. Submit","professionalCounterRate: 0","Validation error; submit blocked","No change",""," "
+"TC-NEG-010","Verify counter message persisted","Optional message stored with counter","Invitation open","1. Enter rate + free-text message
+2. Submit","professionalCounterRate: 55
+message: ""Includes weekend premium""","Message persisted on negotiation record; visible in history","Message stored",""," "
+"TC-NEG-011","Verify pro accepts clinic counter","Pro accepts clinic counter-offer","Clinic has countered; status Countered (action-needed)","1. Open ReCounterModal
+2. Click Accept","negotiationId: NEG-001
+response: accepted","PUT with response=accepted; agreedRate resolved to clinicCounterRate; applicationStatus=scheduled","Negotiation accepted",""," "
+"TC-NEG-012","Verify pro declines clinic counter","Pro declines clinic counter-offer","Clinic counter pending","1. Open ReCounterModal
+2. Click Decline","response: declined","PUT with response=declined; applicationStatus=declined; negotiation closed","Negotiation declined",""," "
+"TC-NEG-013","Verify pro re-counters","Pro re-counters after clinic counter","Multi-round negotiation; clinic has just countered","1. Open ReCounterModal
+2. Enter new rate (different from clinicCounterRate)
+3. Submit","clinicCounterRate: 55
+professionalCounterRate: 58","Round recorded; clinicResponse cleared/queued; clinic gets action-needed","Round +1",""," "
+"TC-NEG-014","Verify counter history is chronological","Pro views full negotiation thread","Negotiation has 3+ rounds","1. Open negotiation thread/details","negotiationId: NEG-001","All rounds shown in order with author, rate, timestamp, message","History visible",""," "
+"TC-NEG-015","Verify cannot counter after acceptance","Terminal state guards counter (accepted)","negotiationStatus=accepted","1. Attempt PUT response=counter_offer","Authorization: Bearer <pro-jwt>","API returns error; UI hides Counter button","No state change",""," "
+"TC-NEG-016","Verify cannot counter after rejection","Terminal state guards counter (declined)","negotiationStatus=declined","1. Attempt PUT response=counter_offer","Authorization: Bearer <pro-jwt>","API returns error; record unchanged","No state change",""," "
+"TC-NEG-017","Verify clinic negotiations overview loads","Clinic sees negotiations dashboard","Logged in as Clinic admin with manageApplicants permission","1. Navigate to /negotiations
+2. Wait for fetchNegotiations()","Authorization: Bearer <clinic-jwt>","GET /negotiations returns rows; table renders Name/Role/PayType/Rate/ShiftDate/Status/Actions","Overview rendered",""," "
+"TC-NEG-018","Verify access denied without permission","Clinic role lacking manageApplicants blocked","Clinic staff without canWrite(""manageApplicants"")","1. Navigate to /negotiations","Authorization: Bearer <viewer-jwt>","Page renders read-only or shows 403; action buttons hidden","No write actions",""," "
+"TC-NEG-019","Verify clinic accepts pro offer","Clinic accepts professional's proposed/counter rate","Pro has submitted counter; row status Countered","1. Click Accept on row","negotiationId: NEG-001","sendNegotiationResponse called with action=accept; row updates to Accepted; toast shown","Accepted",""," "
+"TC-NEG-020","Verify accept moves application to scheduled","applicationStatus transitions to scheduled","Clinic accepts","1. Click Accept
+2. Re-fetch application","applicationStatus before: negotiating","applicationStatus after: scheduled; agreedRate written","Status synced",""," "
+"TC-NEG-021","Verify EventBridge ShiftEvent on accept","shift-scheduled event published","Clinic accepts (final acceptance)","1. Inspect EventBridge events after PUT","event detail-type: shift-scheduled","Event published with clinicId, professionalUserSub, jobId, shiftDate, agreedRate","Event observed",""," "
+"TC-NEG-022","Verify agreedRate persistence on accept","agreedRate captured on negotiation record","Final acceptance","1. PUT response=accepted
+2. GET negotiation","See accept flow","agreedRate set to whichever side's last counter was accepted; defaults to proposedRate if no counter","agreedRate stored",""," "
+"TC-NEG-023","Verify clinic rejects pro offer","Clinic declines negotiation","Row status Pending or Countered","1. Click Reject on row","negotiationId: NEG-001","Action=reject -> response=declined; row updates to Rejected; pro notified","Rejected",""," "
+"TC-NEG-024","Verify clinic counter (per_hour)","Clinic sends counter-offer on hourly job","Row status Pending","1. Click Counter
+2. Enter new amount in CounterOfferModal
+3. Submit","payType: per_hour
+clinicCounterRate: 50","PUT response=counter_offer; clinicCounterRate persisted; status=Countered","Counter recorded",""," "
+"TC-NEG-025","Verify clinic counter (per_transaction)","Clinic counter on per-transaction job","payType per_transaction","1. Open CounterOfferModal
+2. Enter amount
+3. Submit","payType: per_transaction
+clinicCounterRate: 40","Counter accepted","Counter recorded",""," "
+"TC-NEG-026","Verify clinic counter (percentage_of_revenue)","Clinic counter on percentage job","payType percentage_of_revenue","1. Open CounterOfferModal
+2. Enter 30
+3. Submit","clinicCounterRate: 30","Counter accepted (0-100 range)","Counter recorded",""," "
+"TC-NEG-027","Verify clinic counter (permanent salary)","Clinic counter on permanent posting with min/max","Permanent application open","1. Open NegotiateModal (permanent mode)
+2. Enter min and max salary
+3. Submit","counterSalaryMin: 70000
+counterSalaryMax: 90000","PUT with kind=permanent; both fields persisted","Counter recorded",""," "
+"TC-NEG-028","Verify permanent counter rejected — min > max","Validation: salary min must be <= max","NegotiateModal in permanent mode","1. Enter min=90000, max=70000
+2. Submit","counterSalaryMin: 90000
+counterSalaryMax: 70000","Inline validation error; submit blocked","No change",""," "
+"TC-NEG-029","Verify permanent counter rejected — missing min","Validation: min required","NegotiateModal in permanent mode","1. Leave min empty
+2. Enter max
+3. Submit","counterSalaryMax: 80000","Validation error; submit blocked","No change",""," "
+"TC-NEG-030","Verify permanent counter rejected — missing max","Validation: max required","NegotiateModal in permanent mode","1. Enter min only
+2. Submit","counterSalaryMin: 70000","Validation error; submit blocked","No change",""," "
+"TC-NEG-031","Verify clinic re-counters after pro counter","Multi-round: clinic re-counters","Pro has countered; status action-needed for clinic","1. Click Counter on row
+2. Enter new amount
+3. Submit","previous professionalCounterRate: 60
+new clinicCounterRate: 55","New round recorded; pro side flagged action-needed","Round +1",""," "
+"TC-NEG-032","Verify clinic cannot edit after acceptance","Terminal guard (clinic side)","negotiationStatus=accepted","1. Inspect row in NegotiationsTable","status: Accepted","Action buttons (Accept/Reject/Counter) hidden","Read-only row",""," "
+"TC-NEG-033","Verify clinic cannot edit after rejection","Terminal guard after decline","negotiationStatus=declined","1. Inspect row","status: Rejected","Action buttons hidden","Read-only row",""," "
+"TC-NEG-034","Verify action buttons gated by status","Actions only visible for Pending/Countered","Mixed rows in table","1. Inspect each row's actions cell","statuses: Pending, Countered, Accepted, Rejected","Accept/Reject/Counter shown only on Pending and Countered","Gating correct",""," "
+"TC-NEG-035","Verify status badge styling","Status badge reflects current state","Negotiations table populated","1. Compare badge color/text per row","status field per row","Pending=warning, Countered=info, Accepted=success, Rejected=destructive","Badges correct",""," "
+"TC-NEG-036","Verify search by professional name","Clinic search bar filters by name","Multiple negotiation rows","1. Type partial name in search","query: ""Sara""","Only matching rows shown","Filter applied",""," "
+"TC-NEG-037","Verify filter by status","Clinic filters by negotiation status","Mixed status rows","1. Select Countered in status filter","filter: Countered","Only Countered rows visible","Filter applied",""," "
+"TC-NEG-038","Verify filter by shift date range","Clinic filters by shift date","Shifts spanning multiple weeks","1. Pick start/end dates","start: 2026-05-15
+end: 2026-05-31","Only rows with shiftDate inside range visible","Filter applied",""," "
+"TC-NEG-039","Verify sort by rate","Clinic sorts rows by proposed rate","Multiple rows with different rates","1. Click Rate column header","sort: rate_desc","Rows reordered high to low","Sort applied",""," "
+"TC-NEG-040","Verify empty state","Empty placeholder when no negotiations","No active negotiations exist","1. Open /negotiations","results: 0","Empty illustration + helper text rendered","Empty state shown",""," "
+"TC-NEG-041","Verify success toast","Toast on successful response","Negotiations overview open","1. Accept any row","action: accept","Success toast appears; row state updates","Toast shown",""," "
+"TC-NEG-042","Verify error toast on API failure","Toast on failed PUT","API returns 5xx","1. Force backend error
+2. Click Accept","mock: 500","Error toast shown; row unchanged","Toast shown",""," "
+"TC-NEG-043","Verify API accept happy path","PUT response=accepted persists","Active negotiation","1. PUT /applications/{appId}/negotiations/{negId}/response","body: {response:""accepted""}","200 with updated negotiation; agreedRate populated; applicationStatus=scheduled","Persisted",""," "
+"TC-NEG-044","Verify API counter_offer payload","PUT counter_offer requires rate fields","Active negotiation","1. PUT with response=counter_offer and rate","body: {response:""counter_offer"", professionalCounterRate:60, payType:""per_hour""}","200 with updated counter fields and updatedAt","Persisted",""," "
+"TC-NEG-045","Verify API terminal state error","PUT to accepted/declined record rejected","negotiationStatus=accepted","1. PUT response=counter_offer","body: any","400/409 with error ""cannot update terminal negotiation""","No change",""," "
+"TC-NEG-046","Verify API 401 missing auth","Negotiation PUT without token","No Authorization header","1. PUT /applications/{appId}/negotiations/{negId}/response","No header","401 returned","Access denied",""," "
+"TC-NEG-047","Verify API 403 non-participant","User not clinic/pro on this negotiation","Token of unrelated user","1. PUT response=accepted","Authorization: Bearer <other-user-jwt>","403 returned; userSub does not match clinicUserSub or professionalUserSub","Access denied",""," "
+"TC-NEG-048","Verify API GET all for pro","List negotiations for authenticated pro","Pro has 3 negotiations","1. GET /negotiations","Authorization: Bearer <pro-jwt>","Returns array of 3 enriched negotiations","List returned",""," "
+"TC-NEG-049","Verify API GET filter by applicationId","Single-item lookup mode","Pro has negotiation on app","1. GET /negotiations?applicationId={appId}","applicationId: APP-001","Single negotiation returned (not wrapped as array)","Detail returned",""," "
+"TC-NEG-050","Verify API GET filter by jobId","JobIndex GSI query mode","Pro has negotiation on job","1. GET /negotiations?jobId={jobId}&professionalUserSub={sub}","jobId: JOB-100","Single negotiation for that job/pro returned","Detail returned",""," "
+"TC-NEG-051","Verify clinic info enrichment","GET enriches with clinic data","Negotiation references clinic","1. GET /negotiations?applicationId={appId}
+2. Inspect clinic block","clinicId resolves","Response includes clinic_name, city, state, primary_practice_area, contactName","Enrichment correct",""," "
+"TC-NEG-052","Verify job info enrichment","GET enriches with job data","Negotiation references job","1. GET /negotiations
+2. Inspect job block","jobId resolves","Response includes jobTitle, payType, rate, location, date, times, status","Enrichment correct",""," "
+"TC-NEG-053","Verify legacy *HourlyRate compatibility","Backward-compat aliasing","Older record with clinicCounterHourlyRate","1. GET /negotiations on legacy app","record has clinicCounterHourlyRate only","Frontend normalizes to clinicCounterRate; UI displays correctly","Compat OK",""," "
+"TC-NEG-054","Verify last-write-wins on concurrent updates","No optimistic locking","Two clients PUT near-simultaneously","1. Pro PUT counter at T1
+2. Clinic PUT counter at T1+50ms","two concurrent PUTs","Final record reflects later write; updatedAt matches latest","Last write persisted",""," "
+"TC-NEG-055","Verify pro notified on clinic counter","Notification fired when clinic counters","Clinic submits counter","1. Clinic counters
+2. Check pro Inbox / push","Pro device subscribed","Inbox item + push notification ""Clinic countered your offer""","Pro notified",""," "
+"TC-NEG-056","Verify clinic notified on pro counter","Notification fired when pro counters","Pro submits counter","1. Pro counters
+2. Check clinic Inbox","Clinic admin subscribed","Inbox item ""Professional countered your offer""","Clinic notified",""," "
+"TC-NEG-057","Verify both notified on acceptance","Acceptance triggers notifications","Final accept","1. Accept side completes
+2. Check both inboxes","both subscribed","Both receive ""Negotiation accepted — shift scheduled""","Both notified",""," "
+"TC-NEG-058","Verify Inbox surfaces negotiation events","Inbox lists negotiation activity","Inbox open","1. Open /inbox after counter event","filter: negotiations","Negotiation events listed with link back to negotiation","Inbox populated",""," "
+"TC-NEG-059","Verify full multi-round happy path","End-to-end: 3 rounds then accept","Clean job + application","1. Pro counters 60
+2. Clinic counters 55
+3. Pro counters 58
+4. Clinic accepts 58","payType: per_hour","All rounds persisted; agreedRate=58; applicationStatus=scheduled; ShiftEvent emitted","Full flow OK",""," "
+"TC-NEG-060","Verify permanent acceptance writes salary range","Acceptance on permanent job stores agreed salary","Permanent negotiation accepted","1. Clinic accepts counterSalaryMin/Max
+2. GET application","counterSalaryMin: 80000
+counterSalaryMax: 90000","Application stores agreedSalaryMin/Max (or equivalent agreedRate range)","Salary stored",""," "
+"TC-NEG-061","Verify message field round-tripped","Optional message stored and returned","Counter with message","1. Submit counter with message
+2. GET negotiation","message: ""Negotiable on weekends""","Message returned in response payload","Message present",""," "
+"TC-NEG-062","Verify payType mismatch rejected","Cannot change payType mid-negotiation","Negotiation with per_hour","1. PUT counter with payType=percentage_of_revenue","mismatched payType","API rejects with 400 or normalizes to original payType","Constraint enforced",""," "
+"TC-NEG-063","Verify cannot counter own last offer (UI guard)","Counter button disabled on own pending offer","Pro just submitted counter (waiting on clinic)","1. Inspect Counter button on that row","status: awaiting clinic response","Counter button disabled or hidden for pro; only clinic can act next","Turn-taking respected",""," "
+"TC-NEG-064","Verify decimal precision on rate","Two-decimal rates accepted","Active negotiation","1. PUT counter with 57.50","professionalCounterRate: 57.50","Stored and returned as 57.50 (no rounding to integer)","Precision preserved",""," "
+"TC-NEG-065","Verify counter without optional message","Submit counter omitting message","Active negotiation","1. PUT counter with only rate","no message field","200; record stores null/empty message","Counter recorded",""," "
+"TC-NEG-066","Verify reject with reason captured","Optional decline reason persisted","Clinic declining","1. Click Reject
+2. Enter reason
+3. Submit","reason: ""Outside budget""","Reason stored on negotiation; visible to pro","Reason stored",""," "
+"TC-NEG-067","Verify counters increment job application counter","fireAndForgetJobApplicationIncrement called","Pro initiates first counter","1. Submit counter
+2. Check job.applicationsCount","jobId: JOB-100","Counter incremented asynchronously; not blocking response","Counter +1",""," "
+"TC-NEG-068","Verify promotion counter increment on apply","incrementPromotionCounter fires on apply→negotiate","Job linked to promotion","1. Apply with negotiation initiated","promotionId present","applications counter on promotion increments","Counter +1",""," "
+"TC-NEG-069","Verify mobile responsive layout","NegotiationsOverviewPage on mobile breakpoint","Viewport width 375px","1. Open /negotiations on mobile
+2. Inspect table","viewport: 375x812","Table collapses to stacked card rows; actions reachable","Mobile layout OK",""," "
+"TC-NEG-070","Verify accessibility on counter modal","CounterOfferModal keyboard + screen reader","Modal open","1. Tab through fields
+2. Submit via Enter
+3. Close via Esc","keyboard only","Focus trap works; aria-labels present; Esc dismisses","A11y OK",""," "
