@@ -1313,11 +1313,12 @@ export class DentiPalCDKStack extends cdk.Stack {
                 REGION: this.region,
                 CLIENT_ID: client.userPoolClientId,
                 USER_POOL_ID: userPool.userPoolId,
-                // Must be a verified SES identity in SES_REGION. Domain
-                // `dentipal.com` requires SES DKIM + SPF DNS records, and the
-                // account must be out of the SES sandbox before this address
-                // can email arbitrary recipients (referral friends, etc.).
-                SES_FROM: 'DentiPal <no-reply@dentipal.com>',
+                // Must be a verified SES identity in SES_REGION. Currently
+                // using a personal gmail because the `dentipal.com` domain
+                // isn't set up yet — once it is, swap to `no-reply@dentipal.com`
+                // and verify the domain (DKIM + SPF) in SES for better
+                // deliverability and DMARC alignment.
+                SES_FROM: 'DentiPal Notifications <viswanadhapallivennela19@gmail.com>',
                 APP_URL: 'https://dentipal.com',
                 NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
                 SES_REGION: this.region,
@@ -1704,11 +1705,12 @@ export class DentiPalCDKStack extends cdk.Stack {
                 REGION: this.region,
                 USER_POOL_ID: userPool.userPoolId,
                 NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
-                // Must be a verified SES identity in SES_REGION. Domain
-                // `dentipal.com` requires SES DKIM + SPF DNS records, and the
-                // account must be out of the SES sandbox before this address
-                // can email arbitrary recipients (referral friends, etc.).
-                SES_FROM: 'DentiPal <no-reply@dentipal.com>',
+                // Must be a verified SES identity in SES_REGION. Currently
+                // using a personal gmail because the `dentipal.com` domain
+                // isn't set up yet — once it is, swap to `no-reply@dentipal.com`
+                // and verify the domain (DKIM + SPF) in SES for better
+                // deliverability and DMARC alignment.
+                SES_FROM: 'DentiPal Notifications <viswanadhapallivennela19@gmail.com>',
                 SES_REGION: this.region,
                 APP_URL: 'https://dentipal.com',
             },
@@ -1751,11 +1753,12 @@ export class DentiPalCDKStack extends cdk.Stack {
                 JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
                 JOB_ID_INDEX: 'jobId-index-1',
                 NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
-                // Must be a verified SES identity in SES_REGION. Domain
-                // `dentipal.com` requires SES DKIM + SPF DNS records, and the
-                // account must be out of the SES sandbox before this address
-                // can email arbitrary recipients (referral friends, etc.).
-                SES_FROM: 'DentiPal <no-reply@dentipal.com>',
+                // Must be a verified SES identity in SES_REGION. Currently
+                // using a personal gmail because the `dentipal.com` domain
+                // isn't set up yet — once it is, swap to `no-reply@dentipal.com`
+                // and verify the domain (DKIM + SPF) in SES for better
+                // deliverability and DMARC alignment.
+                SES_FROM: 'DentiPal Notifications <viswanadhapallivennela19@gmail.com>',
                 SES_REGION: this.region,
                 APP_URL: 'https://dentipal.com',
             },
