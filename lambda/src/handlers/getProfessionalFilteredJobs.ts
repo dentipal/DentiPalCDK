@@ -34,6 +34,45 @@ const num = (attr: AttributeValue | undefined): number | null => {
   return parseFloat(attr.N as string);
 };
 
+/**
+ * Returns true if every scheduled date on this job is strictly in the past.
+ * - Multi-day consulting: past only when EVERY date in `dates` is past.
+ * - Temporary: single `date` field.
+ * - Permanent: uses `date` / `start_date` / `startDate` when present;
+ *   open-ended postings (no date at all) are never considered past.
+ *
+ * The frontend used to do this filter — moving it server-side so
+ * `totalMatched` and the per-type counts match what the UI actually shows.
+ */
+function isJobFullyPast(item: Record<string, AttributeValue>): boolean {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  let datesList: string[] = [];
+  const datesAttr = item.dates;
+  if (datesAttr) {
+    if ("SS" in datesAttr && Array.isArray(datesAttr.SS)) {
+      datesList = datesAttr.SS as string[];
+    } else if ("L" in datesAttr && Array.isArray(datesAttr.L)) {
+      datesList = (datesAttr.L as AttributeValue[])
+        .map((v) => (v && "S" in v ? (v.S as string) : null))
+        .filter((s): s is string => !!s);
+    }
+  }
+  if (datesList.length > 0) {
+    return datesList.every((d) => {
+      const jd = new Date(d);
+      return !Number.isNaN(jd.getTime()) && jd < today;
+    });
+  }
+
+  const dateStr = str(item.date) || str(item.start_date) || str(item.startDate);
+  if (!dateStr) return false;
+  const jobDate = new Date(dateStr);
+  if (Number.isNaN(jobDate.getTime())) return false;
+  return jobDate < today;
+}
+
 function itemToObject(item: Record<string, AttributeValue>): any {
   const result: any = {};
   Object.entries(item).forEach(([key, attr]) => {
@@ -525,6 +564,11 @@ export const handler = async (
           // Skip already-applied jobs
           if (appliedJobIds.has(jobId)) continue;
 
+          // Skip jobs whose scheduled date(s) are all in the past — those
+          // can't be applied to so they must not appear in the pro's feed
+          // or in any of the counts.
+          if (isJobFullyPast(item)) continue;
+
           // Phase 1: everything except jobType
           if (!matchesFilters(item, filtersSansJobType)) continue;
 
@@ -591,6 +635,10 @@ export const handler = async (
         // Only surface jobs that are still open/active (promotion may outlive the job).
         const jobStatus = str(item.status);
         if (jobStatus !== "open" && jobStatus !== "active") continue;
+
+        // Skip past-date jobs even when promoted — a paid boost on a job
+        // that's already happened helps nobody and would distort counts.
+        if (isJobFullyPast(item)) continue;
 
         // Two-phase: gate by non-jobType filters first, bucket, then jobType.
         if (!matchesFilters(item, filtersSansJobType)) continue;

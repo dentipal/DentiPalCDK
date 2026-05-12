@@ -458,6 +458,48 @@ export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo
 };
 
 /**
+ * Auth context used by the refactored `run*` handler functions and the chatbot
+ * toolExecutor. Strict superset of UserInfo with optional Cognito attributes
+ * the chatbot Lambda can pre-fetch once per session.
+ */
+export interface AuthContext {
+    userSub: string;
+    userGroups: string[];
+    userType: string;
+    email?: string;
+    firstName?: string;
+    lastName?: string;
+}
+
+/**
+ * Pulls the Bearer token out of an APIGatewayProxyEvent's headers and returns
+ * the normalized AuthContext. Throws the same errors as extractUserFromBearerToken.
+ *
+ * Used by both:
+ *   - thin handler adapters (handler -> extractAuthFromEvent -> run*(input, auth))
+ *   - the chatbot toolExecutor, which forwards the original Bearer token via
+ *     a synthetic event-like shape ({ headers: { Authorization: ... } })
+ */
+export const extractAuthFromEvent = (event: any): AuthContext => {
+    // In-process trusted bypass: the chatbot toolExecutor invokes existing
+    // handlers as black boxes by constructing a synthetic event. It attaches
+    // the already-validated AuthContext under `_inProcessAuth` so the handler
+    // doesn't need to re-parse a JWT it never received. Only set inside the
+    // same Lambda runtime — never from a real API Gateway request.
+    if (event && typeof event === "object" && event._inProcessAuth) {
+        return event._inProcessAuth as AuthContext;
+    }
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    const userInfo = extractUserFromBearerToken(authHeader);
+    return {
+        userSub: userInfo.sub,
+        userGroups: userInfo.groups || [],
+        userType: userInfo.userType,
+        email: userInfo.email,
+    };
+};
+
+/**
  * One-line wrapper: Extracts and decodes Bearer token, then returns normalized UserInfo.
  * @param authHeader - Authorization header value
  * @returns UserInfo with sub and groups

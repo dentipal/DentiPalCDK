@@ -666,6 +666,7 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as location from 'aws-cdk-lib/aws-location';
 import * as eventSources from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as bedrock from 'aws-cdk-lib/aws-bedrock';
 import * as path from 'path';
 
 export class DentiPalCDKStack extends cdk.Stack {
@@ -855,6 +856,31 @@ export class DentiPalCDKStack extends cdk.Stack {
             indexName: 'connectionId-index',
             partitionKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
             sortKey: { name: 'userKey', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
+        // 4b. DentiPal-V5-ChatConnections (Used by Bedrock AgentCore chatbot)
+        //
+        // Separate from the user-to-user Connections table on purpose: different
+        // TTL (15 min vs 24 h), different access patterns (per-session slot
+        // buffer + pending preview), and isolating the two prevents a regression
+        // in either feature from corrupting the other.
+        //
+        // PK: userSub, SK: connectionId. Reverse lookup by connectionId only is
+        // served by the connectionId-index GSI (used by chatMessage when it
+        // bootstraps a session for a connection whose userSub it hasn't seen
+        // yet, and by future $disconnect cleanup).
+        const chatConnectionsTable = new dynamodb.Table(this, 'ChatConnectionsTable', {
+            tableName: 'DentiPal-V5-ChatConnections',
+            partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+            timeToLiveAttribute: 'ttl',
+        });
+        chatConnectionsTable.addGlobalSecondaryIndex({
+            indexName: 'connectionId-index',
+            partitionKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
             projectionType: dynamodb.ProjectionType.ALL,
         });
 
@@ -1229,6 +1255,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 "http://localhost:5173",
                 "https://main.d3agcvis750ojb.amplifyapp.com",
                 "https://dentipal.com",
+                "https://www.dentipal.com",
             ],
             allowedMethods: [
                 s3.HttpMethods.POST,
@@ -1485,6 +1512,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                     'http://localhost:5173',
                     'https://main.d3agcvis750ojb.amplifyapp.com',
                     'https://dentipal.com',
+                    'https://www.dentipal.com',
                 ],
                 allowMethods: apigateway.Cors.ALL_METHODS,
                 allowHeaders: ['Content-Type', 'Authorization', 'X-Amz-Date', 'X-Api-Key', 'X-Amz-Security-Token', 'X-Requested-With'],
@@ -1632,6 +1660,1189 @@ export class DentiPalCDKStack extends cdk.Stack {
             stageName: 'prod', // Match your REST API stage name
             autoDeploy: true,
         });
+
+        // ========================================================================
+        // 6a. Bedrock AgentCore + chatMessage WebSocket route (Phase 1)
+        //
+        //     New Phase-1 chatbot surface. Adds ONE new `chatMessage` route to
+        //     the existing WebSocket API. The route's Lambda invokes a Bedrock
+        //     AgentCore agent (Claude Haiku 4.5) and streams tokens back via
+        //     PostToConnection. Sessions live in DentiPal-V5-ChatConnections
+        //     with a 15-min TTL. Existing $connect / $disconnect routes and
+        //     the user-to-user Connections table are unchanged.
+        // ========================================================================
+
+        // --- 6a.1 Bedrock Guardrail (PII + prompt-injection + topic filters) ---
+        const chatGuardrail = new bedrock.CfnGuardrail(this, 'DentiPalChatGuardrail', {
+            name: 'DentiPalChatGuardrail',
+            description: 'Shared guardrail for DentiPal chatbot agents — PII redaction, prompt-injection, off-topic filters.',
+            blockedInputMessaging: "I can't help with that request.",
+            blockedOutputsMessaging: "I can't share that response.",
+            sensitiveInformationPolicyConfig: {
+                piiEntitiesConfig: [
+                    { type: 'US_SOCIAL_SECURITY_NUMBER', action: 'BLOCK' },
+                    { type: 'CREDIT_DEBIT_CARD_NUMBER', action: 'BLOCK' },
+                    { type: 'PIN', action: 'BLOCK' },
+                ],
+            },
+            contentPolicyConfig: {
+                filtersConfig: [
+                    // PROMPT_ATTACK turned OFF on input — the chatbot has no
+                    // system-secret to defend, and even MEDIUM was flagging
+                    // benign 2-word commands like "search jobs".
+                    { type: 'PROMPT_ATTACK', inputStrength: 'NONE', outputStrength: 'NONE' },
+                    { type: 'INSULTS', inputStrength: 'MEDIUM', outputStrength: 'MEDIUM' },
+                    { type: 'VIOLENCE', inputStrength: 'MEDIUM', outputStrength: 'MEDIUM' },
+                    { type: 'SEXUAL', inputStrength: 'HIGH', outputStrength: 'HIGH' },
+                ],
+            },
+        });
+
+        // --- 6a.2 Service role assumed by Bedrock to invoke the model ---
+        const bedrockAgentServiceRole = new iam.Role(this, 'DentiPalBedrockAgentRole', {
+            roleName: 'DentiPal-BedrockAgent-ServiceRole',
+            assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com'),
+            description: 'Service role assumed by Bedrock AgentCore agents to invoke Claude Haiku 4.5.',
+        });
+        bedrockAgentServiceRole.addToPolicy(new iam.PolicyStatement({
+            actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+            resources: [
+                // The `us.*` inference profile is a cross-region pointer — it
+                // can dispatch to any of us-east-1, us-east-2, us-west-2. The
+                // role therefore needs InvokeModel on the foundation-model
+                // ARN in every region the profile may route to, plus the
+                // profile itself in this region.
+                `arn:aws:bedrock:us-east-1:${this.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+            ],
+        }));
+        // The agent's orchestration calls ApplyGuardrail on every input/output
+        // when a guardrail is attached. Without this, InvokeAgent returns
+        // HTTP 200 but the stream contains "Access denied when calling Bedrock."
+        bedrockAgentServiceRole.addToPolicy(new iam.PolicyStatement({
+            actions: ['bedrock:ApplyGuardrail'],
+            resources: [`arn:aws:bedrock:${this.region}:${this.account}:guardrail/${chatGuardrail.attrGuardrailId}`],
+        }));
+
+        // --- 6a.3 Professional CfnAgent (Phase 1: no action groups yet) ---
+        //
+        //     Phase 1 ships the agent without action groups so we can verify
+        //     end-to-end connectivity (WebSocket → chatMessage Lambda → Bedrock
+        //     → response). Tool calling lands in Phase 2 when we attach action
+        //     groups for the search/info/response/audit buckets.
+        // Shorthand for parameter defs: AgentCore expects { type, description, required }.
+        const P = (type: 'string' | 'number' | 'integer' | 'boolean' | 'array',
+                   description: string, required: boolean = false) => ({ type, description, required });
+        const STR = (d: string, r = false) => P('string', d, r);
+        const NUM = (d: string, r = false) => P('number', d, r);
+        const BOOL = (d: string, r = false) => P('boolean', d, r);
+        const ARR = (d: string, r = false) => P('array', d, r);
+
+        // Bedrock Agents caps total functions PER AGENT at 11 by default
+        // (despite the misleading "APIs in an agent action group" naming the
+        // quota is actually agent-wide, not group-wide). Until the quota is
+        // raised via AWS support, we ship a curated v1 slice of the catalog.
+        // After the quota raises, drop the .filter(...) at the action-group
+        // assignment sites and the full toolset returns automatically.
+        const PRO_V1_FUNCTIONS = [
+            'search_jobs_near_me',
+            'get_my_invitations',
+            'get_my_applications',
+            'get_my_negotiations',
+            'get_scheduled_shifts',
+            'get_completed_shifts',
+            // Single-shot writes (no preview/confirm pair). Match REST API
+            // contracts exactly — apply takes only jobId; respond_invitation
+            // takes invitationId + response.
+            'apply_to_job',
+            'respond_invitation',
+            // Counter-offer preview/confirm pair kept because rates need review.
+            'preview_negotiate',
+            'confirm_negotiate',
+        ];
+        const CLINIC_V1_FUNCTIONS = [
+            'get_my_clinics',
+            'get_action_needed',
+            'list_applicants_for_job',
+            'get_professional_info',
+            'preview_post_temporary_job',
+            'confirm_post_temporary_job',
+            'preview_accept_professional',
+            'confirm_accept_professional',
+            'preview_reject_professional',
+            'confirm_reject_professional',
+        ];
+
+        const ACTION_GROUP_CHUNK_SIZE = 10;
+        const chunkFunctionsIntoActionGroups = (
+            baseName: string,
+            baseDescription: string,
+            functions: any[],
+        ): any[] => {
+            const groups: any[] = [];
+            for (let i = 0; i < functions.length; i += ACTION_GROUP_CHUNK_SIZE) {
+                const slice = functions.slice(i, i + ACTION_GROUP_CHUNK_SIZE);
+                const idx = groups.length + 1;
+                groups.push({
+                    actionGroupName: `${baseName}${idx}`,
+                    description: `${baseDescription} (part ${idx})`,
+                    actionGroupExecutor: { customControl: 'RETURN_CONTROL' },
+                    functionSchema: { functions: slice as any },
+                });
+            }
+            return groups;
+        };
+
+        // Action-group function schemas. Mirrors the JSON Schemas in
+        // lambda/src/handlers/chat/toolSchemas.ts. Kept inline here because
+        // CDK synth runs before Lambda compilation.
+        const professionalAgentFunctions = [
+            // --- search / info ---
+            {
+                name: 'search_jobs_near_me',
+                description: 'Call this IMMEDIATELY whenever the user wants to see jobs, browse work, find shifts, or look for openings. Use NO parameters by default — the server applies a 50-mile radius from the user\'s home automatically and returns active future-dated jobs sorted by distance. Only pass parameters if the user EXPLICITLY narrows by role / date / rate / specialty / job type.',
+                parameters: {
+                    radiusMiles: NUM('OPTIONAL. Search radius in miles (default 50). Only pass if user asked for a specific distance.'),
+                    jobType: STR('OPTIONAL. temporary | multi_day_consulting | permanent. Only pass if user mentioned a specific type.'),
+                    professionalRole: STR('OPTIONAL. Role filter in snake_case: dental_hygienist, dentist, associate_dentist, dental_assistant, expanded_functions_da, dual_role_front_da, patient_coordinator_front, treatment_coordinator_front, hygienist, dh_tc_pc. Only pass if user explicitly named a different role than their own.'),
+                    shiftSpeciality: STR('OPTIONAL. Specialty filter. Only pass if user mentioned one.'),
+                    minRate: NUM('OPTIONAL. Minimum rate. Only pass if user specified.'),
+                    maxRate: NUM('OPTIONAL. Maximum rate. Only pass if user specified.'),
+                    dateFrom: STR('OPTIONAL. ISO date lower bound. Only pass if user specified a date range.'),
+                    dateTo: STR('OPTIONAL. ISO date upper bound.'),
+                    assistedHygiene: BOOL('OPTIONAL. Only if user asked for assisted-hygiene-only.'),
+                    limit: P('integer', 'OPTIONAL. Max results (default 20, max 50).'),
+                },
+            },
+            {
+                name: 'apply_to_job',
+                description: 'Call this IMMEDIATELY when the user says they want to apply to a job. Required: jobId. Do NOT prompt for rate, message, or availability — those are optional and ONLY passed if the user volunteers them unprompted. Resolve "the third one" / "that job" / "the latest" from the most recent search_jobs_near_me result in conversation memory. This is a single-shot tool — no preview, no confirmation needed.',
+                parameters: {
+                    jobId: STR('Job UUID, resolved from prior search or user-named.', true),
+                    message: STR('OPTIONAL. Cover note. Pass only if user explicitly typed one.'),
+                    startDate: STR('OPTIONAL. ISO start date if user specified.'),
+                    notes: STR('OPTIONAL. Extra notes from user.'),
+                },
+            },
+            {
+                name: 'respond_invitation',
+                description: 'Call this IMMEDIATELY when the user wants to accept or decline a clinic invitation. response must be "accepted" or "declined" only. For NEGOTIATING an invitation (counter-offer), DO NOT use this tool — use preview_negotiate instead. Resolve invitationId from get_my_invitations result or from positional reference like "the first invite".',
+                parameters: {
+                    invitationId: STR('Invitation UUID.', true),
+                    response: STR('"accepted" | "declined" — nothing else.', true),
+                    message: STR('OPTIONAL. Brief note to clinic.'),
+                },
+            },
+            {
+                name: 'preview_negotiate',
+                description: 'Call this when the user wants to counter, accept, or decline an active negotiation on one of their applications. If you don\'t have a negotiationId, first call get_my_applications to find it. After this returns a confirm_card, wait for the user to click Confirm — then call confirm_negotiate.',
+                parameters: {
+                    applicationId: STR('Application UUID.', true),
+                    negotiationId: STR('Negotiation UUID. Get from get_my_applications or get_my_negotiations.', true),
+                    response: STR('"accepted" | "declined" | "counter_offer".', true),
+                    message: STR('OPTIONAL message to clinic.'),
+                    professionalCounterRate: NUM('Counter rate for temp jobs (per hour/transaction/percentage). Required if response="counter_offer" on a temp job.'),
+                    counterSalaryMin: NUM('Counter salary min (permanent jobs only).'),
+                    counterSalaryMax: NUM('Counter salary max (permanent jobs only).'),
+                    payType: STR('OPTIONAL pay type override.'),
+                },
+            },
+            {
+                name: 'confirm_negotiate',
+                description: 'Submit the negotiation response. Only call AFTER the user clicks the confirm-card button (the UI sends a confirmAction frame that bypasses you entirely — so in practice you should never call this directly; it\'s here for completeness).',
+                parameters: {
+                    previewToken: STR('Token from preview.', true),
+                    applicationId: STR('Same as preview.', true),
+                    negotiationId: STR('Same as preview.', true),
+                    response: STR('Same as preview.', true),
+                    message: STR('Same as preview.'),
+                    professionalCounterRate: NUM('Same as preview.'),
+                    counterSalaryMin: NUM('Same as preview.'),
+                    counterSalaryMax: NUM('Same as preview.'),
+                    payType: STR('Same as preview.'),
+                },
+            },
+            { name: 'get_job_details', description: 'Get full details for a job by jobId.', parameters: { jobId: STR('Job UUID', true) } },
+            { name: 'get_my_applications', description: 'List the professional\'s applications and statuses.', parameters: {} },
+            { name: 'get_my_invitations', description: 'List pending clinic invitations.', parameters: {} },
+            { name: 'get_my_negotiations', description: 'List the pro\'s open negotiations.', parameters: {} },
+            { name: 'get_scheduled_shifts', description: 'List accepted, future shifts for the pro.', parameters: { clinicId: STR('Optional clinic filter') } },
+            { name: 'get_completed_shifts', description: 'List the pro\'s completed shifts.', parameters: { clinicId: STR('Optional clinic filter') } },
+            // --- response: apply ---
+            {
+                name: 'preview_apply_to_job',
+                description: 'Render a confirm-card for applying. Does NOT submit. Always call BEFORE confirm_apply_to_job.',
+                parameters: {
+                    jobId: STR('Job UUID', true), message: STR('Cover note', true),
+                    proposedRate: NUM('Rate offer', true), availability: STR('Availability', true),
+                    startDate: STR('Optional ISO start date'), notes: STR('Optional notes'),
+                },
+            },
+            {
+                name: 'confirm_apply_to_job',
+                description: 'Submit the application. Requires previewToken; fields must match preview exactly.',
+                parameters: {
+                    previewToken: STR('Token from preview', true),
+                    jobId: STR('Same jobId as preview', true), message: STR('Same message', true),
+                    proposedRate: NUM('Same rate', true), availability: STR('Same availability', true),
+                    startDate: STR('Same start date'), notes: STR('Same notes'),
+                },
+            },
+            // --- response: invitation ---
+            {
+                name: 'preview_respond_invitation',
+                description: 'Render confirm-card for accepting/declining/negotiating an invitation.',
+                parameters: {
+                    invitationId: STR('Invitation UUID', true),
+                    response: STR('accepted | declined | negotiating', true),
+                    message: STR('Optional message'),
+                    proposedHourlyRate: NUM('Counter hourly rate'),
+                    proposedSalaryMin: NUM('Counter salary min'),
+                    proposedSalaryMax: NUM('Counter salary max'),
+                    availabilityNotes: STR('Availability notes'),
+                    counterProposalMessage: STR('Counter proposal text'),
+                },
+            },
+            {
+                name: 'confirm_respond_invitation',
+                description: 'Send the invitation response. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token from preview', true),
+                    invitationId: STR('Invitation UUID', true),
+                    response: STR('accepted | declined | negotiating', true),
+                    message: STR('Optional message'),
+                    proposedHourlyRate: NUM('Counter hourly rate'),
+                    proposedSalaryMin: NUM('Counter salary min'),
+                    proposedSalaryMax: NUM('Counter salary max'),
+                    availabilityNotes: STR('Availability notes'),
+                    counterProposalMessage: STR('Counter proposal text'),
+                },
+            },
+            // --- response: withdraw ---
+            {
+                name: 'preview_withdraw_application',
+                description: 'Render confirm-card for withdrawing an application.',
+                parameters: {
+                    applicationId: STR('Application UUID', true),
+                    reason: STR('Optional reason'),
+                },
+            },
+            {
+                name: 'confirm_withdraw_application',
+                description: 'Withdraw the application. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token from preview', true),
+                    applicationId: STR('Application UUID', true),
+                    reason: STR('Optional reason'),
+                },
+            },
+            // --- Phase 4: negotiate, attest, profile, address, notifications, feedback, referral ---
+            {
+                name: 'preview_negotiate',
+                description: 'Render confirm-card for sending a counter-offer / accept / decline on an existing negotiation round.',
+                parameters: {
+                    applicationId: STR('Application UUID', true),
+                    negotiationId: STR('Negotiation UUID', true),
+                    response: STR('accepted | declined | counter_offer', true),
+                    message: STR('Optional message'),
+                    clinicCounterRate: NUM('Counter rate (clinic side)'),
+                    professionalCounterRate: NUM('Counter rate (pro side)'),
+                    counterSalaryMin: NUM('Counter salary min (permanent)'),
+                    counterSalaryMax: NUM('Counter salary max (permanent)'),
+                    payType: STR('Pay type'),
+                },
+            },
+            {
+                name: 'confirm_negotiate',
+                description: 'Send the negotiation response. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    applicationId: STR('Application UUID', true),
+                    negotiationId: STR('Negotiation UUID', true),
+                    response: STR('Response', true),
+                    message: STR('Message'),
+                    clinicCounterRate: NUM('Counter rate (clinic)'),
+                    professionalCounterRate: NUM('Counter rate (pro)'),
+                    counterSalaryMin: NUM('Counter salary min'),
+                    counterSalaryMax: NUM('Counter salary max'),
+                    payType: STR('Pay type'),
+                },
+            },
+            {
+                name: 'preview_attest_completed_shift',
+                description: 'Render confirm-card for post-shift attestation.',
+                parameters: {
+                    jobId: STR('Job UUID', true),
+                    attestedHours: NUM('Hours worked', true),
+                    attestedRate: NUM('Rate'),
+                    signedAt: STR('ISO timestamp', true),
+                    notes: STR('Optional notes'),
+                },
+            },
+            {
+                name: 'confirm_attest_completed_shift',
+                description: 'Submit the attestation. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    jobId: STR('Job UUID', true),
+                    attestedHours: NUM('Hours', true),
+                    attestedRate: NUM('Rate'),
+                    signedAt: STR('ISO', true),
+                    notes: STR('Notes'),
+                },
+            },
+            {
+                name: 'preview_update_my_profile',
+                description: 'Render confirm-card for updating the pro profile. Pass only fields to change.',
+                parameters: {
+                    first_name: STR('First name'), last_name: STR('Last name'),
+                    role: STR('Cognito role group'),
+                    specialties: ARR('Specialties'),
+                    bio: STR('Bio'),
+                    years_experience: NUM('Years of experience'),
+                    license_number: STR('License number'),
+                    license_state: STR('License state'),
+                },
+            },
+            {
+                name: 'confirm_update_my_profile',
+                description: 'Apply the profile update. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    first_name: STR('First name'), last_name: STR('Last name'),
+                    role: STR('Role'), specialties: ARR('Specialties'),
+                    bio: STR('Bio'), years_experience: NUM('Years'),
+                    license_number: STR('License number'), license_state: STR('State'),
+                },
+            },
+            {
+                name: 'preview_update_home_address',
+                description: 'Render confirm-card for updating the pro\'s home address. Used for radius search.',
+                parameters: {
+                    addressLine1: STR('Street line 1', true),
+                    addressLine2: STR('Optional line 2'),
+                    addressLine3: STR('Optional line 3'),
+                    city: STR('City', true), state: STR('State', true),
+                    pincode: STR('ZIP/postal', true), country: STR('Country (default USA)'),
+                },
+            },
+            {
+                name: 'confirm_update_home_address',
+                description: 'Save the home address. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    addressLine1: STR('Line 1', true), addressLine2: STR('Line 2'),
+                    addressLine3: STR('Line 3'),
+                    city: STR('City', true), state: STR('State', true),
+                    pincode: STR('ZIP', true), country: STR('Country'),
+                },
+            },
+            {
+                name: 'preview_update_notification_preferences',
+                description: 'Render confirm-card for notification preference changes.',
+                parameters: {
+                    emailEnabled: BOOL('Email toggle'),
+                    smsEnabled: BOOL('SMS toggle'),
+                    pushEnabled: BOOL('Push toggle'),
+                    jobInvitations: BOOL('Job invitations'),
+                    applicationUpdates: BOOL('Application updates'),
+                    negotiationUpdates: BOOL('Negotiation updates'),
+                    shiftReminders: BOOL('Shift reminders'),
+                },
+            },
+            {
+                name: 'confirm_update_notification_preferences',
+                description: 'Save notification preferences. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    emailEnabled: BOOL('Email'), smsEnabled: BOOL('SMS'), pushEnabled: BOOL('Push'),
+                    jobInvitations: BOOL('Invites'), applicationUpdates: BOOL('Apps'),
+                    negotiationUpdates: BOOL('Negs'), shiftReminders: BOOL('Reminders'),
+                },
+            },
+            {
+                name: 'preview_submit_feedback',
+                description: 'Render confirm-card for submitting feedback / dispute.',
+                parameters: {
+                    type: STR('Feedback type', true),
+                    feedback: STR('Feedback text', true),
+                    rating: NUM('1-5 rating'),
+                    targetUserSub: STR('Target pro userSub'),
+                    targetClinicId: STR('Target clinic UUID'),
+                    jobId: STR('Job UUID'),
+                },
+            },
+            {
+                name: 'confirm_submit_feedback',
+                description: 'Submit the feedback. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    type: STR('Type', true), feedback: STR('Feedback', true),
+                    rating: NUM('Rating'),
+                    targetUserSub: STR('Target userSub'),
+                    targetClinicId: STR('Target clinic'),
+                    jobId: STR('Job UUID'),
+                },
+            },
+            {
+                name: 'preview_send_referral',
+                description: 'Render confirm-card for referring another professional via email.',
+                parameters: {
+                    referredEmail: STR('Email of person being referred', true),
+                    referredName: STR('Their name', true),
+                    message: STR('Optional personal message'),
+                },
+            },
+            {
+                name: 'confirm_send_referral',
+                description: 'Send the referral invite. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    referredEmail: STR('Email', true),
+                    referredName: STR('Name', true),
+                    message: STR('Message'),
+                },
+            },
+        ];
+
+        // -------- Clinic agent function schemas --------
+        const clinicAgentFunctions = [
+            // --- info ---
+            { name: 'get_my_clinics', description: 'List clinics the current user manages. Use BEFORE post_*_job.', parameters: {} },
+            { name: 'get_action_needed', description: 'List items needing the clinic\'s action.', parameters: { clinicId: STR('Clinic UUID', true) } },
+            { name: 'get_open_shifts', description: 'List upcoming unfilled shifts for a clinic.', parameters: { clinicId: STR('Clinic UUID', true) } },
+            { name: 'get_scheduled_shifts', description: 'List accepted, future shifts for a clinic.', parameters: { clinicId: STR('Optional clinic filter') } },
+            { name: 'get_completed_shifts', description: 'List completed shifts for a clinic.', parameters: { clinicId: STR('Optional clinic filter') } },
+            { name: 'list_applicants_for_job', description: 'List applicants for a specific job.', parameters: { clinicId: STR('Clinic UUID', true), jobId: STR('Optional jobId') } },
+            { name: 'get_professional_info', description: 'Get a professional\'s public profile.', parameters: { userSub: STR('Pro userSub', true) } },
+            { name: 'get_clinic_favorites', description: 'List the clinic\'s favorite pros.', parameters: {} },
+            { name: 'get_job_details', description: 'Get full details for a job by jobId.', parameters: { jobId: STR('Job UUID', true) } },
+            // --- response: post jobs ---
+            {
+                name: 'preview_post_temporary_job',
+                description: 'Render confirm-card for a single-shift temp job. Call BEFORE confirm_post_temporary_job.',
+                parameters: {
+                    clinicIds: ARR('Clinic UUIDs to post to', true),
+                    professional_role: STR('Required role', true),
+                    professional_roles: ARR('Optional multi-role'),
+                    date: STR('ISO date (today/future)', true),
+                    shift_speciality: STR('Specialty', true),
+                    hours: NUM('Hours (1-12)', true), rate: NUM('Rate', true),
+                    pay_type: STR('per_hour | per_transaction | percentage_of_revenue'),
+                    start_time: STR('HH:MM', true), end_time: STR('HH:MM', true),
+                    meal_break: STR('Free-text or duration'),
+                    job_title: STR('Title'), job_description: STR('Description'),
+                    requirements: ARR('Requirements list'),
+                    assisted_hygiene: BOOL('Assisted hygiene flag'),
+                    work_location_type: STR('onsite | us_remote | global_remote'),
+                },
+            },
+            {
+                name: 'confirm_post_temporary_job',
+                description: 'Create the temp job. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    clinicIds: ARR('Clinic UUIDs', true), professional_role: STR('Role', true),
+                    professional_roles: ARR('Multi-role'), date: STR('ISO date', true),
+                    shift_speciality: STR('Specialty', true),
+                    hours: NUM('Hours', true), rate: NUM('Rate', true),
+                    pay_type: STR('Pay type'),
+                    start_time: STR('HH:MM', true), end_time: STR('HH:MM', true),
+                    meal_break: STR('Meal break'),
+                    job_title: STR('Title'), job_description: STR('Description'),
+                    requirements: ARR('Requirements'),
+                    assisted_hygiene: BOOL('Assisted hygiene flag'),
+                    work_location_type: STR('Work location'),
+                },
+            },
+            {
+                name: 'preview_post_consulting_job',
+                description: 'Render confirm-card for a multi-day consulting job.',
+                parameters: {
+                    clinicIds: ARR('Clinic UUIDs', true), professional_role: STR('Role', true),
+                    professional_roles: ARR('Multi-role'),
+                    dates: ARR('ISO dates list', true),
+                    total_days: NUM('Total days', true), hours_per_day: NUM('Hours/day', true),
+                    shift_speciality: STR('Specialty', true), rate: NUM('Rate', true),
+                    pay_type: STR('Pay type'),
+                    start_time: STR('HH:MM', true), end_time: STR('HH:MM', true),
+                    meal_break: STR('Meal break'),
+                    project_duration: STR('Free-text duration'),
+                    job_title: STR('Title'), job_description: STR('Description'),
+                    requirements: ARR('Requirements'),
+                    work_location_type: STR('Work location'),
+                },
+            },
+            {
+                name: 'confirm_post_consulting_job',
+                description: 'Create the consulting job. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    clinicIds: ARR('Clinic UUIDs', true), professional_role: STR('Role', true),
+                    professional_roles: ARR('Multi-role'), dates: ARR('Dates', true),
+                    total_days: NUM('Total days', true), hours_per_day: NUM('Hours/day', true),
+                    shift_speciality: STR('Specialty', true), rate: NUM('Rate', true),
+                    pay_type: STR('Pay type'),
+                    start_time: STR('HH:MM', true), end_time: STR('HH:MM', true),
+                    meal_break: STR('Meal break'),
+                    project_duration: STR('Duration'),
+                    job_title: STR('Title'), job_description: STR('Description'),
+                    requirements: ARR('Requirements'),
+                    work_location_type: STR('Work location'),
+                },
+            },
+            {
+                name: 'preview_post_permanent_job',
+                description: 'Render confirm-card for a permanent job.',
+                parameters: {
+                    clinicIds: ARR('Clinic UUIDs', true),
+                    professional_role: STR('Role', true), professional_roles: ARR('Multi-role'),
+                    shift_speciality: STR('Specialty', true),
+                    employment_type: STR('full_time | part_time', true),
+                    salary_min: NUM('Salary min'), salary_max: NUM('Salary max'),
+                    benefits: ARR('Benefits list (can be empty array)', true),
+                    vacation_days: NUM('Vacation days (0-50)'),
+                    work_schedule: STR('Free-text schedule'),
+                    start_date: STR('ISO start date'),
+                    job_title: STR('Title'), job_description: STR('Description'),
+                    requirements: ARR('Requirements'),
+                    work_location_type: STR('Work location'),
+                    pay_type: STR('Pay type'), rate: NUM('Rate'),
+                },
+            },
+            {
+                name: 'confirm_post_permanent_job',
+                description: 'Create the permanent job. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    clinicIds: ARR('Clinic UUIDs', true),
+                    professional_role: STR('Role', true), professional_roles: ARR('Multi-role'),
+                    shift_speciality: STR('Specialty', true),
+                    employment_type: STR('Employment type', true),
+                    salary_min: NUM('Salary min'), salary_max: NUM('Salary max'),
+                    benefits: ARR('Benefits', true),
+                    vacation_days: NUM('Vacation days'),
+                    work_schedule: STR('Schedule'),
+                    start_date: STR('Start date'),
+                    job_title: STR('Title'), job_description: STR('Description'),
+                    requirements: ARR('Requirements'),
+                    work_location_type: STR('Work location'),
+                    pay_type: STR('Pay type'), rate: NUM('Rate'),
+                },
+            },
+            // --- response: applicant decisions ---
+            {
+                name: 'preview_accept_professional',
+                description: 'Render confirm-card for hiring an applicant.',
+                parameters: {
+                    jobId: STR('Job UUID', true), professionalUserSub: STR('Pro userSub', true),
+                    acceptedRate: NUM('Final rate'), message: STR('Optional message'),
+                },
+            },
+            {
+                name: 'confirm_accept_professional',
+                description: 'Hire the applicant. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    jobId: STR('Job UUID', true), professionalUserSub: STR('Pro userSub', true),
+                    acceptedRate: NUM('Rate'), message: STR('Message'),
+                },
+            },
+            {
+                name: 'preview_reject_professional',
+                description: 'Render confirm-card for rejecting an applicant.',
+                parameters: {
+                    clinicId: STR('Clinic UUID', true), jobId: STR('Job UUID', true),
+                    professionalUserSub: STR('Pro userSub', true), reason: STR('Optional reason'),
+                },
+            },
+            {
+                name: 'confirm_reject_professional',
+                description: 'Reject the applicant. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    clinicId: STR('Clinic UUID', true), jobId: STR('Job UUID', true),
+                    professionalUserSub: STR('Pro userSub', true), reason: STR('Reason'),
+                },
+            },
+            // --- response: invitations ---
+            {
+                name: 'preview_send_invitations',
+                description: 'Render confirm-card for inviting pros to a job.',
+                parameters: {
+                    jobId: STR('Job UUID', true),
+                    professionalUserSubs: ARR('Pro userSubs to invite', true),
+                    invitationMessage: STR('Optional message'),
+                    urgency: STR('low | medium | high'),
+                },
+            },
+            {
+                name: 'confirm_send_invitations',
+                description: 'Send the invitations. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    jobId: STR('Job UUID', true),
+                    professionalUserSubs: ARR('Pro userSubs', true),
+                    invitationMessage: STR('Message'),
+                    urgency: STR('Urgency'),
+                },
+            },
+            // --- Phase 4: counter-negotiate, mark-completed, no-show, edit/cancel jobs,
+            //              favorites, search pros, team management, profile, feedback ---
+            {
+                name: 'preview_negotiate',
+                description: 'Render confirm-card for the clinic to counter / accept / decline a pro\'s negotiation round.',
+                parameters: {
+                    applicationId: STR('Application UUID', true),
+                    negotiationId: STR('Negotiation UUID', true),
+                    response: STR('accepted | declined | counter_offer', true),
+                    message: STR('Message'),
+                    clinicCounterRate: NUM('Clinic counter rate'),
+                    counterSalaryMin: NUM('Counter salary min (permanent)'),
+                    counterSalaryMax: NUM('Counter salary max (permanent)'),
+                    payType: STR('Pay type'),
+                },
+            },
+            {
+                name: 'confirm_negotiate',
+                description: 'Send the negotiation response. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    applicationId: STR('Application UUID', true),
+                    negotiationId: STR('Negotiation UUID', true),
+                    response: STR('Response', true), message: STR('Message'),
+                    clinicCounterRate: NUM('Rate'),
+                    counterSalaryMin: NUM('Min'), counterSalaryMax: NUM('Max'),
+                    payType: STR('Pay type'),
+                },
+            },
+            {
+                name: 'preview_mark_shift_completed',
+                description: 'Render confirm-card for clinic-side post-shift completion attestation.',
+                parameters: {
+                    jobId: STR('Job UUID', true),
+                    professionalUserSub: STR('Pro userSub', true),
+                    attestedHours: NUM('Hours worked', true),
+                    attestedRate: NUM('Rate'),
+                    clinicNotes: STR('Notes'),
+                },
+            },
+            {
+                name: 'confirm_mark_shift_completed',
+                description: 'Confirm the shift completion. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    jobId: STR('Job UUID', true),
+                    professionalUserSub: STR('Pro userSub', true),
+                    attestedHours: NUM('Hours', true),
+                    attestedRate: NUM('Rate'), clinicNotes: STR('Notes'),
+                },
+            },
+            {
+                name: 'preview_report_no_show',
+                description: 'Render confirm-card for reporting a professional no-show.',
+                parameters: {
+                    jobId: STR('Job UUID', true),
+                    professionalUserSub: STR('Pro userSub', true),
+                    reason: STR('Reason', true),
+                    details: STR('Optional details'),
+                },
+            },
+            {
+                name: 'confirm_report_no_show',
+                description: 'Submit the no-show report. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    jobId: STR('Job UUID', true),
+                    professionalUserSub: STR('Pro userSub', true),
+                    reason: STR('Reason', true), details: STR('Details'),
+                },
+            },
+            {
+                name: 'preview_update_clinic_profile',
+                description: 'Render confirm-card for clinic profile edits. Pass only fields to change.',
+                parameters: {
+                    clinicId: STR('Clinic UUID', true),
+                    clinic_name: STR('Display name'),
+                    clinic_type: STR('Clinic type'),
+                    practice_type: STR('Practice type'),
+                    primary_practice_area: STR('Primary area'),
+                    primary_contact_first_name: STR('Contact first name'),
+                    primary_contact_last_name: STR('Contact last name'),
+                    assisted_hygiene_available: BOOL('Assisted hygiene?'),
+                    number_of_operatories: NUM('Operatories'),
+                    num_hygienists: NUM('Hygienists'),
+                    num_assistants: NUM('Assistants'),
+                    num_doctors: NUM('Doctors'),
+                    booking_out_period: STR('Booking lead time'),
+                    clinic_software: STR('Primary software'),
+                    software_used: ARR('All software'),
+                    parking_type: STR('Parking type'),
+                    parking_cost: NUM('Parking cost'),
+                    free_parking_available: BOOL('Free parking?'),
+                    addressLine1: STR('Line 1'), addressLine2: STR('Line 2'), addressLine3: STR('Line 3'),
+                    city: STR('City'), state: STR('State'), zipCode: STR('ZIP'),
+                    contact_email: STR('Email'), contact_phone: STR('Phone'),
+                    special_requirements: ARR('Special requirements'),
+                    notes: STR('Notes'), description: STR('Description'),
+                },
+            },
+            {
+                name: 'confirm_update_clinic_profile',
+                description: 'Save clinic profile edits. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    clinicId: STR('Clinic UUID', true),
+                    clinic_name: STR('Name'), clinic_type: STR('Type'),
+                    practice_type: STR('Practice'), primary_practice_area: STR('Area'),
+                    primary_contact_first_name: STR('First'),
+                    primary_contact_last_name: STR('Last'),
+                    assisted_hygiene_available: BOOL('AH'),
+                    number_of_operatories: NUM('Ops'),
+                    num_hygienists: NUM('Hyg'), num_assistants: NUM('DA'), num_doctors: NUM('Doc'),
+                    booking_out_period: STR('Booking'),
+                    clinic_software: STR('Software'),
+                    software_used: ARR('Software list'),
+                    parking_type: STR('Parking'),
+                    parking_cost: NUM('Cost'),
+                    free_parking_available: BOOL('Free parking'),
+                    addressLine1: STR('Line 1'), addressLine2: STR('Line 2'), addressLine3: STR('Line 3'),
+                    city: STR('City'), state: STR('State'), zipCode: STR('ZIP'),
+                    contact_email: STR('Email'), contact_phone: STR('Phone'),
+                    special_requirements: ARR('Requirements'),
+                    notes: STR('Notes'), description: STR('Description'),
+                },
+            },
+            {
+                name: 'preview_edit_job',
+                description: 'Render confirm-card for editing an existing job. Pass only fields to change.',
+                parameters: {
+                    jobId: STR('Job UUID', true),
+                    job_title: STR('Title'), job_description: STR('Description'),
+                    requirements: ARR('Requirements'),
+                    hours: NUM('Hours'), rate: NUM('Rate'), pay_type: STR('Pay type'),
+                    start_time: STR('Start'), end_time: STR('End'),
+                    meal_break: STR('Meal break'),
+                    date: STR('Date (temp)'),
+                    dates: ARR('Dates (consulting)'),
+                    hours_per_day: NUM('Hours/day'), total_days: NUM('Total days'),
+                    salary_min: NUM('Salary min'), salary_max: NUM('Salary max'),
+                    benefits: ARR('Benefits'),
+                    employment_type: STR('Employment type'),
+                    vacation_days: NUM('Vacation days'),
+                    work_schedule: STR('Schedule'),
+                },
+            },
+            {
+                name: 'confirm_edit_job',
+                description: 'Apply the edits. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    jobId: STR('Job UUID', true),
+                    job_title: STR('Title'), job_description: STR('Description'),
+                    requirements: ARR('Reqs'),
+                    hours: NUM('Hours'), rate: NUM('Rate'), pay_type: STR('Pay type'),
+                    start_time: STR('Start'), end_time: STR('End'),
+                    meal_break: STR('Break'),
+                    date: STR('Date'), dates: ARR('Dates'),
+                    hours_per_day: NUM('H/d'), total_days: NUM('Days'),
+                    salary_min: NUM('Min'), salary_max: NUM('Max'),
+                    benefits: ARR('Benefits'),
+                    employment_type: STR('Type'),
+                    vacation_days: NUM('Vacation'),
+                    work_schedule: STR('Schedule'),
+                },
+            },
+            {
+                name: 'preview_cancel_job',
+                description: 'Render confirm-card for cancelling/deactivating a job posting.',
+                parameters: {
+                    jobId: STR('Job UUID', true),
+                    reason: STR('Optional reason'),
+                },
+            },
+            {
+                name: 'confirm_cancel_job',
+                description: 'Mark the job inactive. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    jobId: STR('Job UUID', true),
+                    reason: STR('Reason'),
+                },
+            },
+            {
+                name: 'preview_add_clinic_favorite',
+                description: 'Render confirm-card for adding a pro to the clinic\'s favorites.',
+                parameters: { professionalUserSub: STR('Pro userSub', true) },
+            },
+            {
+                name: 'confirm_add_clinic_favorite',
+                description: 'Save the favorite. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    professionalUserSub: STR('Pro userSub', true),
+                },
+            },
+            {
+                name: 'preview_remove_clinic_favorite',
+                description: 'Render confirm-card for removing a favorite.',
+                parameters: { professionalUserSub: STR('Pro userSub', true) },
+            },
+            {
+                name: 'confirm_remove_clinic_favorite',
+                description: 'Remove the favorite. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    professionalUserSub: STR('Pro userSub', true),
+                },
+            },
+            {
+                name: 'search_professionals',
+                description: 'Find professionals by role/specialty. Use BEFORE preview_send_invitations to pick targets.',
+                parameters: {
+                    role: STR('Role filter'),
+                    speciality: STR('Specialty filter'),
+                    limit: NUM('Max results'),
+                },
+            },
+            {
+                name: 'preview_invite_team_member',
+                description: 'Render confirm-card for inviting a teammate (ClinicManager/ClinicViewer).',
+                parameters: {
+                    clinicId: STR('Clinic UUID', true),
+                    email: STR('Teammate email', true),
+                    role: STR('ClinicManager | ClinicViewer', true),
+                    first_name: STR('First name'),
+                    last_name: STR('Last name'),
+                },
+            },
+            {
+                name: 'confirm_invite_team_member',
+                description: 'Send the team invite. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    clinicId: STR('Clinic UUID', true),
+                    email: STR('Email', true),
+                    role: STR('Role', true),
+                    first_name: STR('First'),
+                    last_name: STR('Last'),
+                },
+            },
+            {
+                name: 'preview_update_team_member',
+                description: 'Render confirm-card for changing a teammate\'s role.',
+                parameters: {
+                    userSub: STR('Teammate userSub', true),
+                    clinicId: STR('Clinic UUID', true),
+                    role: STR('ClinicAdmin | ClinicManager | ClinicViewer', true),
+                },
+            },
+            {
+                name: 'confirm_update_team_member',
+                description: 'Save the role change. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    userSub: STR('userSub', true),
+                    clinicId: STR('Clinic UUID', true),
+                    role: STR('Role', true),
+                },
+            },
+            {
+                name: 'preview_remove_team_member',
+                description: 'Render confirm-card for removing a teammate.',
+                parameters: {
+                    userSub: STR('Teammate userSub', true),
+                    clinicId: STR('Clinic UUID', true),
+                },
+            },
+            {
+                name: 'confirm_remove_team_member',
+                description: 'Remove the teammate. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    userSub: STR('userSub', true),
+                    clinicId: STR('Clinic UUID', true),
+                },
+            },
+            // Shared with pro agent — clinics also submit feedback and tune their own notification prefs.
+            {
+                name: 'preview_submit_feedback',
+                description: 'Render confirm-card for submitting feedback / dispute.',
+                parameters: {
+                    type: STR('Feedback type', true),
+                    feedback: STR('Feedback text', true),
+                    rating: NUM('1-5 rating'),
+                    targetUserSub: STR('Target userSub'),
+                    targetClinicId: STR('Target clinic'),
+                    jobId: STR('Job UUID'),
+                },
+            },
+            {
+                name: 'confirm_submit_feedback',
+                description: 'Submit the feedback. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    type: STR('Type', true), feedback: STR('Feedback', true),
+                    rating: NUM('Rating'),
+                    targetUserSub: STR('Target userSub'),
+                    targetClinicId: STR('Target clinic'),
+                    jobId: STR('Job UUID'),
+                },
+            },
+            {
+                name: 'preview_update_notification_preferences',
+                description: 'Render confirm-card for notification preference changes.',
+                parameters: {
+                    emailEnabled: BOOL('Email'), smsEnabled: BOOL('SMS'), pushEnabled: BOOL('Push'),
+                    jobInvitations: BOOL('Invites'), applicationUpdates: BOOL('Apps'),
+                    negotiationUpdates: BOOL('Negs'), shiftReminders: BOOL('Reminders'),
+                },
+            },
+            {
+                name: 'confirm_update_notification_preferences',
+                description: 'Save notification preferences. Requires previewToken.',
+                parameters: {
+                    previewToken: STR('Token', true),
+                    emailEnabled: BOOL('Email'), smsEnabled: BOOL('SMS'), pushEnabled: BOOL('Push'),
+                    jobInvitations: BOOL('Invites'), applicationUpdates: BOOL('Apps'),
+                    negotiationUpdates: BOOL('Negs'), shiftReminders: BOOL('Reminders'),
+                },
+            },
+        ];
+
+        const professionalAgent = new bedrock.CfnAgent(this, 'DentiPalProfessionalAgentV2', {
+            agentName: 'DentiPal-Professional-Agent',
+            description: 'DentiPal natural-language assistant for dental professionals — search jobs, apply, negotiate, manage shifts.',
+            agentResourceRoleArn: bedrockAgentServiceRole.roleArn,
+            foundationModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+            idleSessionTtlInSeconds: 900, // 15 min, matches ChatConnections TTL
+            instruction: [
+                'You are DentiPal Assistant for dental professionals. Be action-first: when the user expresses intent, IMMEDIATELY call the matching tool with sensible defaults from their context. DO NOT ask clarifying questions before calling a tool — only ask if a tool returns an error naming a missing field.',
+                '',
+                'Intent → tool map (call IMMEDIATELY, no questions):',
+                '- "search jobs" / "find work" / "show shifts" / "what\'s available" → search_jobs_near_me with NO parameters. The server already knows the user\'s 50-mile radius from their home address.',
+                '- "apply to N" / "apply to that one" / "apply to the third one" → apply_to_job with just {jobId: <resolved from prior search results>}. NEVER ask for rate, message, or availability — those are optional.',
+                '- "my invites" / "who invited me" → get_my_invitations.',
+                '- "accept invite N" / "decline invite N" → respond_invitation with {invitationId, response: "accepted"|"declined"}. No follow-up questions.',
+                '- "my applications" / "what did I apply to" → get_my_applications.',
+                '- "scheduled shifts" / "upcoming work" → get_scheduled_shifts.',
+                '- "completed shifts" / "what have I done" → get_completed_shifts.',
+                '- "negotiate $X on application Y" / "counter at $X" → preview_negotiate with the rate. The system renders a confirm card; the user clicks Confirm; you don\'t need to call confirm_negotiate yourself (a UI confirmAction handles it).',
+                '',
+                'Reference resolution (no questions):',
+                '- "the first/second/third one", "that job", "the latest" → resolve from the MOST RECENT tool result in your conversation memory. Don\'t ask the user "which one?".',
+                '- "negotiate on my latest" → call get_my_applications first if needed, then use the most recent applicationId + its negotiationId.',
+                '',
+                'Apply vs. negotiate (important):',
+                '- Pure apply (apply_to_job) DOES NOT take any rate. The clinic\'s posted rate is implicit.',
+                '- Rates only come into play during a negotiation (preview_negotiate). If the user says "apply at $80", interpret as a counter-offer flow: call apply_to_job first to create the application, then preview_negotiate to send the counter.',
+                '',
+                'When a tool returns results, summarize concisely in 1-2 sentences AND let the rendered card do the heavy lifting. Don\'t dump JSON. Don\'t list every field. Trust the UI to show the list.',
+            ].join('\n'),
+            guardrailConfiguration: {
+                guardrailIdentifier: chatGuardrail.attrGuardrailId,
+                guardrailVersion: 'DRAFT',
+            },
+            // v1 slim list — Bedrock currently caps total functions per agent
+            // at 11. We keep the 10 most essential covering the user's spec
+            // (search, apply, respond invitation, scheduled/completed shifts,
+            // applications, negotiations summary). Restore full list after
+            // the "Number of APIs per agent" quota is raised via support.
+            actionGroups: chunkFunctionsIntoActionGroups(
+                'DentiPalProTools',
+                'Professional-agent tools — search jobs, apply, respond to invitations.',
+                professionalAgentFunctions.filter(f => PRO_V1_FUNCTIONS.includes(f.name)),
+            ),
+        });
+        professionalAgent.addDependency(chatGuardrail);
+
+        const professionalAgentAlias = new bedrock.CfnAgentAlias(this, 'DentiPalProfessionalAgentAliasV2', {
+            agentAliasName: 'live',
+            agentId: professionalAgent.attrAgentId,
+            description: 'Production alias for the professional agent.',
+        });
+
+        // --- 6a.3b Clinic CfnAgent ---
+        const clinicAgent = new bedrock.CfnAgent(this, 'DentiPalClinicAgentV2', {
+            agentName: 'DentiPal-Clinic-Agent',
+            description: 'DentiPal natural-language assistant for clinic staff — post jobs, manage applicants, hire/reject, see action-needed.',
+            agentResourceRoleArn: bedrockAgentServiceRole.roleArn,
+            foundationModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+            idleSessionTtlInSeconds: 900,
+            instruction: [
+                'You are DentiPal Assistant for clinic staff. Be action-first: when the user expresses intent, IMMEDIATELY call the matching tool. DO NOT ask clarifying questions before calling a tool — only ask if a tool returns an error naming a missing field.',
+                '',
+                'Intent → tool map (call IMMEDIATELY):',
+                '- "my clinics" / "which clinics do I manage" → get_my_clinics.',
+                '- "what needs my attention" / "action items" / "what\'s pending" → get_action_needed. (If multiple clinics exist and user didn\'t name one, silently pick the first from get_my_clinics — don\'t ask.)',
+                '- "who applied to job X" / "applicants" → list_applicants_for_job.',
+                '- "show me <name>\'s profile" / "tell me about that pro" → get_professional_info.',
+                '- "post a temp shift" / "post a job" → preview_post_temporary_job (then wait for user confirm).',
+                '- "accept <pro>" / "hire <pro> for job X" → preview_accept_professional → wait for confirm.',
+                '- "reject <pro>" / "decline <pro>" → preview_reject_professional → wait for confirm.',
+                '',
+                'Resolution rules (no questions):',
+                '- If user manages exactly ONE clinic, auto-pass that clinicId for every tool that needs one. Don\'t ask "which clinic?".',
+                '- Resolve "the first applicant" / "that pro" / "the latest" from the most recent tool result in conversation memory.',
+                '- When the user names a clinic (e.g., "Qwerty Clinic"), look up its UUID from your earlier get_my_clinics result. Pass the UUID, NOT the name, to job-post tools. clinicIds is always an array of UUIDs: ["a1b2c3..."] — never a name or comma-separated string.',
+                '',
+                'When a tool returns an error (e.g. validation), THEN and only then ask the user for the specific missing field. Never pre-emptively interrogate.',
+                '',
+                'When a tool returns results, summarize concisely in 1-2 sentences and let the rendered card show the details. Don\'t dump JSON or list every field.',
+            ].join('\n'),
+            guardrailConfiguration: {
+                guardrailIdentifier: chatGuardrail.attrGuardrailId,
+                guardrailVersion: 'DRAFT',
+            },
+            actionGroups: chunkFunctionsIntoActionGroups(
+                'DentiPalClinicTools',
+                'Clinic-agent tools — post temp jobs, manage applicants, hire/reject.',
+                clinicAgentFunctions.filter(f => CLINIC_V1_FUNCTIONS.includes(f.name)),
+            ),
+        });
+        clinicAgent.addDependency(chatGuardrail);
+
+        const clinicAgentAlias = new bedrock.CfnAgentAlias(this, 'DentiPalClinicAgentAliasV2', {
+            agentAliasName: 'live',
+            agentId: clinicAgent.attrAgentId,
+            description: 'Production alias for the clinic agent.',
+        });
+
+        // --- 6a.4 chatMessage Lambda — handles the new WebSocket route ---
+        const chatMessageHandler = new lambda.Function(this, 'ChatMessageHandler', {
+            functionName: 'DentiPal-Chat-Message',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/chat/chatMessage.handler',
+            code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
+            environment: {
+                REGION: this.region,
+                USER_POOL_ID: userPool.userPoolId,
+                // ChatConnections (new) + Connections (existing, for bootstrap read)
+                CHAT_CONNECTIONS_TABLE: chatConnectionsTable.tableName,
+                CONNS_TABLE: connectionsTable.tableName,
+                // Bedrock agent + alias IDs (Phase 2: pro + clinic; public follows in Phase 3)
+                BEDROCK_PROFESSIONAL_AGENT_ID: professionalAgent.attrAgentId,
+                BEDROCK_PROFESSIONAL_AGENT_ALIAS_ID: professionalAgentAlias.attrAgentAliasId,
+                BEDROCK_CLINIC_AGENT_ID: clinicAgent.attrAgentId,
+                BEDROCK_CLINIC_AGENT_ALIAS_ID: clinicAgentAlias.attrAgentAliasId,
+                // Tables read/written by the refactored run* functions called from toolExecutor
+                JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
+                APPLICATIONS_TABLE: jobApplicationsTable.tableName,
+                JOB_APPLICATIONS_TABLE: jobApplicationsTable.tableName,
+                JOB_INVITATIONS_TABLE: jobInvitationsTable.tableName,
+                JOB_NEGOTIATIONS_TABLE: jobNegotiationsTable.tableName,
+                CLINIC_PROFILES_TABLE: clinicProfilesTable.tableName,
+                CLINICS_TABLE: clinicsTable.tableName,
+                CLINIC_FAVORITES_TABLE: clinicFavoritesTable.tableName,
+                PROFESSIONAL_PROFILES_TABLE: professionalProfilesTable.tableName,
+                USER_ADDRESSES_TABLE: userAddressesTable.tableName,
+                USER_CLINIC_ASSIGNMENTS_TABLE: userClinicAssignmentsTable.tableName,
+                // Phase 4 tables
+                NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
+                PREFS_TABLE: notificationPreferencesTable.tableName, // legacy alias used by some handlers
+                FEEDBACK_TABLE: feedbackTable.tableName,
+                REFERRALS_TABLE: referralsTable.tableName,
+            },
+            timeout: cdk.Duration.seconds(60), // Bedrock streaming + multi-loop tool exec
+            memorySize: 1024,
+        });
+
+        // DynamoDB grants — chatMessage routes through run* functions + the
+        // handler adapter and therefore needs the union of every table those
+        // handlers touch. Phase 2 expanded the surface: jobs CRUD, applicants,
+        // invitations, negotiations, favorites, assignments, profiles.
+        chatConnectionsTable.grantReadWriteData(chatMessageHandler);
+        connectionsTable.grantReadData(chatMessageHandler);
+        jobPostingsTable.grantReadWriteData(chatMessageHandler);
+        jobApplicationsTable.grantReadWriteData(chatMessageHandler);
+        jobInvitationsTable.grantReadWriteData(chatMessageHandler);
+        jobNegotiationsTable.grantReadWriteData(chatMessageHandler);
+        clinicProfilesTable.grantReadWriteData(chatMessageHandler);
+        clinicsTable.grantReadWriteData(chatMessageHandler);
+        clinicFavoritesTable.grantReadWriteData(chatMessageHandler);
+        userClinicAssignmentsTable.grantReadWriteData(chatMessageHandler); // upgraded for team management (Phase 4)
+        professionalProfilesTable.grantReadWriteData(chatMessageHandler);
+        userAddressesTable.grantReadWriteData(chatMessageHandler); // upgraded for update_home_address (Phase 4)
+        // Phase 4: notifications, feedback, referrals
+        notificationPreferencesTable.grantReadWriteData(chatMessageHandler);
+        feedbackTable.grantReadWriteData(chatMessageHandler);
+        referralsTable.grantReadWriteData(chatMessageHandler);
+
+        // Cognito AdminGetUser — some handlers (createTemporaryJob, etc.)
+        // pull given_name / family_name claims for the `created_by` field.
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['cognito-idp:AdminGetUser'],
+            resources: [userPool.userPoolArn],
+        }));
+
+        // Amazon Location — geocode user home address for `search_jobs_near_me`
+        // radius filter. Scoped to the DentiPalGeocoder place-index.
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['geo:SearchPlaceIndexForText'],
+            resources: [`arn:aws:geo:${this.region}:${this.account}:place-index/DentiPalGeocoder`],
+        }));
+
+        // Bedrock invoke permission — agent ARNs + guardrail + foundation-model
+        // (cross-region). Wide enough to avoid 'Access denied' on the runtime
+        // path; the agent's own service role still gates model inference.
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'bedrock:InvokeAgent',
+                'bedrock-agent-runtime:InvokeAgent',
+                'bedrock:GetAgent',
+                'bedrock:GetAgentAlias',
+                'bedrock:ApplyGuardrail',
+                'bedrock:InvokeModel',
+                'bedrock:InvokeModelWithResponseStream',
+            ],
+            resources: [
+                // Agents + aliases
+                `arn:aws:bedrock:${this.region}:${this.account}:agent/${professionalAgent.attrAgentId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${professionalAgent.attrAgentId}/${professionalAgentAlias.attrAgentAliasId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent/${clinicAgent.attrAgentId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${clinicAgent.attrAgentId}/${clinicAgentAlias.attrAgentAliasId}`,
+                // Guardrail (any version)
+                `arn:aws:bedrock:${this.region}:${this.account}:guardrail/${chatGuardrail.attrGuardrailId}`,
+                // Foundation model + inference profile — some accounts require
+                // InvokeModel on the runtime caller's role too.
+                `arn:aws:bedrock:us-east-1:${this.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+            ],
+        }));
+
+        // PostToConnection — push streamed frames back to the client.
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['execute-api:ManageConnections'],
+            resources: [cdk.Arn.format({
+                service: 'execute-api',
+                resource: '*',
+                resourceName: '*',
+            }, this)],
+        }));
+
+        // --- 6a.5 Mount the new `chatMessage` route on the existing API ---
+        webSocketApi.addRoute('chatMessage', {
+            integration: new apigwv2integrations.WebSocketLambdaIntegration(
+                'ChatMessageIntegration',
+                chatMessageHandler,
+            ),
+        });
+
+        new cdk.CfnOutput(this, 'ChatMessageHandlerName', { value: chatMessageHandler.functionName });
+        new cdk.CfnOutput(this, 'BedrockProfessionalAgentId', { value: professionalAgent.attrAgentId });
+        new cdk.CfnOutput(this, 'BedrockProfessionalAgentAliasId', { value: professionalAgentAlias.attrAgentAliasId });
+        new cdk.CfnOutput(this, 'BedrockClinicAgentId', { value: clinicAgent.attrAgentId });
+        new cdk.CfnOutput(this, 'BedrockClinicAgentAliasId', { value: clinicAgentAlias.attrAgentAliasId });
+
+        // 6c. Public agent — REMOVED (was Phase 3 OpenSearch Serverless + KB).
+        //     To re-add: restore S3 bucket + OpenSearch collection + KB + Public CfnAgent.
+        //     See git history for the full block. Lighter-weight alternative when
+        //     re-adding: stuff the FAQ corpus into the agent's instruction text
+        //     directly (Haiku 4.5 has 200K context) and skip KB infrastructure.
 
         // ========================================================================
         // 6b. Event-to-Message Lambda (System messages for inbox)

@@ -5,6 +5,7 @@ const ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "https://main.d3agcvis750ojb.amplifyapp.com",
     "https://dentipal.com",
+    "https://www.dentipal.com",
 ];
 
 const STATIC_HEADERS: Record<string, string> = {
