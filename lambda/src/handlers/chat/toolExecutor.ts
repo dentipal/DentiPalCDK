@@ -76,6 +76,34 @@ function clampLimit(n: any): number {
   return Math.min(v, 50);
 }
 
+/**
+ * Normalize whatever shape the model passed for clinic identifiers into a
+ * proper `clinicIds: string[]` of UUIDs on the input object. Tolerates:
+ *   - `clinicId` singular → wrap to array
+ *   - comma-separated string → split
+ *   - clinic NAMES → resolve via `userContext.clinics` cache
+ *   - already-canonical UUID arrays → leave alone
+ * Idempotent. Mutates `input.clinicIds`. Deletes `input.clinicId`.
+ */
+function normalizeClinicIdsInPlace(input: any, userContext: SessionContextSnapshot | undefined): void {
+  const ctxClinics = (userContext?.clinics || []) as Array<{ clinicId: string; name?: string }>;
+  const UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+  const resolveByName = (s: string): string | null => {
+    const lower = s.trim().toLowerCase();
+    const hit = ctxClinics.find(c => (c.name || "").toLowerCase() === lower);
+    return hit?.clinicId || null;
+  };
+  const raw = input.clinicIds ?? input.clinicId;
+  let arr: string[] | undefined;
+  if (Array.isArray(raw)) arr = raw as string[];
+  else if (typeof raw === "string") arr = raw.split(",").map((s: string) => s.trim()).filter(Boolean);
+  if (arr && arr.length > 0) {
+    arr = arr.map((s: string) => (UUID_RE.test(s) ? s : (resolveByName(s) || s)));
+    input.clinicIds = arr;
+    delete input.clinicId;
+  }
+}
+
 // ---------- Generic preview/confirm helpers ----------
 
 /** Standard "render confirm card" preview tool — validates payload, stores it, returns the card. */
@@ -210,17 +238,43 @@ export async function executeTool(
         return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
       }
       case "get_scheduled_shifts": {
+        // Pros: filter their own applications by upcoming/scheduled status.
+        // Clinics: use the clinic-side handler with their clinicId.
+        const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
+        if (isPro || !call.input.clinicId) {
+          const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
+          if (r.status >= 400) return err(call.toolName, r.status, JSON.stringify(r.body));
+          const apps = Array.isArray(r.body?.applications) ? r.body.applications
+                       : Array.isArray(r.body) ? r.body : [];
+          const scheduled = apps.filter((a: any) => {
+            const s = (a.applicationStatus || a.status || "").toLowerCase();
+            return s === "accepted" || s === "scheduled";
+          });
+          return ok(call.toolName, { applications: scheduled, totalCount: scheduled.length, source: "professional" });
+        }
         const r = await callHandlerInProcess(getScheduledShiftsHandler, {
           method: "GET",
-          pathParameters: call.input.clinicId ? { clinicId: call.input.clinicId } : undefined,
+          pathParameters: { clinicId: call.input.clinicId },
           auth,
         });
         return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
       }
       case "get_completed_shifts": {
+        const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
+        if (isPro || !call.input.clinicId) {
+          const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
+          if (r.status >= 400) return err(call.toolName, r.status, JSON.stringify(r.body));
+          const apps = Array.isArray(r.body?.applications) ? r.body.applications
+                       : Array.isArray(r.body) ? r.body : [];
+          const completed = apps.filter((a: any) => {
+            const s = (a.applicationStatus || a.status || "").toLowerCase();
+            return s === "completed";
+          });
+          return ok(call.toolName, { applications: completed, totalCount: completed.length, source: "professional" });
+        }
         const r = await callHandlerInProcess(getCompletedShiftsHandler, {
           method: "GET",
-          pathParameters: call.input.clinicId ? { clinicId: call.input.clinicId } : undefined,
+          pathParameters: { clinicId: call.input.clinicId },
           auth,
         });
         return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
@@ -347,8 +401,9 @@ export async function executeTool(
 
       // ------------------- CLINIC: response (preview/confirm) -------------------
       case "preview_post_temporary_job":
+        normalizeClinicIdsInPlace(call.input, userContext);
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) => {
-          if (!Array.isArray(i.clinicIds) || i.clinicIds.length === 0) return "clinicIds required";
+          if (!Array.isArray(i.clinicIds) || i.clinicIds.length === 0) return "clinicIds required (array of clinic UUIDs)";
           if (!i.professional_role) return "professional_role required";
           if (!i.date) return "date required";
           if (!i.shift_speciality) return "shift_speciality required";
@@ -363,7 +418,9 @@ export async function executeTool(
         );
 
       case "preview_post_consulting_job":
+        normalizeClinicIdsInPlace(call.input, userContext);
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) => {
+          if (!Array.isArray(i.clinicIds) || i.clinicIds.length === 0) return "clinicIds required (array of UUIDs)";
           if (!Array.isArray(i.dates) || i.dates.length === 0) return "dates required";
           if (typeof i.total_days !== "number") return "total_days required";
           if (typeof i.hours_per_day !== "number") return "hours_per_day required";
@@ -375,7 +432,9 @@ export async function executeTool(
         );
 
       case "preview_post_permanent_job":
+        normalizeClinicIdsInPlace(call.input, userContext);
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) => {
+          if (!Array.isArray(i.clinicIds) || i.clinicIds.length === 0) return "clinicIds required (array of UUIDs)";
           if (!i.employment_type) return "employment_type required";
           if (!Array.isArray(i.benefits)) return "benefits must be an array";
           if (typeof i.salary_min === "number" && typeof i.salary_max === "number" && i.salary_max <= i.salary_min) {

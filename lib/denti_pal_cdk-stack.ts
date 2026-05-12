@@ -2686,6 +2686,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'Resolution rules (no questions):',
                 '- If user manages exactly ONE clinic, auto-pass that clinicId for every tool that needs one. Don\'t ask "which clinic?".',
                 '- Resolve "the first applicant" / "that pro" / "the latest" from the most recent tool result in conversation memory.',
+                '- When the user names a clinic (e.g., "Qwerty Clinic"), look up its UUID from your earlier get_my_clinics result. Pass the UUID, NOT the name, to job-post tools. clinicIds is always an array of UUIDs: ["a1b2c3..."] — never a name or comma-separated string.',
                 '',
                 'When a tool returns an error (e.g. validation), THEN and only then ask the user for the specific missing field. Never pre-emptively interrogate.',
                 '',

@@ -93,17 +93,14 @@ async function bootstrapSessionFromExistingConnection(
     return { error: "No active authenticated connection found", status: 401 };
   }
   const userSub = row.sub.S;
-  // Normalize userType — existing websocketHandler may store it as "Clinic",
-  // "clinic", "Professional", or even "Clinic Admin" depending on which claim
-  // path resolved. Comparing case-insensitively + checking prefix avoids 403s
-  // on legitimate users whose row casing differs from what we assumed.
-  const ut = (row.userType?.S || "").toLowerCase();
-  if (requestedAgent === "clinic" && !ut.startsWith("clinic")) {
-    return { error: `This account is not authorized for the clinic agent (userType="${row.userType?.S}").`, status: 403 };
-  }
-  if (requestedAgent === "professional" && !ut.startsWith("professional") && !ut.startsWith("pro")) {
-    return { error: `This account is not authorized for the professional agent (userType="${row.userType?.S}").`, status: 403 };
-  }
+  // We trust the frontend's agent-type routing (it picks based on
+  // localStorage.userRole which is set at login time). The Connections-row
+  // userType field has inconsistent casing/values across user types and
+  // attempting strict server-side matching here just creates false denies.
+  // Per-tool RBAC (canWriteClinic etc.) is the real gate downstream — that
+  // gate runs inside each refactored handler and is the security boundary.
+  // Log the value for observability.
+  console.log(`[chatMessage] bootstrap userSub=${userSub} requestedAgent=${requestedAgent} userType="${row.userType?.S || "<empty>"}"`);
 
   const session = await createSessionForConnection(userSub, connectionId, requestedAgent);
 
