@@ -1,0 +1,86 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-REF-001","Verify referral page route","/Professional-referral loads for pro","Logged in as Professional","1. Navigate to /Professional-referral","Authorization: Bearer <pro-jwt>","ProfessionalReferralPage renders with three cards (email invite, shareable link, social share)","Page rendered","",""
+"TC-REF-002","Verify referral page entry point","Open from ProfileMenu > Refer a Friend","Logged in as Professional, ProfessionalHeader visible","1. Click profile avatar
+2. Click Refer a Friend","menuItem: ""Refer a Friend""","Navigates to /Professional-referral","Page open","",""
+"TC-REF-003","Verify unauthenticated access blocked","Anonymous user redirected","No session","1. Open /Professional-referral in incognito","No token","Redirect to /login","On login page","",""
+"TC-REF-004","Verify route case-sensitivity","Lowercased path resolves","Logged in as Professional","1. Navigate to /professional-referral (lowercase)","Authorization: Bearer <pro-jwt>","Resolves to same page or fails per router config; route must be reachable from in-app link as documented","Behavior documented","",""
+"TC-REF-005","Verify send single valid email","Pro sends invite to one friend","On referral page","1. Type valid email
+2. Click Send Invites","friendEmail: friend@example.com","POST /referrals/invite returns 200; success toast shown; form clears","Referral sent",""," "
+"TC-REF-006","Verify form clears after success","Input is reset after send","Just sent a successful invite","1. Observe email input after success","previous send completed","Email field empty; button re-enabled","Form reset","",""
+"TC-REF-007","Verify success feedback message","Green toast/alert appears","Invite sent successfully","1. Send invite
+2. Observe feedback area","valid email","Green success message; auto-dismisses after timeout","Feedback shown","",""
+"TC-REF-008","Verify loading state","Button disabled while sending","Slow network simulated","1. Click Send Invites
+2. Observe button state","throttle: Slow 3G","Button disabled with spinner until response","Button restored after response","",""
+"TC-REF-009","Verify empty email blocked","Send disabled with empty input","On referral page","1. Leave email empty
+2. Inspect Send Invites button","friendEmail: """"","Submit disabled or rejected with inline message; no API call","No change","",""
+"TC-REF-010","Verify invalid email format","Bad email rejected","On referral page","1. Type ""notanemail""
+2. Click Send","friendEmail: notanemail","Validation error from backend (regex fails) or frontend; 400 returned; error toast shown","No referral created","",""
+"TC-REF-011","Verify email with leading/trailing spaces","Whitespace trimmed","On referral page","1. Type ""  friend@example.com  ""
+2. Submit","friendEmail: ""  friend@example.com  ""","Trimmed and accepted; stored lowercase","Referral created with friend@example.com","",""
+"TC-REF-012","Verify email case normalization","Mixed-case email lowercased","On referral page","1. Submit ""Friend@Example.COM""","friendEmail: Friend@Example.COM","Backend lowercases (line 221 sendReferralInvite); stored as friend@example.com","Stored lowercase","",""
+"TC-REF-013","Verify self-referral handling","Sending invite to own email","Pro's own email is foo@bar.com","1. Submit foo@bar.com (own email)","friendEmail: own email","Either blocked with friendly message OR allowed but flagged; behaviour must be documented and consistent","Documented outcome","",""
+"TC-REF-014","Verify duplicate referral to same email","Repeated invite to same address","Already sent invite to friend@example.com","1. Submit same email again","friendEmail: friend@example.com","Per business rule: either deduplicated (no second email) or sent with warning; record reflects business rule","Duplicate handled","",""
+"TC-REF-015","Verify personal message included","Optional message sent","On referral page (if message field present)","1. Type email
+2. Type personal message
+3. Submit","friendEmail: friend@example.com
+personalMessage: ""Loved working here, you should join!""","Referral sent; personal message rendered inside styled box in email body","Message in email","",""
+"TC-REF-016","Verify long email length","Very long email handled","On referral page","1. Submit 254-char valid email","friendEmail: long-but-valid@<long-domain>","Accepted (RFC max); >254 chars rejected","Boundary enforced","",""
+"TC-REF-017","Verify plus-alias email","RFC plus-alias accepted","On referral page","1. Submit friend+promo@example.com","friendEmail: friend+promo@example.com","Accepted; email delivered","Referral sent","",""
+"TC-REF-018","Verify email delivery","Friend receives invite in inbox","SES sandbox or production","1. Send invite
+2. Check friend's inbox","friendEmail: <real test inbox>","Email arrives in inbox (not spam) within 60s","Email delivered","",""
+"TC-REF-019","Verify email subject","Subject contains referrer name and DentiPal","Email delivered","1. Open email
+2. Read subject","referrerName: Jella","Subject = ""Jella invites you to join DentiPal! 🦷""","Subject correct","",""
+"TC-REF-020","Verify email HTML rendering","HTML body renders in major clients","Email delivered","1. Open email in Gmail, Outlook web, Apple Mail","HTML body","Layout intact, images/buttons render, no broken CSS","HTML OK","",""
+"TC-REF-021","Verify plain-text fallback","Text version present","Email delivered","1. View source of email","multipart/alternative","Plain-text alternative present and readable","Fallback OK","",""
+"TC-REF-022","Verify referrer name personalization","Body shows referrer name","Email delivered","1. Open email body","referrerName: Jella","""Jella recommended you ..."" appears in body","Personalized","",""
+"TC-REF-023","Verify personal message in body","Personal message rendered","Personal message was provided","1. Open email body","personalMessage: ""Join me!""","Message visible inside styled quote/box","Message present","",""
+"TC-REF-024","Verify no message section when blank","Optional section hidden if message empty","Sent without personal message","1. Open email body","personalMessage: """"","No empty quote/box rendered; layout intact","Section omitted","",""
+"TC-REF-025","Verify signup link with ref param","CTA URL contains referrer userSub","Email delivered","1. Inspect CTA href","signupUrl: <env>/professional-signup?ref=<referrerUserSub>","Link contains ?ref=<referrerUserSub> matching the sender","Link correct","",""
+"TC-REF-026","Verify CTA opens signup","Clicking CTA opens signup with prefill","Email delivered","1. Click ""Join DentiPal Now""","ref token in URL","Browser opens professional-signup; signup page reads ref token","Signup loaded","",""
+"TC-REF-027","Verify benefits list shown","Benefits enumerated in email","Email delivered","1. Open email body","standard template","6 benefit bullets visible (jobs, speed, compensation, connections, mobile, matching)","Benefits visible","",""
+"TC-REF-028","Verify footer compliance","Footer has support contact & copyright","Email delivered","1. Open email body","standard footer","Support email and ""© DentiPal"" copyright present","Footer OK","",""
+"TC-REF-029","Verify From address","Email sent from approved sender","Email delivered","1. Inspect From header","SES verified sender","From address matches verified SES identity; not a random gmail","From OK","",""
+"TC-REF-030","Verify DentiPal branding","Logo and brand colours present","Email delivered","1. Open email body","standard template","Logo image and brand styling visible","Branding OK","",""
+"TC-REF-031","Verify API happy path","POST /referrals/invite returns 200","Authenticated pro","1. POST /referrals/invite with valid body","body: { friendEmail: ""friend@example.com"" }","200 with { message, referralId, friendEmail, sentAt, status: ""sent"", nextSteps }","Referral persisted","",""
+"TC-REF-032","Verify 401 without auth","Unauth call rejected","No Authorization header","1. POST /referrals/invite","No token","401 returned","Access denied","",""
+"TC-REF-033","Verify 404 missing profile","Referrer profile not found","Token valid but professional profile missing","1. POST /referrals/invite","stale token, profile deleted","404 ""professional profile not found""","No email sent","",""
+"TC-REF-034","Verify 400 missing email","Body without friendEmail","Authenticated","1. POST with body {}","empty body","400 with validation error","No referral created","",""
+"TC-REF-035","Verify 400 invalid email regex","Backend regex fails","Authenticated","1. POST with friendEmail=""bad""","friendEmail: bad","400 ""Invalid email format""","No referral created","",""
+"TC-REF-036","Verify SES failure handling","Email service error returns 500","SES throws (mock)","1. Stub SendEmailCommand to throw
+2. POST /referrals/invite","mock SES error","500 with friendly message; referral not stored OR rolled back","Error handled","",""
+"TC-REF-037","Verify DB persistence","Referral row written","Successful invite","1. POST /referrals/invite
+2. Query DentiPal-V5-Referrals","valid email","Row written with referralId, referrerUserSub, referrerName, friendEmail (lowercase), status=sent, sentAt, updatedAt","Row present","",""
+"TC-REF-038","Verify ReferrerIndex GSI","List referrals by referrer","Multiple referrals sent by same pro","1. Query GSI ReferrerIndex with referrerUserSub","referrerUserSub: PRO-123","All referrals returned sorted by sentAt","List returned","",""
+"TC-REF-039","Verify shareable link rendered","Personal referral URL displayed","On referral page","1. Open shareable link card","personalReferralCode in URL","Read-only field shows /professional-signup?ref=<code>","Link visible","",""
+"TC-REF-040","Verify copy to clipboard","Clicking Copy stores link","On referral page","1. Click Copy
+2. Paste in textarea","clipboard access permitted","Clipboard contains full referral URL","Link copied","",""
+"TC-REF-041","Verify copy toast","Toast confirms copy and auto-dismisses","Copy clicked","1. Click Copy
+2. Wait 3s","useSocialShare/useProfessionalReferral toast","""Copied"" message appears and disappears after ~3s","Toast cycle ok","",""
+"TC-REF-042","Verify Facebook share","Opens FB share dialog","On referral page","1. Click Facebook button","platform: facebook","FB share popup opens with referral URL + quote","Dialog opened","",""
+"TC-REF-043","Verify Twitter share","Opens Twitter intent","On referral page","1. Click Twitter button","platform: twitter","X/Twitter intent opens with referral URL and text","Intent opened","",""
+"TC-REF-044","Verify social share tracking","trackSocialShare API called","Share button clicked","1. Click Facebook
+2. Inspect network","POST /referrals/track-share { platform: ""facebook"", shareType: ""social"" }","Tracking request sent","Tracked","",""
+"TC-REF-045","Verify status sent->signed_up","Status updates when friend signs up","Referral sent; friend clicks link and signs up","1. Friend completes signup with ref token
+2. Re-query referral row","ref token preserved through signup","Row updates: status=signed_up; referredUserSub set to new pro's sub","Status updated","",""
+"TC-REF-046","Verify ReferredUserSubIndex populated","GSI queryable by referred user","Referral progressed to signed_up","1. Query GSI ReferredUserSubIndex","referredUserSub: NEW-PRO-200","Referral record returned","Lookup works","",""
+"TC-REF-047","Verify status signed_up->bonus_due","Bonus due after first shift","Friend has signed_up; completes first shift","1. Friend marks first shift complete (PUT /professionals/completedshifts)
+2. Re-query referral row","first shift completed","creditReferralBonusOnCompletion runs; status updates to bonus_due","Status updated","",""
+"TC-REF-048","Verify bonus credited to referrer","$50 added to referrer bonusBalance","Bonus due","1. Inspect referrer's DentiPal-ProfessionalProfiles.bonusBalance","REFERRAL_BONUS_AMOUNT: 50","bonusBalance increased by 50","Referrer rewarded","",""
+"TC-REF-049","Verify bonus idempotency","Bonus credited only once per referral","Same referral processed twice","1. Trigger creditReferralBonusOnCompletion twice for same referredUserSub","two invocations","ConditionExpression prevents second credit; bonusBalance increased by 50 only once","Idempotent","",""
+"TC-REF-050","Verify ineligible referrer no credit","Referrer profile missing/inactive","Referrer deleted","1. Friend completes first shift after referrer offboarded","referrer inactive","Bonus not credited or queued; logs note reason","No credit","",""
+"TC-REF-051","Verify mobile layout","Page responsive on phone","Viewport 375x812","1. Open /Professional-referral on mobile","viewport: 375x812","Three cards stack vertically; inputs full-width; buttons reachable","Mobile OK","",""
+"TC-REF-052","Verify accessibility","Keyboard + screen reader","On referral page","1. Tab through fields and buttons
+2. Use screen reader","keyboard only","Focus order logical; aria-labels present on input, copy button, share buttons","A11y OK","",""
+"TC-REF-053","Verify rapid resend rate limiting","Burst sends throttled","Send invite 10 times in 10s","1. Spam Send Invites","10 rapid POSTs","Rate limit triggers (per business rule) and returns 429 or throttled toast","Throttled","",""
+"TC-REF-054","Verify network failure feedback","Offline send shows error","Disable network","1. Click Send Invites with network off","navigator.onLine = false","Red error toast ""Unable to send invite, please try again""","No state change","",""
+"TC-REF-055","Verify long personal message","Message length boundary","On referral page","1. Type 2000-char personal message
+2. Submit","personalMessage length: 2000","Either accepted and rendered (with safe HTML escape) or rejected with limit message","Boundary enforced","",""
+"TC-REF-056","Verify XSS in personal message","Script tags escaped in email","On referral page","1. Submit message ""<script>alert(1)</script>""","personalMessage: <script>...","Backend escapes HTML; email body shows literal text, no script execution","Safe escape","",""
+"TC-REF-057","Verify referrer name fallback","Missing referrer name handled","Referrer profile has no name","1. Send invite from profile with empty name","referrerName: """"","Email subject and body use a sensible fallback (e.g. ""A friend"" or email local-part)","No template gap","",""
+"TC-REF-058","Verify multi-environment signup URL","Signup URL uses environment-specific host","Run in dev/stage/prod","1. Inspect signupUrl in email","NODE_ENV / config","URL host matches current environment (no hardcoded localhost in prod)","Env correct","",""
+"TC-REF-059","Verify ref token sticks through signup","Token preserved across signup steps","Friend clicks email link","1. Friend opens signup via link
+2. Completes multi-step signup","ref=<referrerUserSub>","Token retained in state until account creation; saved on professional profile","Token persisted","",""
+"TC-REF-060","Verify end-to-end golden path","Send -> signup -> first shift -> bonus","Clean data set","1. Pro sends invite to friend
+2. Friend opens email and signs up
+3. Friend completes first shift
+4. Referrer checks bonusBalance","valid email; complete first shift","Status sent -> signed_up -> bonus_due; $50 credited to referrer; both can see outcome","Full lifecycle OK","",""
