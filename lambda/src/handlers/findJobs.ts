@@ -53,6 +53,10 @@ interface JobPosting {
   // Location details
   city?: string;
   state?: string;
+  /** ZIP / postal code stored on the job row. Surfaced on the public response
+   *  so the FindJobs Location text box can match against it (typing "29609"
+   *  narrows to jobs in that ZIP, alongside city/state). */
+  pincode?: string;
   addressLine1?: string;
   addressLine2?: string;
   addressLine3?: string;
@@ -204,24 +208,47 @@ function persistClinicGeo(clinicId: string, lat: number, lng: number): void {
  * Process-level cache prevents re-geocoding the same clinic inside a single
  * Lambda invocation when multiple jobs share a clinic.
  */
-const geoCache = new Map<string, { lat: number; lng: number } | null>();
+interface ResolvedClinicLocation {
+  lat: number | null;
+  lng: number | null;
+  city: string;
+  state: string;
+  pincode: string;
+}
 
-async function resolveClinicCoords(clinicId: string): Promise<{ lat: number | null; lng: number | null }> {
-  if (!clinicId) return { lat: null, lng: null };
+const EMPTY_LOCATION: ResolvedClinicLocation = {
+  lat: null,
+  lng: null,
+  city: "",
+  state: "",
+  pincode: "",
+};
+
+const geoCache = new Map<string, ResolvedClinicLocation>();
+
+async function resolveClinicCoords(clinicId: string): Promise<ResolvedClinicLocation> {
+  if (!clinicId) return EMPTY_LOCATION;
 
   const cached = geoCache.get(clinicId);
-  if (cached !== undefined) {
-    return cached ?? { lat: null, lng: null };
-  }
+  if (cached !== undefined) return cached;
 
   const geo = await fetchClinicGeo(clinicId);
   if (!geo) {
-    geoCache.set(clinicId, null);
-    return { lat: null, lng: null };
+    geoCache.set(clinicId, EMPTY_LOCATION);
+    return EMPTY_LOCATION;
   }
 
+  // City/state/pincode come from the clinic row regardless of whether the
+  // clinic has stored coords yet — surfacing them lets the caller fall back
+  // when the job row didn't denormalize its own location fields.
+  const cityStateZip = {
+    city: geo.city || "",
+    state: geo.state || "",
+    pincode: geo.pincode || "",
+  };
+
   if (geo.lat != null && geo.lng != null) {
-    const resolved = { lat: geo.lat, lng: geo.lng };
+    const resolved: ResolvedClinicLocation = { lat: geo.lat, lng: geo.lng, ...cityStateZip };
     geoCache.set(clinicId, resolved);
     return resolved;
   }
@@ -236,12 +263,14 @@ async function resolveClinicCoords(clinicId: string): Promise<{ lat: number | nu
   });
   if (coords) {
     persistClinicGeo(clinicId, coords.lat, coords.lng);
-    geoCache.set(clinicId, coords);
-    return coords;
+    const resolved: ResolvedClinicLocation = { ...coords, ...cityStateZip };
+    geoCache.set(clinicId, resolved);
+    return resolved;
   }
 
-  geoCache.set(clinicId, null);
-  return { lat: null, lng: null };
+  const fallback: ResolvedClinicLocation = { lat: null, lng: null, ...cityStateZip };
+  geoCache.set(clinicId, fallback);
+  return fallback;
 }
 
 // --- Main Handler ---
@@ -316,6 +345,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           // Location details
           if (item.city?.S) job.city = item.city.S;
           if (item.state?.S) job.state = item.state.S;
+          // ZIP is stored as `pincode` on the job row (legacy column name) —
+          // surface it so the Location text box can search by ZIP, not only
+          // by city/state.
+          if (item.pincode?.S) job.pincode = item.pincode.S;
+          else if (item.zip?.S) job.pincode = item.zip.S;
+          else if (item.zipCode?.S) job.pincode = item.zipCode.S;
           if (item.addressLine1?.S) job.addressLine1 = item.addressLine1.S;
           if (item.addressLine2?.S) job.addressLine2 = item.addressLine2.S;
           if (item.addressLine3?.S) job.addressLine3 = item.addressLine3.S;
@@ -385,16 +420,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
           }
 
-          // If the job row didn't carry its own lat/lng, resolve coords from
-          // the CLINICS_TABLE — with an on-the-fly geocode fallback + writeback
-          // so the Near-me filter works for pre-existing clinics that were
-          // created before geocoding was wired into createClinic.
-          if (job.lat == null || job.lng == null) {
+          // If the job row didn't carry its own lat/lng (or any of city /
+          // state / pincode), resolve them from the CLINICS_TABLE — with an
+          // on-the-fly geocode fallback + writeback so the Near-me filter
+          // and ZIP/city search work for pre-existing clinics that were
+          // created before geocoding/denormalization was wired in.
+          const needsCoords = job.lat == null || job.lng == null;
+          const needsLocFields = !job.city || !job.state || !job.pincode;
+          if (needsCoords || needsLocFields) {
             const jobClinicId = item.clinicId?.S || "";
             if (jobClinicId) {
-              const coords = await resolveClinicCoords(jobClinicId);
-              if (coords.lat != null) job.lat = coords.lat;
-              if (coords.lng != null) job.lng = coords.lng;
+              const loc = await resolveClinicCoords(jobClinicId);
+              if (loc.lat != null) job.lat = loc.lat;
+              if (loc.lng != null) job.lng = loc.lng;
+              if (!job.city && loc.city) job.city = loc.city;
+              if (!job.state && loc.state) job.state = loc.state;
+              if (!job.pincode && loc.pincode) job.pincode = loc.pincode;
             }
           }
 

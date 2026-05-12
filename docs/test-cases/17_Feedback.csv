@@ -1,0 +1,104 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-FB-001","Verify feedback form loads","Feedback page renders","User navigates to /feedback","1. Navigate to /feedback","N/A","Page shows BackButton, 'Feedback' label, title 'We Value Your Input', description, type dropdown, message textarea, contactMe checkbox, submit button","Form rendered","",""
+"TC-FB-002","Verify feedback type dropdown options","Dropdown lists 4 options","Feedback form open","1. Click Feedback Type dropdown","N/A","Menu shows: Bug, Suggestion, Question, Other","Options listed","",""
+"TC-FB-003","Verify dropdown selection","Selecting an option updates the trigger label","Feedback form open","1. Open Feedback Type dropdown
+2. Click 'Bug'","selection: Bug","Trigger label shows 'Bug'; aria-selected=true on the chosen option","Value bound to form","",""
+"TC-FB-004","Verify default placeholder label","Dropdown shows 'Select' when empty","Fresh form load","1. Inspect Feedback Type trigger label","N/A","Label reads 'Select' with placeholder styling (is-placeholder class)","Placeholder visible","",""
+"TC-FB-005","Verify dropdown closes on outside click","Outside click dismisses menu","Dropdown is open","1. Click outside the dropdown","N/A","Menu closes; aria-expanded=false","Menu closed","",""
+"TC-FB-006","Verify dropdown closes on Escape","Escape key dismisses menu","Dropdown is open","1. Press Escape","key: Escape","Menu closes; trigger retains last selection","Menu closed","",""
+"TC-FB-007","Verify required: feedbackType","Submit empty feedbackType","Feedback form open","1. Leave Feedback Type as 'Select'
+2. Type a valid message
+3. Click Submit","feedbackType: ''","Error 'Please enter a feedback type.' shown; submit blocked","Validation error","",""
+"TC-FB-008","Verify required: message","Submit empty message","Feedback form open","1. Pick a Feedback Type
+2. Leave message empty
+3. Click Submit","message: ''","Error 'Please enter your message.' shown; submit blocked","Validation error","",""
+"TC-FB-009","Verify whitespace-only message rejected","Message of only spaces is invalid","Feedback form open","1. Type only spaces in message
+2. Click Submit","message: '     '","Error 'Please enter your message.' shown (zod .trim().min(1))","Validation error","",""
+"TC-FB-010","Verify max length 5000","Message > 5000 chars rejected","Feedback form open","1. Paste 5001-character string into message
+2. Click Submit","messageLength: 5001","Error 'Message is too long (max 5000 characters).' shown","Validation error","",""
+"TC-FB-011","Verify exactly 5000 chars accepted","Boundary: 5000 chars allowed","Feedback form open","1. Paste exactly 5000-character string into message
+2. Pick a type
+3. Submit","messageLength: 5000","Form accepts the value; submit proceeds","Boundary passes","",""
+"TC-FB-012","Verify validation triggers on blur","onBlur mode validation","Feedback form open","1. Focus message textarea
+2. Blur without typing","mode: onBlur","Inline/form-level error surfaces once focus leaves (react-hook-form mode='onBlur')","Blur validation","",""
+"TC-FB-013","Verify error banner appears for invalid submit","handleInvalid shows the alert","Feedback form open","1. Click Submit with invalid fields","scenario: invalid","'.alert.error' banner shows the first invalid field's message OR 'Please fix the errors in the form.'","Error banner shown","",""
+"TC-FB-014","Verify success banner on submit","Successful submission shows success alert","Form valid, API healthy","1. Fill type+message
+2. Submit","scenario: happy path","'.alert.success' shows 'Thanks! Your feedback was sent.'","Success banner shown","",""
+"TC-FB-015","Verify form resets on success","Fields cleared after submit","Submission succeeds","1. Submit valid form
+2. Inspect fields","N/A","feedbackType empty, message empty, contactMe false, email empty; storedValues atom cleared too","Form cleared","",""
+"TC-FB-016","Verify contactMe toggles email field","Email input appears only when contactMe checked AND user unauthenticated","Logged out, form open","1. Check 'I would like to be contacted'
+2. Observe email field
+3. Uncheck","contactMe: true/false","Email input appears when contactMe=true AND no idToken; disappears when unchecked","Conditional email field","",""
+"TC-FB-017","Verify email NOT shown when user is authenticated","Email auto-derived from idToken","Logged in (idToken in storage), form open","1. Check contactMe","contactMe: true; idToken: present","Email field NOT rendered (backend reads email from idToken)","Email auto-resolved","",""
+"TC-FB-018","Verify contactMe without email blocks submit (logged out)","Custom check beyond zod","Logged out","1. Pick type
+2. Type message
+3. Check contactMe
+4. Leave email empty
+5. Submit","contactMe: true; email: ''; idToken: null","Error 'Please provide an email so we can contact you.' shown; no API call made","Custom validation","",""
+"TC-FB-019","Verify contactMe with email proceeds","Email provided when contactable","Logged out","1. Pick type
+2. Type message
+3. Check contactMe
+4. Enter valid email
+5. Submit","email: a@b.com","API called; success banner shown","Submission OK","",""
+"TC-FB-020","Verify submit button disabled while submitting","Loading state on button","Submit in progress","1. Submit form
+2. Observe button","state: isSubmitting=true","Button text changes to 'Submitting…' and is disabled","Button disabled","",""
+"TC-FB-021","Verify all fields disabled while submitting","Form controls locked","Submit in progress","1. Submit form
+2. Try interacting with dropdown/textarea/checkbox","state: isSubmitting=true","Dropdown, textarea, checkbox, and email all disabled until response","Inputs locked","",""
+"TC-FB-022","Verify network error surfaces in banner","API failure path","Server returns 500","1. Submit valid form against mocked 500","status: 500","'.alert.error' shows server error message or 'Submit failed'","Failure surfaced","",""
+"TC-FB-023","Verify network error keeps user input","No form reset on failure","API failure","1. Submit valid form against 500","status: 500","Type/message/contactMe/email values retained so user can retry","Inputs preserved","",""
+"TC-FB-024","Verify state persisted across navigation (jotai)","feedbackFormAtom retains values","Form partially filled","1. Type message + pick type
+2. Navigate away and back","atom: feedbackFormAtom","Form re-renders with previously typed values","Atom persistence","",""
+"TC-FB-025","Verify XSS-safe rendering of error banner","Banner text is escaped","Error path","1. Force error: 'Submit failed <img src=x onerror=alert(1)>'","payload: HTML in error","Banner displays literal text; no img created; no alert","XSS safe","",""
+"TC-FB-026","Verify XSS-safe rendering of success banner","Banner text is escaped","Success path","1. Submit valid form
+2. Inspect success text","payload: emoji + html","Success text rendered literally; no script execution","XSS safe","",""
+"TC-FB-027","Verify submit POSTs to FEEDBACK.SUBMIT","Endpoint contract","Form valid","1. Submit valid form","endpoint: API_ENDPOINTS.FEEDBACK.SUBMIT","fetch called with POST, Content-Type application/json, Bearer auth when idToken present","API contract met","",""
+"TC-FB-028","Verify payload shape","Submitted body structure","Form valid, logged out","1. Submit with feedbackType=Bug, message=hi, contactMe=true, email=a@b.com","payload","Body = { feedbackType:'Bug', message:'hi', contactMe:true, email:'a@b.com' }","Payload correct","",""
+"TC-FB-029","Verify payload email from idToken when not provided","Email auto-resolution","Logged in, contactMe false","1. Submit with feedbackType=Bug, message=hi, contactMe=false","idToken email: u@x.com","Body.email decoded from idToken via atob(payload[1])","Email from JWT","",""
+"TC-FB-030","Verify trim on payload","Whitespace trimmed before send","Form valid","1. Submit with feedbackType=' Bug ', message='  hi  '","values: padded","Outgoing payload trims both fields","Trimmed payload","",""
+"TC-FB-031","Verify authorization header","Bearer header attached","Logged in","1. Submit valid form","idToken: present","Authorization: Bearer <idToken> header in fetch call","Auth header sent","",""
+"TC-FB-032","Verify no auth header when logged out","Anonymous submission allowed","Logged out","1. Submit valid form","idToken: null","No Authorization header set; submit still succeeds (anonymous feedback)","Anon allowed","",""
+"TC-FB-033","Verify malformed idToken does not crash","JWT decode failure handled","Logged in with bad token","1. Set idToken='not.a.jwt'
+2. Submit with contactMe true and no email","idToken: malformed","atob/JSON.parse wrapped in try/catch; submit either proceeds with empty email or surfaces inline error — no white screen","Resilient JWT parse","",""
+"TC-FB-034","Verify only one submit while pending","Double-click protection","Submit in progress","1. Click Submit rapidly twice","clicks: 2","Only one API call fires; button disabled state prevents the second","No duplicate submission","",""
+"TC-FB-035","Verify mobile layout (375px)","Responsive at narrow viewport","Viewport 375x812","1. Open /feedback at 375x812","viewport: 375x812","No horizontal scroll; dropdown menu width constrained to trigger; submit reachable above keyboard","Mobile layout","",""
+"TC-FB-036","Verify desktop layout (1280px)","Responsive at wide viewport","Viewport 1280x800","1. Open /feedback at 1280x800","viewport: 1280x800","Form centered with max-width; labels and inputs aligned","Desktop layout","",""
+"TC-FB-037","Verify back button navigates back","BackButton works","Navigated to /feedback from a parent route","1. Click BackButton","N/A","Browser history goes back one step","Back navigation","",""
+"TC-FB-038","Verify dropdown aria semantics","Custom dropdown a11y","Form open","1. Inspect dropdown trigger","attributes: role/aria","Trigger has aria-haspopup=listbox; menu has role=listbox; options have role=option and aria-selected","WCAG compliant","",""
+"TC-FB-039","Verify keyboard activation of dropdown","Enter/Space opens dropdown","Trigger focused","1. Tab to trigger
+2. Press Enter then Space","keys: Enter, Space","Dropdown opens; arrow keys move highlight; Enter selects (or onClick equivalent works)","Keyboard usable","",""
+"TC-FB-040","Verify focus order","Tab order is logical","Form open","1. Tab through fields","order","Order: BackButton -> feedbackType trigger -> message -> contactMe -> (email if visible) -> submit","Focus order","",""
+"TC-FB-041","Verify Enter does NOT submit from textarea","Newline preserved","Form open with message focused","1. Type text
+2. Press Enter inside textarea","key: Enter","Newline inserted in message; form NOT submitted","Textarea behavior","",""
+"TC-FB-042","Verify label/control association","Form labels readable by SR","Form open","1. Run axe-core","tool: axe","All labels associated with inputs; no orphaned labels; no duplicate ids","a11y pass","",""
+"TC-FB-043","Verify color contrast on alerts","WCAG AA on banners","Error and success visible","1. Trigger both states","ratio: >=4.5:1","Text contrast on .alert.error and .alert.success meets 4.5:1","Contrast pass","",""
+"TC-FB-044","Verify long message (4999 chars) accepted","Boundary just below max","Form open","1. Paste 4999-char message
+2. Submit","messageLength: 4999","Accepted; submission proceeds","Lower boundary","",""
+"TC-FB-045","Verify dropdown does not overflow on narrow screens","Width constraint","Viewport 320px","1. Open dropdown at 320x568","viewport: 320x568","Menu width constrained to trigger; no viewport overflow","No overflow","",""
+"TC-FB-046","Verify form does not POST when validation fails","No premature network call","Invalid form","1. Submit with empty type
+2. Watch Network tab","scenario: invalid","No POST to FEEDBACK.SUBMIT fires","No network on invalid","",""
+"TC-FB-047","Verify rapid type-change does not lose message","Cross-field stability","Form open with message typed","1. Type message
+2. Change feedbackType three times","interactions","Message text retained across type changes","No data loss","",""
+"TC-FB-048","Verify success clears jotai feedbackFormAtom","Atom reset on success","Submit succeeds","1. Inspect feedbackFormAtom after success","atom","Atom reset to defaults (empty type, empty message, contactMe=false, empty email)","Atom cleared","",""
+"TC-FB-049","Verify failure leaves jotai feedbackFormAtom intact","Atom retained on failure","Submit fails","1. Force 500
+2. Inspect feedbackFormAtom","atom","Atom still holds the user's typed values for retry","Atom retained","",""
+"TC-FB-050","Verify selecting then clearing type","Sticky selection avoidance","Dropdown selection workflow","1. Pick Bug
+2. Pick Question
+3. Submit","selection: latest","Submitted feedbackType equals the last selection (Question)","Latest selection wins","",""
+"TC-FB-051","Verify form survives Strict Mode mount/unmount","React 18 Strict Mode safety","Dev build","1. Mount the component twice (Strict Mode)","mode: strict","No duplicate API calls; no console warnings","Strict-safe","",""
+"TC-FB-052","Verify email field validation when shown","Optional but should be a valid email if filled","Logged out, contactMe checked","1. Type 'not-an-email' in email
+2. Submit","email: not-an-email","Either zod email refinement OR backend rejects with clear message; submit blocked client-side ideally","Email validation","",""
+"TC-FB-053","Verify long email accepted","Boundary on email length","Logged out","1. Type a 200-char valid email
+2. Submit","emailLength: 200","Submission proceeds (no client cap beyond schema)","Long email OK","",""
+"TC-FB-054","Verify dropdown is not focusable while disabled","Disabled state","isSubmitting=true","1. Submit in progress
+2. Try clicking dropdown","disabled: true","Trigger does not open; pointer-events / disabled attr respected","Disabled state","",""
+"TC-FB-055","Verify checkbox keyboard toggle","Space toggles contactMe","Checkbox focused","1. Focus contactMe
+2. Press Space","key: Space","Checkbox toggles; email field appears/disappears accordingly","Keyboard toggle","",""
+"TC-FB-056","Verify error banner replaces previous error","No stacking errors","Successive failures","1. Submit invalid (type missing)
+2. Fix type but blank message and submit","scenario: two errors","Only the latest error visible (banner replaced, not appended)","No banner stacking","",""
+"TC-FB-057","Verify success banner replaces error banner","UI cleared on recovery","After a prior failure","1. Trigger error
+2. Fix and submit successfully","scenario: recover","Error banner cleared; only success banner visible","Banner state correct","",""
+"TC-FB-058","Verify XSS in message is preserved server-side as text","Submitted body is not HTML-escaped on client","Logged in","1. Submit message '<b>bold</b>'","payload: HTML in message","Body.message sent literally as '<b>bold</b>'; server is responsible for escaping when rendering elsewhere","Client does not silently strip","",""
+"TC-FB-059","Verify no console errors on happy path","Clean console","Submit succeeds","1. Open DevTools
+2. Submit valid form","scenario: happy","No console.error or pageerror events fired","Clean console","",""
+"TC-FB-060","Verify no idToken value leaks to console","Security: tokens not logged","Logged in","1. Open DevTools
+2. Submit valid form","regex: eyJ.+\\..+\\..+","No JWT-shaped string ever appears in console output","No token leak","",""
