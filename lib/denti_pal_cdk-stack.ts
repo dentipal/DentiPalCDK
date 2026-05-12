@@ -923,6 +923,19 @@ export class DentiPalCDKStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
         });
 
+        // In-app notifications feed. One row per surfaced event.
+        // PK: userSub, SK: notificationId (epoch-prefixed so Query with
+        // ScanIndexForward=false returns newest-first without needing a GSI).
+        // TTL on `expiresAt` auto-purges rows after ~90 days (set by writer).
+        const notificationsTable = new dynamodb.Table(this, 'NotificationsTable', {
+            tableName: 'DentiPal-V5-Notifications',
+            partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'notificationId', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            timeToLiveAttribute: 'expiresAt',
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+
         // 7. DentiPal-JobApplications (Used in REST)
         const jobApplicationsTable = new dynamodb.Table(this, 'JobApplicationsTable', {
             tableName: 'DentiPal-V5-JobApplications',
@@ -1236,6 +1249,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             userClinicAssignmentsTable, jobPromotionsTable,
             leadsTable, leadActivityTable, bansTable,
             notificationPreferencesTable,
+            notificationsTable,
         ];
 
         // ========================================================================
@@ -1348,13 +1362,17 @@ export class DentiPalCDKStack extends cdk.Stack {
                 SES_FROM: 'DentiPal Notifications <viswanadhapallivennela19@gmail.com>',
                 APP_URL: 'https://dentipal.com',
                 NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
+                NOTIFICATIONS_TABLE: notificationsTable.tableName,
                 SES_REGION: this.region,
                 SES_TO: 'shashitest2004@gmail.com',     // Updated per your env variables
                 SMS_TOPIC_ARN: `arn:aws:sns:${this.region}:${this.account}:DentiPal-SMS-Notifications`, // Dynamic construction
-                FRONTEND_ORIGIN: 'http://localhost:5173',
+                FRONTEND_ORIGIN: 'https://dentipal.com',
                 GOOGLE_CLIENT_ID: '186785894030-o8s1bte9egg9s6a4n61a3jrm6039sep1.apps.googleusercontent.com',
                 GOOGLE_CLIENT_SECRET: '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',
-                GOOGLE_REDIRECT_URI: 'http://localhost:5173/callback',
+                // Fallback only — the frontend always sends `redirectUri` in the
+                // request body, computed from window.location.origin. This fallback
+                // is hit only if something calls /auth/google-login without it.
+                GOOGLE_REDIRECT_URI: 'https://dentipal.com/callback',
 
                 // Table Name Mappings
                 CLINIC_PROFILES_TABLE: clinicProfilesTable.tableName,
@@ -2970,6 +2988,34 @@ export class DentiPalCDKStack extends cdk.Stack {
 
         // Fan-out: same EventBridge rule, second target.
         shiftEventRule.addTarget(new targets.LambdaFunction(eventToEmailHandler));
+
+        // ========================================================================
+        // 6e. Event-to-Notification Lambda (in-app notification feed)
+        //     Third target on the same EventBridge rule. For each event,
+        //     writes one row to DentiPal-V5-Notifications so the bell icon
+        //     and notifications page can render it. Unlike email, this path
+        //     does NOT respect per-category preferences — users mute via the
+        //     bell or notification settings, not by dropping rows.
+        // ========================================================================
+
+        const eventToNotificationHandler = new lambda.Function(this, 'EventToNotificationHandler', {
+            functionName: 'DentiPal-event-to-notification',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/event-to-notification.handler',
+            code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
+            environment: {
+                REGION: this.region,
+                NOTIFICATIONS_TABLE: notificationsTable.tableName,
+            },
+            timeout: cdk.Duration.seconds(30),
+            memorySize: 256,
+        });
+
+        notificationsTable.grantWriteData(eventToNotificationHandler);
+
+        // Third target on the same rule; EventBridge fans out independently
+        // to email, chat, and notification consumers.
+        shiftEventRule.addTarget(new targets.LambdaFunction(eventToNotificationHandler));
 
         // ========================================================================
         // 6d. Shift Reminder Cron Lambda (smart-notifications feature)
