@@ -18,3 +18,69 @@
 "TC-INB-013","Verify notification badge","Notification bell badge","New invite or message arrived","1. Observe header bell","unreadCount: 3","Badge shows unread count; clears on open","Badge accurate","",""
 "TC-INB-014","Verify lazy loading","Inbox lazy-load","First app load","1. Open DevTools Network tab
 2. Navigate to inbox only after other pages","N/A","Inbox JS chunk loaded only when visited","Bundle deferred","",""
+"TC-INB-015","Verify optimistic send shows sending state","Optimistic 'sending' bubble appears instantly","Inside an open conversation","1. Send a message
+2. Observe bubble before server ack","message: hi","Bubble appears with single clock/spinner icon (status=sending) before any network round-trip","Optimistic UI confirmed (UT-IB-016, FT-IB-019)","",""
+"TC-INB-016","Verify sent status (single grey check)","Server ack promotes sending->sent","Inside an open conversation, online","1. Send message
+2. Wait for server ack","message: hi","Bubble icon updates to single grey check (status=sent); local-id replaced with server messageId","Sent status verified (UT-IB-023)","",""
+"TC-INB-017","Verify delivered status (double grey check)","Server reports delivered","Recipient is online but hasn't opened the chat","1. Send a message
+2. Wait for delivered ack","message: hi","Bubble shows double grey check (status=delivered); does NOT flip to read","Delivered state verified (UT-IB-024)","",""
+"TC-INB-018","Verify read status (double blue check)","Recipient opens conversation","Recipient online","1. Send a message
+2. Have recipient open the conversation","message: hi","My-side bubbles flip to double BLUE check (status=read) only AFTER recipient opens the chat","Read receipt verified (UT-IB-026, FT-IB-050)","",""
+"TC-INB-019","Verify failed send when offline","Send fails when socket is closed","Inbox open, network dropped","1. Disconnect network
+2. Send a message","message: while offline","Bubble shows red failed indicator (status=failed); composer placeholder reads 'Offline — messages will fail to send'","Failed UX verified (UT-IB-019, FT-IB-024)","",""
+"TC-INB-020","REGRESSION: refresh must not flip unread bubbles to blue","Page refresh preserves server-reported status","User sent 3 messages, recipient has NOT opened the chat","1. Send 3 messages
+2. Hard refresh (F5)
+3. Inspect own bubbles","messageCount: 3","All 3 bubbles remain single grey check (status=sent); none flip to blue","Refresh-blue-check bug regressed (UT-IB-013b)","",""
+"TC-INB-021","Verify FIFO ack ordering for rapid sends","3 rapid sends reconcile in send order","Inside an open conversation","1. Send 'A','B','C' as fast as possible
+2. Wait for all acks","sequence: A,B,C","Bubbles end up with server messageIds in send order A,B,C — not all replacing the newest","FIFO confirmed (UT-IB-025, PT-IB-perf-06)","",""
+"TC-INB-022","Verify echo + ack race dedup","Server echo and ack do not double-create the bubble","Inside an open conversation","1. Send a message
+2. Receive own echo + ack","messageId: srv-XYZ","Exactly one bubble for that messageId regardless of echo vs ack order","No duplicate bubbles (UT-IB-007, FT-IB-037)","",""
+"TC-INB-023","Verify duplicate messageId is ignored","Server replay does not duplicate","Inside an open conversation","1. Have server resend the same messageId twice","messageId: srv-DUP","Only one bubble rendered","Dedup verified (UT-IB-009, PT-IB-perf-08)","",""
+"TC-INB-024","Verify double-Enter does not double-send","Re-entrancy guard","Inside an open conversation","1. Press Enter twice within one frame","message: oops","Exactly one optimistic bubble + one server send","Double-send prevented (FT-IB-025)","",""
+"TC-INB-025","Verify Shift+Enter inserts newline","Shift+Enter does NOT send","Inside an open conversation","1. Type text
+2. Press Shift+Enter","key: Shift+Enter","Newline inserted; message NOT sent","Composer keyboard contract (FT-IB-021)","",""
+"TC-INB-026","Verify scroll-up loads older history","Scroll-up pagination","Conversation with >50 messages","1. Scroll to top of message pane","scrollThreshold: 80px","Older messages fetched with cursor; previous scroll position preserved (no jump)","History paginated (FT-IB-041, FT-IB-042)","",""
+"TC-INB-027","Verify pagination stops at end of history","No more pages","Conversation history is exhausted","1. Reach end of older history","nextKey: null","No further fetches triggered on scroll-up","Pagination terminates (FT-IB-043)","",""
+"TC-INB-028","Verify date dividers in conversation","Today / Yesterday / weekday / full date","Conversation spans multiple days","1. Open a multi-day conversation","span: 7 days","Each day group shows a divider labeled 'Today','Yesterday','Monday',etc.","Date grouping correct (FT-IB-046–048)","",""
+"TC-INB-029","Verify unread badge bumps for inactive conv only","Unread increments only when conv is not active","Two convs open in sidebar, one active","1. Send a message to the INACTIVE conversation","convs: 2","Inactive conv badge increments by 1; active conv badge stays 0","Selective unread (UT-IB-005, UT-IB-006, FT-IB-011)","",""
+"TC-INB-030","Verify markRead clears unread badge","Opening a conv calls markRead","Inactive conv has unreadCount=3","1. Open the conversation","unreadCount: 3","markRead is sent; badge resets to 0 and ack clears it on every device","Badge cleared (UT-IB-021, FT-IB-036, FT-IB-049)","",""
+"TC-INB-031","Verify global unread broadcast","Header bell stays in sync","Multiple tabs/components listening","1. Receive a new message","listener: inboxUnreadChange","window CustomEvent 'inboxUnreadChange' fires with totalUnread; sessionStorage.inbox_unreadTotal updates","Global badge sync (UT-IB-030, FT-IB-064/065)","",""
+"TC-INB-032","Verify multi-clinic conversation merge","All-clinics mode merges snapshots","Clinic admin with 2 clinics, isAllClinicsAtom=true","1. Receive separate snapshots per clinic","clinics: 2","Conversations merged by id; server snapshot overwrites stale unreadCount","Multi-clinic merge correct (UT-IB-002, FT-IB-066/067)","",""
+"TC-INB-033","Verify switching clinic clears stale data","clearConversations on clinic switch","Clinic admin with 2 clinics","1. Switch selectedClinic in context","previousClinic: C1","Sidebar resets; new clinic's conversations load; no bleed from previous","Clinic switch isolation (UT-IB-004, FT-IB-018)","",""
+"TC-INB-034","Verify own send does NOT bump own unread","Sender side never increments unread","Inside an inactive conversation","1. Send a message
+2. Receive own echo","scenario: self-echo","unreadCount stays unchanged on sender side","Own-echo isolation (UT-IB-011)","",""
+"TC-INB-035","Verify session resume on hard refresh","Active conv persisted in sessionStorage","Inside a conversation, then F5","1. Open conv A
+2. Hard refresh","key: inbox_selectedConversationId","After reload, conv A is auto-selected; own bubbles render on the correct side","Session persistence (UT-IB-029, FT-IB-004)","",""
+"TC-INB-036","Verify desktop split layout (1280×800)","Sidebar + chat split on desktop","Viewport 1280×800","1. Open /inbox at desktop width","viewport: 1280×800","Sidebar visible alongside chat pane; 'Select a conversation' placeholder shown when no conv selected","Desktop layout (FT-IB-052, LIVE-CL-04, LIVE-PR-04)","",""
+"TC-INB-037","Verify mobile back navigation","Mobile back returns to list","Viewport ≤767px, conv open","1. Tap back button on mobile chat header","viewport: 375×812","Returns to list panel; activeConversationId cleared","Mobile nav (FT-IB-054, FT-IB-055)","",""
+"TC-INB-038","Verify mobile has no horizontal scroll","Layout fits viewport","Viewport 375×812","1. Open /inbox at 375×812","viewport: 375×812","document.documentElement.scrollWidth - clientWidth ≤ 4px","No horizontal overflow (LIVE-CL-05, LIVE-PR-05)","",""
+"TC-INB-039","Verify body scroll lock while inbox mounted","Background page does not scroll","Inbox open","1. Open /inbox
+2. Inspect document.body.style","style: overflow","document.body.style.overflow === 'hidden' while mounted; restored on unmount","Scroll lock (FT-IB-057, FT-IB-058)","",""
+"TC-INB-040","Verify desktop notification on incoming when tab hidden","Browser notification fires","Permission granted, tab is hidden","1. Open inbox
+2. Switch tab
+3. Have other user send a message","permission: granted","Browser Notification fires with body=message.substring(0,100); icon=avatarUrl","Notification works (FT-IB-034, QA-IB-017)","",""
+"TC-INB-041","Verify notification sound on incoming","Sound plays on incoming (sender ≠ me)","Inbox open","1. Receive a message","audio: <Audio>","new Audio(...).play() invoked","Sound triggers (FT-IB-033) — KNOWN ISSUE: current wav payload is silent; defect filed","",""
+"TC-INB-042","Verify NO notification on own echo","Own send echo does not self-notify","Inbox open","1. Send a message
+2. Server echo arrives","scenario: self-echo","No Notification or audio fires on the sender's own echo","Self-notify suppressed (FT-IB-035)","",""
+"TC-INB-043","Verify permission asked once","Notification permission flow","First inbox visit, permission=default","1. Navigate to /inbox","permission: default","Notification.requestPermission called once; no repeat prompts on subsequent visits","Permission UX (FT-IB-001 bootstrap, UAT-IB-013)","",""
+"TC-INB-044","Verify aria-label on Send button","Accessible send action","Inbox open, composer visible","1. Inspect send button","attribute: aria-label","aria-label='Send message' present","a11y compliance (US-IB-011)","",""
+"TC-INB-045","Verify aria-label on Back button","Accessible back action","Mobile chat view","1. Inspect back button","attribute: aria-label","aria-label='Back' present","a11y compliance (US-IB-012)","",""
+"TC-INB-046","Verify aria-label on Scroll-to-bottom button","Accessible scroll affordance","Long conversation, scrolled up","1. Scroll up
+2. Inspect scroll-down button","attribute: aria-label","aria-label='Scroll to bottom' present","a11y compliance (US-IB-013)","",""
+"TC-INB-047","Verify color contrast on bubbles ≥4.5:1","WCAG AA text contrast","Both mine and theirs bubbles visible","1. Run axe-core or contrast checker","ratio: ≥4.5:1","Text on both bubble colors meets 4.5:1","Contrast compliant (US-IB-017)","",""
+"TC-INB-048","Verify status icons are not color-only","Color-blind safe status","Sent/delivered/read/failed visible","1. Inspect bubbles in greyscale","status: all 5","Each status distinguishable by shape/icon, not just color","a11y compliance (US-IB-018)","",""
+"TC-INB-049","Verify no JWT leaks to console","Security: tokens not logged","Inbox open, DevTools open","1. Navigate clinic/professional inbox
+2. Watch console for 2s","regex: eyJ.+\\..+\\..+","No JWT-like string appears in any console log entry","No token leak (QA-IB-013, LIVE-CL-07, LIVE-PR-07)","",""
+"TC-INB-050","Verify message content rendered as text not HTML","XSS-safe rendering (deeper than TC-INB-009)","Conversation open","1. Send '<img src=x onerror=alert(1)>'","payload: <img onerror>","Rendered literally as text; no img element created; no alert","XSS prevented (QA-IB-011)","",""
+"TC-INB-051","Verify avatar URL only accepts http(s)","Avatar src sanitization","Conversation with crafted avatarUrl","1. Inject avatarUrl='javascript:alert(1)'","payload: javascript:","Element either not rendered or src refused","Avatar sanitization (QA-IB-012)","",""
+"TC-INB-052","Verify long send (2000+ chars) handled","Backend limit boundary","Inside open conversation","1. Send 5000-char message","length: 5000","Either truncated server-side OR explicit limit error displayed","Boundary handled (FT-IB-027)","",""
+"TC-INB-053","Verify long send does NOT crash optimistic UI","Optimistic bubble for oversized message","Inside open conversation","1. Send a 5000-char message","length: 5000","Optimistic bubble appears; if server rejects, bubble marked failed (not stuck in sending)","Failed-state on reject (FT-IB-027)","",""
+"TC-INB-054","Perf: 1,000 conversations sort <100ms","setConversations performance budget","Store loaded","1. setConversations(1000 randomized convos)","count: 1000","Sort completes in <100ms; full list rendered correctly","Perf budget met (PT-IB-perf-01)","",""
+"TC-INB-055","Perf: 5,000 conversations sort <500ms","Stress sort","Store loaded","1. setConversations(5000 randomized convos)","count: 5000","Sort completes in <500ms","Perf budget met (PT-IB-perf-02)","",""
+"TC-INB-056","Perf: 5,000 history messages process <300ms","setHistory budget","Store loaded","1. setHistory with 5000 messages","count: 5000","Reverse + map completes in <300ms","Perf budget met (PT-IB-perf-04)","",""
+"TC-INB-057","Perf: 500 FIFO acks reconcile <500ms","Throughput under load","Store loaded","1. addLocalSentMessage x500
+2. handleAck x500","count: 500","All bubbles updated in send order in <500ms","Perf budget met (PT-IB-perf-06)","",""
+"TC-INB-058","Perf: filter 5,000 convos per keystroke <50ms","Search performance","5000 convos loaded","1. set inboxSearchAtom to a substring","count: 5000","Filter result returned in <50ms","Perf budget met (PT-IB-perf-09)","",""
+"TC-INB-059","Perf: emoji picker NOT in main chunk","Bundle split verified","Build output present","1. Run vite build
+2. Inspect bundle","chunk: emoji-picker-react","emoji-picker-react ships in its own chunk, not main","Lazy-load enforced (PT-IB-011)","",""
+"TC-INB-060","Perf: Lighthouse score on /inbox","CWV check","Inbox URL reachable","1. Run Lighthouse against /inbox","thresholds: perf≥70,a11y≥85","All thresholds met","Lighthouse pass (PT-IB-001..003, lighthouse.spec.ts)","",""
