@@ -81,6 +81,33 @@ export const GET_MY_NEGOTIATIONS: ToolDefinition = {
   inputSchema: { type: "object", properties: {} },
 };
 
+export const APPLY_TO_JOB: ToolDefinition = {
+  name: "apply_to_job", bucket: "response", scope: "professional",
+  description: "Single-shot apply. Required: jobId. No preview, no rate, no questions.",
+  inputSchema: {
+    type: "object", required: ["jobId"],
+    properties: {
+      jobId: STRING,
+      message: STRING,
+      startDate: STRING,
+      notes: STRING,
+    },
+  },
+};
+
+export const RESPOND_INVITATION: ToolDefinition = {
+  name: "respond_invitation", bucket: "response", scope: "professional",
+  description: "Accept or decline a clinic invitation. response must be 'accepted' or 'declined'. For counter-offers, use preview_negotiate.",
+  inputSchema: {
+    type: "object", required: ["invitationId", "response"],
+    properties: {
+      invitationId: STRING,
+      response: { type: "string", enum: ["accepted", "declined"] },
+      message: STRING,
+    },
+  },
+};
+
 export const PREVIEW_APPLY_TO_JOB: ToolDefinition = {
   name: "preview_apply_to_job", bucket: "response", scope: "professional",
   description: "Render a confirm-card for applying to a job. Does NOT submit.",
@@ -814,11 +841,16 @@ export const CONFIRM_REMOVE_TEAM_MEMBER: ToolDefinition = {
 export const PROFESSIONAL_AGENT_TOOLS: ToolDefinition[] = [
   SEARCH_JOBS_NEAR_ME, GET_JOB_DETAILS, GET_MY_APPLICATIONS, GET_MY_INVITATIONS,
   GET_SCHEDULED_SHIFTS, GET_COMPLETED_SHIFTS, GET_MY_NEGOTIATIONS,
+  // Single-shot writes (v1 active set)
+  APPLY_TO_JOB, RESPOND_INVITATION,
+  // Counter-offer preview/confirm (v1 active set)
+  PREVIEW_NEGOTIATE_PRO, CONFIRM_NEGOTIATE_PRO,
+  // Legacy preview/confirm pairs — kept in registry so the executor can still
+  // dispatch them if invoked, but NOT advertised to the model (filtered out
+  // by PRO_V1_FUNCTIONS in the CDK CfnAgent definition).
   PREVIEW_APPLY_TO_JOB, CONFIRM_APPLY_TO_JOB,
   PREVIEW_RESPOND_INVITATION, CONFIRM_RESPOND_INVITATION,
   PREVIEW_WITHDRAW_APPLICATION, CONFIRM_WITHDRAW_APPLICATION,
-  // Phase 4
-  PREVIEW_NEGOTIATE_PRO, CONFIRM_NEGOTIATE_PRO,
   PREVIEW_ATTEST_COMPLETED_SHIFT, CONFIRM_ATTEST_COMPLETED_SHIFT,
   PREVIEW_UPDATE_MY_PROFILE, CONFIRM_UPDATE_MY_PROFILE,
   PREVIEW_UPDATE_HOME_ADDRESS, CONFIRM_UPDATE_HOME_ADDRESS,

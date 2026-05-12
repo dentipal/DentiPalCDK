@@ -93,12 +93,16 @@ async function bootstrapSessionFromExistingConnection(
     return { error: "No active authenticated connection found", status: 401 };
   }
   const userSub = row.sub.S;
-  const userType = row.userType?.S || "";
-  if (requestedAgent === "clinic" && userType !== "Clinic") {
-    return { error: "This account is not authorized for the clinic agent.", status: 403 };
+  // Normalize userType — existing websocketHandler may store it as "Clinic",
+  // "clinic", "Professional", or even "Clinic Admin" depending on which claim
+  // path resolved. Comparing case-insensitively + checking prefix avoids 403s
+  // on legitimate users whose row casing differs from what we assumed.
+  const ut = (row.userType?.S || "").toLowerCase();
+  if (requestedAgent === "clinic" && !ut.startsWith("clinic")) {
+    return { error: `This account is not authorized for the clinic agent (userType="${row.userType?.S}").`, status: 403 };
   }
-  if (requestedAgent === "professional" && userType !== "Professional") {
-    return { error: "This account is not authorized for the professional agent.", status: 403 };
+  if (requestedAgent === "professional" && !ut.startsWith("professional") && !ut.startsWith("pro")) {
+    return { error: `This account is not authorized for the professional agent (userType="${row.userType?.S}").`, status: 403 };
   }
 
   const session = await createSessionForConnection(userSub, connectionId, requestedAgent);

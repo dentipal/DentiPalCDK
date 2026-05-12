@@ -6,6 +6,7 @@ import { runCreateJobApplication, CreateJobApplicationInput } from "../createJob
 
 // Adapter for un-refactored handlers
 import { callHandlerInProcess } from "./handlerAdapter";
+import { handler as createJobApplicationHandler } from "../createJobApplication"; // REST apply (NOT the -prof variant)
 import { handler as getJobPostingHandler } from "../getJobPosting";
 import { handler as getJobApplicationsHandler } from "../getJobApplications";
 import { handler as getAllNegotiationsProfHandler } from "../getAllNegotiations-Prof";
@@ -225,7 +226,42 @@ export async function executeTool(
         return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
       }
 
-      // ------------------- PROFESSIONAL: response (preview/confirm) -------------------
+      // ------------------- PROFESSIONAL: single-shot writes (v1) -------------------
+      case "apply_to_job": {
+        if (!call.input.jobId || typeof call.input.jobId !== "string") {
+          return err(call.toolName, 400, "jobId is required");
+        }
+        const body: Record<string, any> = { jobId: call.input.jobId };
+        if (call.input.message) body.message = call.input.message;
+        if (call.input.startDate) body.startDate = call.input.startDate;
+        if (call.input.notes) body.notes = call.input.notes;
+        // NEVER pass proposedRate / proposedSalaryMin / proposedSalaryMax here —
+        // those flip the backend into a "negotiating" application + create an
+        // inline JobNegotiations row. Pure apply must stay status="pending".
+        const r = await callHandlerInProcess(createJobApplicationHandler, {
+          method: "POST",
+          pathParameters: { jobId: call.input.jobId }, // backend reads from path OR body
+          body,
+          auth,
+        });
+        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+      }
+
+      case "respond_invitation": {
+        if (!call.input.invitationId) return err(call.toolName, 400, "invitationId is required");
+        if (!["accepted", "declined"].includes(call.input.response)) {
+          return err(call.toolName, 400, "response must be 'accepted' or 'declined' (use preview_negotiate for counter-offers)");
+        }
+        const r = await callHandlerInProcess(respondToInvitationHandler, {
+          method: "POST",
+          pathParameters: { invitationId: call.input.invitationId },
+          body: { response: call.input.response, message: call.input.message },
+          auth,
+        });
+        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+      }
+
+      // ------------------- PROFESSIONAL: legacy preview/confirm pairs (kept for back-compat) -------------------
       case "preview_apply_to_job":
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) => {
           if (!i.jobId || typeof i.jobId !== "string") return "jobId is required";
