@@ -1,0 +1,22 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-FIND-001","Verify anonymous job browsing","Anonymous user loads page","Not logged in","1. Navigate to /search-jobs","N/A","Public job listings shown (via /jobs/public)","Public listings loaded","",""
+"TC-FIND-002","Verify keyword search","Search by keyword","On Find Shifts page","1. Type keyword in search","keyword: hygienist","Results filter to matching jobs; debounced","Filtered jobs shown","",""
+"TC-FIND-003","Verify compound filter","Filter by role, shiftType, and location","On Find Shifts page","1. Select role
+2. Select shift type
+3. Enter location","role: Dentist
+shiftType: Temporary
+location: Austin, TX","Compound filter applied; URL/query params reflect state","Filtered jobs shown","",""
+"TC-FIND-004","Verify date preset filter","Date range presets","On Find Shifts page","1. Select preset ""Next 7 days""","preset: 7days","startDate/endDate computed; results filtered to range","Filtered jobs shown","",""
+"TC-FIND-005","Verify custom date range","Custom date range","On Find Shifts page","1. Pick custom start and end dates","startDate: 2026-05-15
+endDate: 2026-05-25","Validation passes (end >= start); results filtered","Filtered jobs shown","",""
+"TC-FIND-006","Verify invalid date range rejected","Invalid custom range (end before start)","On Find Shifts page","1. Pick end date before start date","startDate: 2026-05-25
+endDate: 2026-05-15","Error ""End date must be after start""; filter not applied","No filter applied","",""
+"TC-FIND-007","Verify anonymous apply prompts login","Apply to job - not logged in","Not logged in","1. Click Apply on a job card","jobId: JOB-PUBLIC-001","AuthModal opens prompting user to login","User redirected to login","",""
+"TC-FIND-008","Verify professional apply","Apply to job - logged in as Professional","Professional session active","1. Click Apply on a job card","jobId: JOB-PUBLIC-001","POST /applications succeeds; button shows ""Applied"" and disables on retry","Application record created","",""
+"TC-FIND-009","Verify duplicate apply blocked","Apply duplicate","Professional already applied to job","1. Click Apply again","jobId: JOB-PUBLIC-001","409 Conflict; UI shows ""Already applied""","No duplicate record","",""
+"TC-FIND-010","Verify location auto-detect","Location auto-detect","Geolocation permission granted","1. Allow location prompt","geolocation: granted","Location field auto-fills; jobs filtered by distance","Location-based filter applied","",""
+"TC-FIND-011","Verify geolocation denial fallback","Location auto-detect denied","On Find Shifts page","1. Deny geolocation prompt","geolocation: denied","Fallback to manual location entry; no crash","Manual entry available","",""
+"TC-FIND-012","Verify job details expand","View job details inline","On Find Shifts page","1. Click Expand on a job card","jobId: JOB-PUBLIC-001","Full job details visible; description, rate, schedule shown","Job detail expanded","",""
+"TC-FIND-013","Verify empty results state","Empty results","Filter has no matches","1. Apply very restrictive filters","filters: extreme","""No jobs match"" empty state shown","Empty state rendered","",""
+"TC-FIND-014","Verify loading state","Loading state","Page is fetching jobs","1. Observe page during fetch","N/A","Skeleton or spinner shown; no content flash","Loading indicator visible","",""
+"TC-FIND-015","Verify API error handling","Error state when API fails","Backend unavailable","1. Trigger API failure","backend: down","Friendly error shown with Retry button","User can retry","",""

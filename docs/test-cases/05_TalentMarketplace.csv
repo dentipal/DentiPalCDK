@@ -1,0 +1,19 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-TM-001","Verify marketplace loads","Load Talent Marketplace","Clinic user logged in","1. Navigate to /talent-marketplace","N/A","Page renders; professional cards shown; pagination or infinite scroll works","Marketplace data loaded","",""
+"TC-TM-002","Verify search by name","Search by name","On talent marketplace","1. Type name in search bar","searchTerm: Smith","List filters to matching professionals; debounce prevents excess API calls","Filtered results shown","",""
+"TC-TM-003","Verify role filter","Filter by role","On talent marketplace","1. Apply role filter","role: DentalHygienist","Only hygienists shown","Filtered results shown","",""
+"TC-TM-004","Verify multi-filter combination","Filter by specialty and availability","On talent marketplace","1. Apply multiple filters at once","specialty: Pediatric
+availability: weekends","Combined filter applied (AND logic); result count updates","Filtered results shown","",""
+"TC-TM-005","Verify favorite professional","Mark professional as favorite","On a professional card","1. Click star icon on card","professionalSub: PRO-123","Star fills; POST /clinics/favorites succeeds; reloading persists favorite","Favorite saved in DB","",""
+"TC-TM-006","Verify unfavorite professional","Unfavorite","Professional previously favorited","1. Click filled star","professionalSub: PRO-123","DELETE /clinics/favorites/{sub} succeeds; star empties","Favorite removed from DB","",""
+"TC-TM-007","Verify invite modal opens","Open Invite modal","On a professional card","1. Click Invite button","professionalSub: PRO-123","TMInviteChoiceModal opens with options: New Job / Existing Job","Modal visible","",""
+"TC-TM-008","Verify invite to new job","Invite to new job","On invite modal","1. Choose ""New Job"" option","professionalSub: PRO-123","Redirects to Post Job form with professional pre-selected","Post Job form prefilled","",""
+"TC-TM-009","Verify invite to existing job","Invite to existing job","Clinic has open job postings","1. Choose ""Existing Job"" option
+2. Select job from list
+3. Confirm","professionalSub: PRO-123
+jobId: JOB-456","POST /jobs/{jobId}/invitations succeeds; toast ""Invitation sent""","Invitation record created","",""
+"TC-TM-010","Verify bulk invite batching","Bulk invite over 50","60 professionals favorited","1. Select 60 professionals
+2. Send bulk invite","count: 60","Backend batches into 2 requests (50 + 10); both succeed","60 invitations created","",""
+"TC-TM-011","Verify full profile view","View full professional profile","On a professional card","1. Click card or View Profile","professionalSub: PRO-123","Modal or page shows full profile (resume, licenses, specialties)","Profile details visible","",""
+"TC-TM-012","Verify Viewer restricted from invite","ClinicViewer sees cards but no Invite button","Logged in as ClinicViewer","1. Open talent marketplace","role: ClinicViewer","Cards visible; Invite button hidden or disabled","Viewer cannot send invites","",""
+"TC-TM-013","Verify empty search state","Empty state - no professionals match","On talent marketplace","1. Search for invalid string","searchTerm: zzzqqq999","Empty-state illustration and ""No professionals found"" message","Empty state rendered","",""

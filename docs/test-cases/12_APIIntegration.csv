@@ -1,0 +1,54 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-API-001","Verify auth endpoints","Auth endpoints work","Postman/Bruno set up","1. POST /auth/login
+2. POST /auth/refresh
+3. POST /auth/forgot
+4. POST /auth/confirm-forgot-password
+5. POST /auth/check-email
+6. POST /auth/google","valid credentials","All return documented shapes with 200 on happy path","Auth flow verified","",""
+"TC-API-002","Verify Users CRUD","Users CRUD","Root user token","1. POST /users
+2. GET /users
+3. PUT /users/{id}
+4. DELETE /users/{id}","Authorization: Bearer <root-jwt>","All succeed in order; final DELETE returns 204","User lifecycle complete","",""
+"TC-API-003","Verify Clinics CRUD","Clinics CRUD","Root user token","1. POST /clinics
+2. GET /clinics/{id}
+3. PUT /clinics/{id}
+4. DELETE /clinics/{id}","Authorization: Bearer <root-jwt>","Full lifecycle works","Clinic lifecycle complete","",""
+"TC-API-004","Verify Clinic Profiles CRUD","Clinic profiles CRUD","Root user token","1. POST/GET/PUT/DELETE /clinic-profiles","Authorization: Bearer <root-jwt>","Parallel lifecycle","Profiles lifecycle complete","",""
+"TC-API-005","Verify Professional Profiles CRUD","Professional profiles CRUD","Pro user token","1. POST /profiles
+2. GET /profiles/{sub}
+3. PUT /profiles/{sub}
+4. DELETE /profiles/{sub}","Authorization: Bearer <pro-jwt>","Full lifecycle","Profile lifecycle complete","",""
+"TC-API-006","Verify profile questions","Get profile questions","Any token","1. GET /profiles/questions","N/A","Returns question catalog","Catalog retrieved","",""
+"TC-API-007","Verify Temp Jobs CRUD","Job posting CRUD (temporary)","Clinic admin token","1. POST /jobs/temporary
+2. GET /jobs/temporary/{id}
+3. PUT /jobs/temporary/{id}
+4. DELETE /jobs/temporary/{id}","Authorization: Bearer <admin-jwt>","Succeeds","Temp job lifecycle complete","",""
+"TC-API-008","Verify Permanent Jobs CRUD","Job posting CRUD (permanent)","Clinic admin token","1. POST /jobs/permanent and full lifecycle","Authorization: Bearer <admin-jwt>","Succeeds","Perm job lifecycle complete","",""
+"TC-API-009","Verify Consulting Jobs CRUD","Job posting CRUD (multi-day)","Clinic admin token","1. POST /jobs/consulting and full lifecycle","Authorization: Bearer <admin-jwt>","Succeeds","Consulting lifecycle complete","",""
+"TC-API-010","Verify public job browse","Public job browse","No auth needed","1. GET /jobs/public","N/A","Returns public listings; no auth required","Public list returned","",""
+"TC-API-011","Verify Applications endpoints","Applications endpoints","Pro user token","1. POST /applications
+2. GET /applications
+3. PUT /applications/{id}
+4. DELETE /applications/{id}","Authorization: Bearer <pro-jwt>","Full lifecycle","Applications lifecycle complete","",""
+"TC-API-012","Verify Invitations endpoints","Invitations endpoints","Clinic + Pro tokens","1. POST /jobs/{jobId}/invitations
+2. POST /invitations/{id}/response
+3. GET /invitations","Authorization: Bearer <tokens>","All succeed","Invitations lifecycle complete","",""
+"TC-API-013","Verify Negotiations endpoint","Negotiations","Pro + Clinic tokens","1. PUT /applications/{appId}/negotiations/{negId}/response","negotiation payload","Counter-offer persisted","Negotiation updated","",""
+"TC-API-014","Verify Hire and Reject","Hire / Reject","Clinic admin token","1. POST /jobs/{jobId}/hire
+2. POST /{clinicId}/reject/{jobId}","Authorization: Bearer <admin-jwt>","Both succeed; statuses updated","Hire/reject recorded","",""
+"TC-API-015","Verify Dashboard feeds","Dashboard feeds","Pro user token","1. GET /dashboard/all/{status} for each status","status: open|action-needed|scheduled|completed|invites","Each returns correct subset","Feeds verified","",""
+"TC-API-016","Verify Assignments CRUD","Assignments CRUD","Admin token","1. POST/GET/PUT/DELETE /assignments","payload","Full lifecycle","Assignments lifecycle complete","",""
+"TC-API-017","Verify Favorites","Favorites","Clinic token","1. POST /clinics/favorites
+2. GET /clinics/favorites
+3. DELETE /clinics/favorites/{sub}","favoriteSub: PRO-123","Full lifecycle","Favorites lifecycle complete","",""
+"TC-API-018","Verify presigned URL","Files - presigned URL","Authenticated user","1. POST /files/presigned-urls for profile-image","fileType: profile-image","Presigned URL returned; upload to S3 succeeds","File uploaded to S3","",""
+"TC-API-019","Verify file types upload","Files - other types","Authenticated user","1. POST /files/presigned-urls for resumes, licenses, driving-licenses, video-resumes","fileType: each value","Each type works independently","All types succeed","",""
+"TC-API-020","Verify user addresses CRUD","User addresses CRUD","Authenticated user","1. POST/GET/PUT/DELETE /user-addresses","addressData","Full lifecycle","Address lifecycle complete","",""
+"TC-API-021","Verify feedback submission","Feedback submission","Authenticated user","1. POST /submitfeedback","feedback: text","Stored; 200 returned","Feedback recorded","",""
+"TC-API-022","Verify referrals","Referrals","Authenticated user","1. POST /referrals/invite","email: friend@example.com","Invitation email dispatched","Referral logged","",""
+"TC-API-023","Verify CORS allowed origin","CORS headers present","Browser sending preflight","1. OPTIONS preflight from allowed origin","Origin: https://app.dentipal.com","Returns Access-Control-Allow-Origin, Methods, Headers","Preflight passes","",""
+"TC-API-024","Verify CORS blocked origin","CORS blocks disallowed origin","Browser sending preflight","1. Request from unlisted origin","Origin: https://evil.com","Browser blocks; backend does not echo origin","Request rejected","",""
+"TC-API-025","Verify 401 on missing auth","Unauthorized call returns 401","No Authorization header","1. GET /users without header","N/A","401 with standard error body","Access denied","",""
+"TC-API-026","Verify 403 on insufficient role","Forbidden call returns 403","Viewer role token","1. POST /jobs/temporary","Authorization: Bearer <viewer-jwt>","403 with error body","Action blocked","",""
+"TC-API-027","Verify 404 on missing resource","404 for missing resource","Authenticated user","1. GET /clinics/does-not-exist","clinicId: does-not-exist","404 with ""Clinic not found with ID: ...""","Error returned","",""
+"TC-API-028","Verify response timing budget","Response timing budget","Production-like data set","1. Measure p95 latency on common reads","metric: p95","Dashboard feeds <=1s; profile <=500ms","Performance acceptable","",""

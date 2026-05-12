@@ -1,0 +1,20 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-PROF-001","Verify dashboard loads","Dashboard loads for logged-in pro","Profile complete","1. Navigate to /professional-dashboard","N/A","Summary cards and job feed render","Dashboard rendered","",""
+"TC-PROF-002","Verify incomplete profile redirect","Profile incomplete - redirect","New pro with missing profile","1. Navigate to /professional-dashboard","profileStatus: incomplete","Redirect to profile creation flow","User on profile setup","",""
+"TC-PROF-003","Verify dashboard tabs","Tabs: Available / Invites / Scheduled / Pending / Completed","Logged in as Professional","1. Click each tab in turn","tabs: available, invites, scheduled, pending, completed","Respective list renders via /dashboard/all/{status}","Tab content loads","",""
+"TC-PROF-004","Verify dynamic title","Dynamic title reflects active filter","On dashboard","1. Apply role filter","role: Hygienist","Title updates accordingly","Title reflects filter","",""
+"TC-PROF-005","Verify date range filter","Filter by date range","On dashboard","1. Pick start and end dates","startDate: 2026-05-15
+endDate: 2026-05-22","Feed filtered; counts update","Filter applied","",""
+"TC-PROF-006","Verify rate sorting","Sort by rate (descending)","On dashboard","1. Select sort by rate desc","sort: rate_desc","List reorders high to low","Sort applied","",""
+"TC-PROF-007","Verify accept from dashboard","Accept invitation from dashboard","Pending invite exists","1. Click Accept on invite card","invitationId: INV-001","Moves to Scheduled tab; clinic notified","Invitation accepted","",""
+"TC-PROF-008","Verify counter-offer","Submit counter-offer","Invitation open","1. Click Counter
+2. Enter new rate or terms in ReCounterModal
+3. Submit","invitationId: INV-001
+newRate: 60","POST/PUT to negotiations endpoint; status = negotiating","Counter recorded","",""
+"TC-PROF-009","Verify counter history","View own counter-offer history","Negotiation in progress","1. Open negotiation thread","negotiationId: NEG-001","All rounds displayed chronologically","Full history visible","",""
+"TC-PROF-010","Verify calendar view","Calendar view","Scheduled shifts exist","1. Open ProfessionalCalendar","N/A","Scheduled shifts shown on correct dates; click opens details","Calendar populated","",""
+"TC-PROF-011","Verify mark shift complete","Mark shift complete","Shift date has passed","1. Click ""Mark Complete"" on past shift","shiftId: SHIFT-001
+date: 2026-04-30","PUT /professionals/completedshifts succeeds; moves to Completed tab","Shift marked complete","",""
+"TC-PROF-012","Verify future shift complete blocked","Cannot mark future shift complete","Shift date is in the future","1. Try Mark Complete on future shift","shiftId: SHIFT-FUTURE
+date: 2026-12-01","Blocked with validation error","Shift status unchanged","",""
+"TC-PROF-013","Verify empty available state","Empty state - no jobs","New professional with no matches","1. Open Available tab","results: 0","Empty-state illustration and CTA ""Find Shifts""","Empty state rendered","",""

@@ -1,0 +1,95 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-AUTH-001","Verify clinic portal login","Clinic login with valid credentials","Verified clinic user exists (Root group)","1. Navigate to /clinic-login
+2. Enter valid registered email
+3. Enter valid password
+4. Click ""Log In"" button","Email: root@clinic.com
+Password: ValidPass123!","Redirects to /clinic-dashboard; JWT stored in localStorage; cognito:groups contains Root/ClinicAdmin","User authenticated; dashboard rendered with role-specific menu","",""
+"TC-AUTH-002","Verify professional portal login","Professional login with valid credentials","Verified professional user exists","1. Navigate to /professional-login
+2. Enter credentials
+3. Click Submit","Email: pro@example.com
+Password: ValidPass123!","Redirects to /professional-dashboard; profile fetched from API","Pro session active; dashboard rendered","",""
+"TC-AUTH-003","Verify login error handling","Login with invalid password","User exists in Cognito","1. Enter correct email
+2. Enter wrong password
+3. Click Log In","Email: root@clinic.com
+Password: WrongPass!","Inline error ""Incorrect email or password""; no token issued; user remains on login page","No session created; failed-attempt counter incremented","",""
+"TC-AUTH-004","Verify login error handling","Login with non-existent email","No such user in Cognito","1. Enter unregistered email
+2. Enter any password
+3. Click Log In","Email: ghost@nobody.com
+Password: AnyPass1!","Generic error shown without leaking whether email exists; no token issued","User remains on login page","",""
+"TC-AUTH-005","Verify form validation","Login with empty fields","User on login page","1. Leave email blank
+2. Leave password blank
+3. Click Log In","Email: (empty)
+Password: (empty)","Field-level required errors shown; submit blocked or no API call","No request sent to backend","",""
+"TC-AUTH-006","Verify form validation","Login with malformed email","User on login page","1. Enter malformed email
+2. Click Log In","Email: abc@
+Password: ValidPass123!","Zod validation error ""Enter a valid email""; no API call made","User remains on login page","",""
+"TC-AUTH-007","Verify unverified user flow","Login as unverified user","Signup complete but OTP not verified","1. Enter credentials of unverified account
+2. Click Log In","Email: newuser@clinic.com
+Password: ValidPass123!","Cognito returns UserNotConfirmedException; redirect to OTP/verify screen","User taken to /verify-otp","",""
+"TC-AUTH-008","Verify role-based redirect","Role mismatch on portal login","Professional user attempts clinic portal","1. Navigate to /clinic-login
+2. Enter professional credentials
+3. Click Log In","Email: pro@example.com
+Password: ValidPass123!","Backend or frontend rejects with role-mismatch message OR routes to correct portal","User not granted clinic-side access","",""
+"TC-AUTH-009","Verify already-authenticated redirect","Already-authenticated user visits login","Active clinic session","1. With active session navigate to /clinic-login","N/A","Auto-redirects to /clinic-dashboard","User remains logged in","",""
+"TC-AUTH-010","Verify rate-limit protection","Login brute-force attempt","No prior login attempts","1. Submit wrong password 10+ times in 1 minute","Email: root@clinic.com
+Password: WrongPass!","Cognito throttles requests; friendly error message; no information leak about lockout","Subsequent requests temporarily blocked","",""
+"TC-AUTH-020","Verify clinic signup","Clinic signup happy path","Email not already registered","1. Navigate to /clinic-signup
+2. Fill firstName, lastName, email, phoneNumber, clinicName, password, confirmPassword
+3. Click Submit","firstName: John
+lastName: Doe
+email: new@clinic.com
+phoneNumber: +1-555-0100
+clinicName: Smile Dental
+password: ValidPass123!","OTP sent to email; redirect to /clinic-verify; DynamoDB OTPVerification record created with TTL","Pending user created in Cognito (UNCONFIRMED)","",""
+"TC-AUTH-021","Verify OTP verification","OTP verification success","Signup complete, OTP code received","1. Enter 6-digit OTP
+2. Click Submit","OTP: 123456 (valid)","Cognito user created and assigned to Root group; auto-login; redirect to dashboard","User in CONFIRMED state; session active","",""
+"TC-AUTH-022","Verify OTP expiry","OTP expired","More than 15 min since signup","1. Enter expired OTP code
+2. Click Submit","OTP: 654321 (expired)","Error ""Code expired - please resend""; Resend button available","User remains on OTP screen","",""
+"TC-AUTH-023","Verify OTP invalid code","OTP wrong code","User on OTP screen","1. Enter incorrect code
+2. Click Submit","OTP: 000000 (wrong)","Error ""Invalid verification code""; attempts counter increments","User remains on OTP screen","",""
+"TC-AUTH-024","Verify OTP resend","Resend OTP","User on verification screen","1. Click Resend button","N/A","New code issued via email; previous code invalidated","New OTPVerification record created","",""
+"TC-AUTH-025","Verify duplicate signup prevention","Signup with existing email","Email already registered","1. Submit signup form with existing email","email: root@clinic.com (existing)
+password: ValidPass123!","Error ""Email already in use""; no OTP sent","No new user record created","",""
+"TC-AUTH-026","Verify password policy","Password too weak","User on signup form","1. Enter weak password
+2. Submit","password: abc","Error: ""Password must be at least 8 chars, 1 uppercase, 1 lowercase, 1 digit""","User remains on signup form","",""
+"TC-AUTH-027","Verify password confirmation","Password vs Confirm Password mismatch","User on signup form","1. Enter password
+2. Enter different confirm password
+3. Submit","password: Abcd1234
+confirmPassword: Abcd1235","Inline error ""Passwords do not match""","User remains on signup form","",""
+"TC-AUTH-028","Verify professional signup","Professional signup happy path","Email not already registered","1. Navigate to /professional-signup
+2. Fill all required fields and select role
+3. Submit
+4. Verify OTP","email: hyg@example.com
+role: DentalHygienist
+password: ValidPass123!","User created in matching professional Cognito group based on role","Pro user in CONFIRMED state; profile creation prompt","",""
+"TC-AUTH-040","Verify forgot password flow","Forgot password with existing email","User exists","1. Navigate to /forgot-password
+2. Enter registered email
+3. Submit","email: root@clinic.com","Success message; reset code emailed; /reset-password screen shown","Pending password reset state","",""
+"TC-AUTH-041","Verify no email enumeration","Forgot password with unknown email","Email does not exist","1. Enter unregistered email
+2. Submit","email: ghost@nobody.com","Generic success shown (no email-enumeration leak)","No reset code sent","",""
+"TC-AUTH-042","Verify password reset","Reset with valid code and new password","Reset code received","1. Enter valid reset code
+2. Enter new password
+3. Confirm new password
+4. Submit","code: 123456
+newPassword: NewValidPass1!","Success; redirect to login; old password rejected; new password works","Cognito password updated","",""
+"TC-AUTH-043","Verify reset error handling","Reset with invalid code","User on reset screen","1. Enter wrong code
+2. Submit","code: 000000","Error ""Invalid verification code""","User remains on reset screen","",""
+"TC-AUTH-044","Verify password policy on reset","Reset with weak new password","Valid code received","1. Enter weak new password
+2. Submit","code: 123456
+newPassword: abc","Password policy error; reset not performed","Password unchanged","",""
+"TC-AUTH-045","Verify reset code reuse blocked","Reuse of reset code","Code already consumed","1. Re-enter previously used code
+2. Submit","code: 123456 (used)","Error ""Code already used or expired""","Password unchanged","",""
+"TC-AUTH-060","Verify Google OAuth new user","Google login - new user","Google account never used","1. Click ""Continue with Google""
+2. Authenticate in Google popup
+3. Redirect to /callback","Google account: newuser@gmail.com","User created via pre-signup Lambda; auto-assigned group; redirect to dashboard","Session active; new Cognito user","",""
+"TC-AUTH-061","Verify Google OAuth existing user","Google login - existing user","User previously signed up via Google","1. Click ""Continue with Google""
+2. Authenticate","Google account: existing@gmail.com","Existing user logged in; tokens issued","Session active","",""
+"TC-AUTH-062","Verify Google email collision","Google login - email collision","Email already registered with password","1. Click ""Continue with Google"" with email already in password DB","Google account: root@clinic.com","Account merge succeeds OR clear error ""Account already exists - log in with password""","No duplicate account created","",""
+"TC-AUTH-063","Verify Google popup cancel","Google popup closed mid-flow","User starts Google flow","1. Click ""Continue with Google""
+2. Close Google popup before completing","N/A","User returned to login page; no partial account created","No session; no orphan user record","",""
+"TC-AUTH-064","Verify Apple Sign-In placeholder","Apple Sign-In button state","On login page","1. Observe Apple Sign-In button","N/A","Button shown as ""Coming soon"" or disabled per current implementation","No action when clicked","",""
+"TC-AUTH-080","Verify logout clears session","Logout clears session","Logged-in user","1. Click Logout","N/A","Tokens cleared from localStorage/cookies; redirect to login; back button does not restore session","No active session","",""
+"TC-AUTH-081","Verify protected route after logout","Access protected route after logout","User just logged out","1. Navigate to /clinic-dashboard","N/A","Redirect to /clinic-login","User not granted access","",""
+"TC-AUTH-082","Verify silent token refresh","Token expired - silent refresh","Session near expiry","1. Make an API call when access token near expiry","N/A","Refresh token used; new access token issued; call succeeds without user impact","Session extended","",""
+"TC-AUTH-083","Verify tampered refresh token rejected","Refresh token invalid","Tampered refresh token in storage","1. Modify refresh token in localStorage
+2. Trigger API call","refreshToken: tampered_value","User forced to re-login; no unauthorized access","Session terminated","",""

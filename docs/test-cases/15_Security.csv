@@ -1,0 +1,25 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-SEC-001","Verify clinic route protection","Cannot access clinic dashboard logged-out","No active session","1. Navigate to /clinic-dashboard","N/A","Redirect to /clinic-login","No data exposed","",""
+"TC-SEC-002","Verify pro route protection","Cannot access pro dashboard logged-out","No active session","1. Navigate to /professional-dashboard","N/A","Redirect to /professional-login","No data exposed","",""
+"TC-SEC-003","Verify pro blocked from /users","Professional cannot access /users","Pro logged in","1. Navigate to /users","role: Professional","Blocked; 403 or redirect","No user list shown","",""
+"TC-SEC-004","Verify cross-clinic jobs blocked","Clinic cannot view another clinic's jobs","Clinic A logged in","1. GET /jobs/clinictemporary/{clinicB-id}","userClinic: A, target: B","403 Forbidden","No data leak","",""
+"TC-SEC-005","Verify pro app isolation","Pro cannot view another pro's applications","Pro A logged in","1. GET /applications then try to access Pro B's app by ID","userSub: A, target: B","403 or filtered out","No data leak","",""
+"TC-SEC-006","Verify JWT signature","JWT signature validation","User has tampered token","1. Modify any claim in token
+2. Call API","tamperedJWT","401 returned; request rejected","No access","",""
+"TC-SEC-007","Verify expired JWT","JWT expiry enforced","Token expired","1. Call API with expired token","expiredJWT","401 returned; no access granted","No access","",""
+"TC-SEC-008","Verify CSRF protection","CSRF protection on state-changing requests","Inspect POST requests","1. Inspect Authorization mechanism","Authorization: Bearer ...","Auth via Bearer token (not cookie) OR CSRF token present","CSRF mitigated","",""
+"TC-SEC-009","Verify password not logged","Password never logged","After login attempt","1. Review CloudWatch logs","logSearch: password","No plaintext password in logs","Logs clean","",""
+"TC-SEC-010","Verify HTTPS enforcement","HTTPS enforced","Direct HTTP request","1. Visit http:// URL","scheme: http","Redirect to https://","Encrypted connection","",""
+"TC-SEC-011","Verify security headers","Security headers present","Inspect response headers","1. Open Network tab and check response headers","N/A","Strict-Transport-Security, X-Content-Type-Options, Referrer-Policy set","Headers present","",""
+"TC-SEC-012","Verify tokens cleared on logout","localStorage tokens cleared on logout","Logged-in user","1. Click Logout
+2. Inspect localStorage","N/A","No accessToken, refreshToken, or userRole remaining","Storage clean","",""
+"TC-SEC-013","Verify presigned URL expiry","S3 presigned URL short-lived","Obtained presigned URL","1. Wait 15+ min
+2. Retry URL","expiryMin: 15","Request rejected after expiry","URL invalidated","",""
+"TC-SEC-014","Verify server-side password policy","Cognito password policy enforced server-side","Direct API access","1. Bypass frontend, POST signup with weak password","password: abc","Cognito rejects","No weak account","",""
+"TC-SEC-015","Verify rate limiting","Rate limiting on auth endpoints","No prior requests","1. Send rapid-fire login requests","count: 50/sec","Cognito throttles; 429 eventually","Brute-force mitigated","",""
+"TC-SEC-016","Verify no PII in URLs","No PII in URLs","Any route","1. Check routes for sensitive params","N/A","Email/password never in query string","URLs safe","",""
+"TC-SEC-017","Verify file type whitelist","File upload type whitelist","On file upload","1. Attempt upload of disallowed types","filetypes: .html, .exe, .sh","Rejected at backend","Upload blocked","",""
+"TC-SEC-018","Verify virus scan","File upload virus signature","AV scanning in place","1. Upload EICAR test file","file: eicar.com","Quarantined or rejected","Malware blocked","",""
+"TC-SEC-019","Verify role tamper protection","Cross-role privilege escalation","Viewer logged in","1. Manually set role to Root in localStorage
+2. Call admin API","tampered localStorage role","Backend rejects based on real JWT claims","No escalation","",""
+"TC-SEC-020","Verify clickjacking protection","Clickjacking protection","Inspect response headers","1. Check X-Frame-Options or CSP frame-ancestors","N/A","Set to DENY or self","Clickjacking blocked","",""

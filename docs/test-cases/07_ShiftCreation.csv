@@ -1,0 +1,51 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-SHIFT-001","Verify temp job creation","Post temp job - happy path","Logged in as ClinicAdmin or ClinicManager","1. Select roles
+2. Select skills/specialties
+3. Select work location = onsite
+4. Pick date, startTime, endTime
+5. Select payType = hourly with rate
+6. Enter description
+7. Submit","role: DentalHygienist
+date: 2026-06-01
+startTime: 09:00
+endTime: 17:00
+payType: hourly
+rate: 50","POST /jobs/temporary succeeds; job visible in Clinic Dashboard - Open Shifts","Job record created","",""
+"TC-SHIFT-002","Verify per-transaction pay rule","Per-transaction pay blocked for doctor roles","On post temp job form","1. Select role Dentist
+2. Try to select payType per_transaction","role: Dentist
+payType: per_transaction","Option disabled or hidden for doctor roles","Pay type cannot be selected","",""
+"TC-SHIFT-003","Verify time order validation","endTime before startTime","On post temp job form","1. Enter startTime later than endTime","startTime: 17:00
+endTime: 09:00","Validation error ""End time must be after start""","No job created","",""
+"TC-SHIFT-004","Verify negative rate rejected","Rate negative","On post temp job form","1. Enter negative rate","rate: -10","Rejected with ""Rate must be >= 0""","No job created","",""
+"TC-SHIFT-005","Verify skills depend on roles","Skills depend on selected roles","On post temp job form","1. Select role DentalHygienist","role: DentalHygienist","Skills dropdown shows hygienist-relevant options only","Skill options filtered","",""
+"TC-SHIFT-006","Verify multi-clinic selection","Multi-clinic user - select clinic","User assigned to 2+ clinics","1. Open post temp job form","userClinics: [CLINIC-A, CLINIC-B]","Clinic selector appears; required before submit","Selection required","",""
+"TC-SHIFT-007","Verify meal break entry","Meal break entry","On post temp job form","1. Enter meal break duration","mealBreak: 30 min","Persisted and shown on job detail","Break duration saved","",""
+"TC-SHIFT-020","Verify permanent job creation","Post permanent - happy path","On post permanent job form","1. Fill role, location, salary_min, salary_max, description
+2. Submit","role: AssociateDentist
+salary_min: 80000
+salary_max: 120000","POST /jobs/permanent succeeds","Job record created","",""
+"TC-SHIFT-021","Verify salary range validation","salary_min greater than salary_max","On post permanent job form","1. Enter min > max
+2. Submit","salary_min: 100000
+salary_max: 80000","Error ""Min salary must be <= max salary""","No job created","",""
+"TC-SHIFT-022","Verify remote option","Remote option (us_remote / global_remote)","On post permanent job form","1. Select us_remote","workLocation: us_remote","Location input hidden; job saved with remote flag","Remote flag set","",""
+"TC-SHIFT-040","Verify multi-day consulting","Create 3-day consulting job","On multi-day consulting form","1. Select role
+2. Add multiple dates
+3. Set times and rate
+4. Submit","role: AssociateDentist
+dates: [2026-03-01, 2026-03-02, 2026-03-03]
+rate: 1000/day","POST /jobs/consulting succeeds; all dates persisted","Multi-day job created","",""
+"TC-SHIFT-041","Verify overlap rejection","Overlapping dates rejected","On multi-day consulting form","1. Add same date twice","dates: [2026-03-01, 2026-03-01]","Duplicate removed or error shown","No duplicate persisted","",""
+"TC-SHIFT-060","Verify single invite","Send single invite with message","Job posted","1. Click Invite on a professional
+2. Enter message and urgency
+3. Send","jobId: JOB-001
+professionalSub: PRO-123
+urgency: medium
+message: We'd love to have you","POST /jobs/{jobId}/invitations succeeds; invitation appears in professional's inbox","Invitation record created","",""
+"TC-SHIFT-061","Verify bulk invite","Bulk invite 50 favorites","50 favorited professionals exist","1. Click Bulk Invite","favorites: 50","Single API batch; toast ""50 invitations sent""","50 invitations created","",""
+"TC-SHIFT-062","Verify professional accepts","Professional accepts invite","Professional has pending invite","1. Click Accept on invite","invitationId: INV-001","POST /invitations/{id}/response with accepted; job appears in Scheduled","Invitation status = accepted","",""
+"TC-SHIFT-063","Verify professional declines","Professional declines invite","Professional has pending invite","1. Click Decline on invite","invitationId: INV-001","Status updated to declined; clinic notified","Invitation status = declined","",""
+"TC-SHIFT-064","Verify expired invite","Invite expired","Job date has passed","1. Try Accept on expired invitation","invitationId: INV-EXPIRED","Error ""Invitation expired""","No status change","",""
+"TC-SHIFT-065","Verify job promotion","Promote job (boost visibility)","Job posted","1. Open PromoteJobModal
+2. Choose plan
+3. Confirm","jobId: JOB-001
+plan: premium","Promotion recorded; job flagged or promoted in listings","Job has promoted flag","",""
