@@ -2,6 +2,7 @@ import {
     DynamoDBClient,
     GetItemCommand,
     PutItemCommand,
+    QueryCommand,
     AttributeValue,
     DynamoDBClientConfig,
 } from "@aws-sdk/client-dynamodb";
@@ -35,6 +36,10 @@ interface ReferralPayload {
 interface ProfileItem extends DynamoDBItem {
     userSub?: AttributeValue;
     full_name?: AttributeValue;
+    // Stored on the profile row for some users — used as a fallback Reply-To
+    // address when the Cognito access token doesn't carry an `email` claim.
+    email?: AttributeValue;
+    contact_email?: AttributeValue;
 }
 
 /** Defines the return structure for the email template function. */
@@ -48,9 +53,18 @@ interface EmailTemplate {
 
 // Use non-null assertion (!) as we expect these environment variables to be set.
 const REGION: string = process.env.REGION!;
-const SES_REGION: string = process.env.SES_REGION!;
+const SES_REGION: string = process.env.SES_REGION || process.env.REGION!;
 const PROFESSIONAL_PROFILES_TABLE: string = process.env.PROFESSIONAL_PROFILES_TABLE!;
 const REFERRALS_TABLE: string = process.env.REFERRALS_TABLE!;
+// Frontend base URL the referee clicks through to. Wired in the CDK stack
+// (DentiPal-Backend-Monolith) as APP_URL. Local fallback exists so handler
+// tests / sam-local don't crash, but production must set it.
+const APP_URL: string = process.env.APP_URL || "http://localhost:5173";
+// Verified SES "From" identity. Wired in the CDK stack as SES_FROM.
+const SES_FROM: string = process.env.SES_FROM || "no-reply@dentipal.com";
+// GSI on the Referrals table — partition key `referrerUserSub`. Used to scan
+// a referrer's existing invites cheaply (vs. table-wide Scan).
+const REFERRER_INDEX = "ReferrerIndex";
 
 const dynamodb = new DynamoDBClient({ region: REGION } as DynamoDBClientConfig);
 const ses = new SESClient({ region: SES_REGION } as SESClientConfig);
@@ -64,13 +78,13 @@ const ses = new SESClient({ region: SES_REGION } as SESClientConfig);
  * Creates the HTML and text bodies for the referral email.
  */
 function createReferralEmail(
-    referrerName: string, 
-    friendEmail: string, 
-    personalMessage: string | undefined, 
+    referrerName: string,
+    friendEmail: string,
+    personalMessage: string | undefined,
     referrerUserSub: string
 ): EmailTemplate {
     const subject = `${referrerName} invites you to join DentiPal! 🦷`;
-    const signupUrl = `http://localhost:5173/professional-signup?ref=${referrerUserSub}`;
+    const signupUrl = `${APP_URL.replace(/\/$/, "")}/professional-signup?ref=${encodeURIComponent(referrerUserSub)}`;
     
     // HTML Body (long string for email content)
     const htmlBody = `
@@ -197,6 +211,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         const authHeader = event.headers?.Authorization || event.headers?.authorization;
         const userInfo = extractUserFromBearerToken(authHeader);
         const userSub = userInfo.sub;
+        const referrerEmail: string | undefined = userInfo.email?.toLowerCase();
 
         const referralData: ReferralPayload = JSON.parse(event.body || "{}"); // Handle empty body safely
 
@@ -204,7 +219,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         if (!referralData.friendEmail) {
             return {
                 statusCode: 400,
-                headers: headers, 
+                headers: headers,
                 body: JSON.stringify({ error: "Required field: friendEmail" })
             };
         }
@@ -213,31 +228,91 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         if (!emailRegex.test(referralData.friendEmail)) {
             return {
                 statusCode: 400,
-                headers: headers, 
+                headers: headers,
                 body: JSON.stringify({ error: "Invalid email format" })
             };
         }
 
         const friendEmail: string = referralData.friendEmail.toLowerCase();
 
+        // 2b. Self-referral guard — block users from inviting themselves.
+        // Falls open if the token didn't carry an email claim (access tokens
+        // sometimes don't); the canonical check is the duplicate-invite guard
+        // below, which still catches a self-invite on the second attempt.
+        if (referrerEmail && referrerEmail === friendEmail) {
+            return {
+                statusCode: 400,
+                headers: headers,
+                body: JSON.stringify({ error: "You can't refer your own email address." })
+            };
+        }
+
         // 3. Get Referrer's Profile
         const referrerProfileResult = await dynamodb.send(new GetItemCommand({
             TableName: PROFESSIONAL_PROFILES_TABLE,
             Key: { userSub: { S: userSub } }
         }));
-        
+
         const referrerProfile: ProfileItem | undefined = referrerProfileResult.Item as ProfileItem | undefined;
 
         if (!referrerProfile) {
             return {
                 statusCode: 404,
-                headers: headers, 
+                headers: headers,
                 body: JSON.stringify({ error: "Professional profile not found." })
             };
         }
 
         const referrerName: string = referrerProfile.full_name?.S || 'Your DentiPal friend';
-        
+
+        // Reply-To resolution order:
+        //   1. email claim on the access token (set by Cognito when the app
+        //      client requests the `email` scope)
+        //   2. `email` or `contact_email` stored on the professional profile row
+        // If neither is available we simply omit Reply-To and replies bounce
+        // back to a no-reply mailbox — acceptable, not ideal.
+        const replyToEmail: string | undefined =
+            referrerEmail
+            || referrerProfile.email?.S?.toLowerCase()
+            || referrerProfile.contact_email?.S?.toLowerCase()
+            || undefined;
+
+        // 3b. Duplicate-invite guard — Query the ReferrerIndex GSI for any
+        // existing referral the same referrer has already sent to this email.
+        // Status `sent` means an invite is in flight; `signed_up` and
+        // `bonus_due` mean the friend already converted. In all three cases
+        // we refuse to write a second row (which would create double-credit
+        // risk and email spam).
+        const existing = await dynamodb.send(new QueryCommand({
+            TableName: REFERRALS_TABLE,
+            IndexName: REFERRER_INDEX,
+            KeyConditionExpression: "referrerUserSub = :sub",
+            FilterExpression:
+                "friendEmail = :email AND #status IN (:sent, :signedUp, :bonusDue)",
+            ExpressionAttributeNames: { "#status": "status" },
+            ExpressionAttributeValues: {
+                ":sub": { S: userSub },
+                ":email": { S: friendEmail },
+                ":sent": { S: "sent" },
+                ":signedUp": { S: "signed_up" },
+                ":bonusDue": { S: "bonus_due" },
+            },
+            Limit: 1,
+        }));
+
+        if (existing.Items && existing.Items.length > 0) {
+            const prior = existing.Items[0];
+            const priorStatus = prior.status?.S || "sent";
+            const msg = priorStatus === "sent"
+                ? "You've already invited this email. Wait for them to sign up before re-sending."
+                : "This person has already joined DentiPal through your referral.";
+            return {
+                statusCode: 409,
+                headers: headers,
+                body: JSON.stringify({ error: msg, status: priorStatus })
+            };
+        }
+
         // 4. Create Referral Record in DynamoDB
         const referralId: string = uuidv4();
         const timestamp: string = new Date().toISOString();
@@ -264,8 +339,12 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
         );
         
         const emailCommandInput: SendEmailCommandInput = {
-            Source: 'jelladivya369@gmail.com', // Ensure this is a verified SES email address
+            Source: SES_FROM,
             Destination: { ToAddresses: [friendEmail] },
+            // From: DentiPal's verified domain (passes SPF/DKIM/DMARC).
+            // Reply-To: the referring professional, so the friend hitting
+            // "Reply" reaches a human and not the no-reply mailbox.
+            ...(replyToEmail ? { ReplyToAddresses: [replyToEmail] } : {}),
             Message: {
                 Subject: { Data: emailTemplate.subject, Charset: 'UTF-8' },
                 Body: {
