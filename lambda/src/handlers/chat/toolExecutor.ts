@@ -1,13 +1,19 @@
 import { AuthContext } from "../utils";
 import { haversineDistance } from "../geo";
-import { runBrowseJobPostings, BrowseJobPostingsInput } from "../browseJobPostings";
+import { runBrowseJobPostings } from "../browseJobPostings";
+import { PROFESSIONAL_ROLES, VALID_ROLE_VALUES } from "../professionalRoles";
 import { runGetJobInvitations } from "../getJobInvitations";
-import { runCreateJobApplication, CreateJobApplicationInput } from "../createJobApplication-prof";
+// Apply path: both apply_to_job and the legacy confirm_apply_to_job invoke
+// createJobApplication.ts in-process — same handler the website's POST
+// /applications route hits — so chat-side and web-side writes are
+// byte-identical (same DDB writes, same defaults). No HTTP involved; we just
+// import the handler function and call it via callHandlerInProcess.
 
 // Adapter for un-refactored handlers
 import { callHandlerInProcess } from "./handlerAdapter";
 import { handler as createJobApplicationHandler } from "../createJobApplication"; // REST apply (NOT the -prof variant)
 import { handler as getJobPostingHandler } from "../getJobPosting";
+import { handler as getProfessionalFilteredJobsHandler } from "../getProfessionalFilteredJobs";
 import { handler as getJobApplicationsHandler } from "../getJobApplications";
 import { handler as getAllNegotiationsProfHandler } from "../getAllNegotiations-Prof";
 import { handler as getScheduledShiftsHandler } from "../getScheduledShifts";
@@ -70,10 +76,53 @@ export type ToolResult = ToolResultOK | ToolResultErr;
 const ok = (toolName: string, data: any): ToolResultOK => ({ ok: true, toolName, data });
 const err = (toolName: string, status: number, error: string): ToolResultErr => ({ ok: false, toolName, status, error });
 
+/**
+ * Convert a handler's response body to a non-empty error-message string.
+ * `JSON.stringify(undefined)` returns `undefined` (the JS value, not the
+ * string), which when serialized into a WebSocket frame ends up rendering
+ * as "Error (undefined)" in the widget. This helper guarantees a usable
+ * string even when the underlying handler returned 4xx/5xx with no body.
+ */
+function safeBodyToString(status: number, body: any): string {
+  if (body === undefined || body === null) {
+    return `Handler returned ${status} with no body`;
+  }
+  if (typeof body === "string") return body;
+  try {
+    const s = JSON.stringify(body);
+    return s && s !== "undefined" ? s : `Handler returned ${status} with empty body`;
+  } catch {
+    return `Handler returned ${status}; body not serializable`;
+  }
+}
+
 function clampLimit(n: any): number {
   const v = typeof n === "number" ? n : parseInt(n);
   if (!Number.isFinite(v) || v <= 0) return 20;
   return Math.min(v, 50);
+}
+
+/**
+ * Normalize whatever the model passed for `professionalRole` into the
+ * canonical snake_case dbValue the backend handlers accept. Tolerates:
+ *   - dbValue ("dental_hygienist")            → returned as-is
+ *   - cognitoGroup ("DentalHygienist")        → mapped via PROFESSIONAL_ROLES
+ *   - display name ("Dental Hygienist")       → mapped via PROFESSIONAL_ROLES
+ *   - unrecognized                            → returns undefined (caller should drop the param)
+ */
+function normalizeRoleToDbValue(input: string): string | undefined {
+  const lower = input.trim().toLowerCase();
+  if (!lower) return undefined;
+  // dbValue (any case)?
+  const dbHit = (VALID_ROLE_VALUES as readonly string[]).find(v => v.toLowerCase() === lower);
+  if (dbHit) return dbHit;
+  // Cognito group?
+  const fromGroup = PROFESSIONAL_ROLES.find(r => r.cognitoGroup.toLowerCase() === lower);
+  if (fromGroup) return fromGroup.dbValue;
+  // Display name?
+  const fromName = PROFESSIONAL_ROLES.find(r => r.name.toLowerCase() === lower);
+  if (fromName) return fromName.dbValue;
+  return undefined;
 }
 
 /**
@@ -142,7 +191,7 @@ async function genericConfirm(
   if (!gate.ok) return err(toolName, gate.status, gate.reason);
   const result = await exec(payload);
   await clearPendingPreview(auth.userSub, connectionId);
-  if (result.status >= 400) return err(toolName, result.status, JSON.stringify(result.body));
+  if (result.status >= 400) return err(toolName, result.status, safeBodyToString(result.status, result.body));
   return ok(toolName, result.body);
 }
 
@@ -173,51 +222,86 @@ export async function executeTool(
     switch (call.toolName) {
       // ------------------- PROFESSIONAL: search / info -------------------
       case "search_jobs_near_me": {
-        // Over-fetch then trim post-filter, since the radius cut may remove
-        // most of the page.
+        // Use the same handler the website's pro find-jobs page uses:
+        // /professionals/filtered-jobs (auth, relevance-scored, excludes
+        // already-applied, supports lat/lng radius). This makes the chatbot's
+        // results match what the user sees in the UI.
         const requestedLimit = clampLimit(call.input.limit);
-        const input: BrowseJobPostingsInput = {
-          jobType: call.input.jobType, professionalRole: call.input.professionalRole,
-          shiftSpeciality: call.input.shiftSpeciality, minRate: call.input.minRate,
-          maxRate: call.input.maxRate, dateFrom: call.input.dateFrom, dateTo: call.input.dateTo,
-          assistedHygiene: call.input.assistedHygiene,
-          limit: Math.min(requestedLimit * 4, 200),
-        };
-        const r = await runBrowseJobPostings(input, auth);
-        if (r.status >= 400) return err(call.toolName, r.status, JSON.stringify(r.body));
-
-        let postings: any[] = r.body?.jobPostings || [];
         const home = userContext?.home;
         const radiusMiles = typeof call.input.radiusMiles === "number" && call.input.radiusMiles > 0
           ? call.input.radiusMiles
           : 50;
+        const qs: Record<string, string> = {
+          limit: String(requestedLimit),
+          radius: String(radiusMiles),
+        };
+        if (home?.lat) qs.userLat = String(home.lat);
+        if (home?.lng) qs.userLng = String(home.lng);
+        if (call.input.professionalRole) {
+          // Normalize whatever shape the model passed (Cognito group / display
+          // name / dbValue) to the snake_case dbValue the handler expects.
+          // Drop the param entirely on unknown values rather than 400-ing.
+          const norm = normalizeRoleToDbValue(String(call.input.professionalRole));
+          if (norm) qs.role = norm;
+        }
+        if (call.input.jobType) qs.jobType = String(call.input.jobType);
+        if (typeof call.input.minRate === "number") qs.minRate = String(call.input.minRate);
+        if (typeof call.input.maxRate === "number") qs.maxRate = String(call.input.maxRate);
+        if (call.input.dateFrom) qs.start = String(call.input.dateFrom);
+        if (call.input.dateTo) qs.end = String(call.input.dateTo);
 
-        if (home && typeof home.lat === "number" && typeof home.lng === "number") {
-          // Annotate every posting with miles-from-home, drop those without
-          // coords or outside the radius, then sort nearest first.
-          postings = postings
-            .map((p) => {
-              if (typeof p?.lat === "number" && typeof p?.lng === "number") {
-                const miles = haversineDistance(home.lat, home.lng, p.lat, p.lng);
-                return { ...p, distanceMiles: Math.round(miles * 10) / 10 };
-              }
-              return null;
-            })
-            .filter((p): p is any => p !== null && p.distanceMiles <= radiusMiles)
-            .sort((a, b) => a.distanceMiles - b.distanceMiles);
+        const r = await callHandlerInProcess(getProfessionalFilteredJobsHandler, {
+          method: "GET",
+          queryStringParameters: qs,
+          auth,
+        });
+
+        // Defensive fallback: if the canonical handler is unavailable for any
+        // reason (e.g. 4xx for missing config), fall back to the basic public
+        // browser. Better degraded results than no results.
+        let body: any = r.body;
+        if (r.status >= 400) {
+          console.warn(`[toolExecutor] getProfessionalFilteredJobs failed (${r.status}), falling back to runBrowseJobPostings`);
+          const normRole = call.input.professionalRole
+            ? normalizeRoleToDbValue(String(call.input.professionalRole))
+            : undefined;
+          const fallback = await runBrowseJobPostings({
+            jobType: call.input.jobType, professionalRole: normRole,
+            shiftSpeciality: call.input.shiftSpeciality, minRate: call.input.minRate,
+            maxRate: call.input.maxRate, dateFrom: call.input.dateFrom, dateTo: call.input.dateTo,
+            assistedHygiene: call.input.assistedHygiene,
+            limit: Math.min(requestedLimit * 4, 200),
+          }, auth);
+          if (fallback.status >= 400) return err(call.toolName, fallback.status, JSON.stringify(fallback.body));
+          body = fallback.body;
         }
 
-        postings = postings.slice(0, requestedLimit);
-        const enrichedBody = {
-          ...r.body,
-          jobPostings: postings,
-          totalCount: postings.length,
-          radiusMiles: home ? radiusMiles : null,
-          filteredByDistance: !!home,
-        };
+        // Normalize the response shape so the frontend renderer (JobResultsList)
+        // can handle either source.
+        const postings: any[] = body?.jobs || body?.jobPostings || [];
 
-        await setRecentSearchResults(auth.userSub, connectionId, postings.slice(0, 20));
-        return ok(call.toolName, enrichedBody);
+        // If the canonical handler didn't apply distance (no home coords),
+        // do a best-effort Haversine on what we got.
+        let finalPostings = postings;
+        if (home?.lat && home?.lng) {
+          finalPostings = postings.map((p: any) => {
+            if (typeof p?.distanceMiles === "number") return p; // handler already provided
+            if (typeof p?.lat === "number" && typeof p?.lng === "number") {
+              const miles = haversineDistance(home.lat, home.lng, p.lat, p.lng);
+              return { ...p, distanceMiles: Math.round(miles * 10) / 10 };
+            }
+            return p;
+          }).sort((a: any, b: any) => (a.distanceMiles ?? 9999) - (b.distanceMiles ?? 9999));
+        }
+        finalPostings = finalPostings.slice(0, requestedLimit);
+
+        await setRecentSearchResults(auth.userSub, connectionId, finalPostings.slice(0, 20));
+        return ok(call.toolName, {
+          jobPostings: finalPostings,
+          totalCount: finalPostings.length,
+          radiusMiles,
+          filteredByDistance: !!home,
+        });
       }
       case "get_job_details": {
         const r = await callHandlerInProcess(getJobPostingHandler, {
@@ -238,19 +322,16 @@ export async function executeTool(
         return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
       }
       case "get_scheduled_shifts": {
-        // Pros: filter their own applications by upcoming/scheduled status.
-        // Clinics: use the clinic-side handler with their clinicId.
+        // Pros: ?status=scheduled passed to getJobApplications (matches the
+        // dashboard's "Scheduled" tab). Clinics: clinic-side handler.
         const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
         if (isPro || !call.input.clinicId) {
-          const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
-          if (r.status >= 400) return err(call.toolName, r.status, JSON.stringify(r.body));
-          const apps = Array.isArray(r.body?.applications) ? r.body.applications
-                       : Array.isArray(r.body) ? r.body : [];
-          const scheduled = apps.filter((a: any) => {
-            const s = (a.applicationStatus || a.status || "").toLowerCase();
-            return s === "accepted" || s === "scheduled";
+          const r = await callHandlerInProcess(getJobApplicationsHandler, {
+            method: "GET",
+            queryStringParameters: { status: "scheduled" },
+            auth,
           });
-          return ok(call.toolName, { applications: scheduled, totalCount: scheduled.length, source: "professional" });
+          return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
         }
         const r = await callHandlerInProcess(getScheduledShiftsHandler, {
           method: "GET",
@@ -262,15 +343,12 @@ export async function executeTool(
       case "get_completed_shifts": {
         const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
         if (isPro || !call.input.clinicId) {
-          const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
-          if (r.status >= 400) return err(call.toolName, r.status, JSON.stringify(r.body));
-          const apps = Array.isArray(r.body?.applications) ? r.body.applications
-                       : Array.isArray(r.body) ? r.body : [];
-          const completed = apps.filter((a: any) => {
-            const s = (a.applicationStatus || a.status || "").toLowerCase();
-            return s === "completed";
+          const r = await callHandlerInProcess(getJobApplicationsHandler, {
+            method: "GET",
+            queryStringParameters: { status: "completed" },
+            auth,
           });
-          return ok(call.toolName, { applications: completed, totalCount: completed.length, source: "professional" });
+          return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
         }
         const r = await callHandlerInProcess(getCompletedShiftsHandler, {
           method: "GET",
@@ -325,12 +403,20 @@ export async function executeTool(
           return null;
         });
       case "confirm_apply_to_job":
+        // Legacy path that may still be in flight from stale agent versions.
+        // Route through the SAME REST handler the new single-shot apply_to_job
+        // uses (createJobApplication.ts) and IGNORE the proposedRate/availability
+        // fields the legacy preview collected — pure apply doesn't need them.
+        // This makes the deploy-staleness scenario a no-op for the user.
         return genericConfirm(call.toolName, auth, connectionId, call.input, async (p) => {
-          const input: CreateJobApplicationInput = {
-            message: p.message, proposedRate: p.proposedRate, availability: p.availability,
-            startDate: p.startDate, notes: p.notes,
-          };
-          return runCreateJobApplication(p.jobId, input, auth);
+          const r = await callHandlerInProcess(createJobApplicationHandler, {
+            method: "POST",
+            pathParameters: { jobId: p.jobId },
+            body: { jobId: p.jobId, message: p.message, startDate: p.startDate, notes: p.notes },
+            auth,
+          });
+          // Normalize {status, body} into the same shape genericConfirm expects.
+          return { status: r.status, body: r.body };
         });
 
       case "preview_respond_invitation":

@@ -17,8 +17,8 @@ export type LooseHandler = (event: any) => Promise<{ statusCode?: number; body?:
  *
  * Two mechanisms in play, used together:
  *   1. `_inProcessAuth` on the synthetic event — picked up by the refactored
- *      handlers that use `extractAuthFromEvent` (createJobApplication-prof,
- *      browseJobPostings, getJobInvitations). Cheapest, no JWT decode.
+ *      handlers that use `extractAuthFromEvent` (browseJobPostings,
+ *      getJobInvitations). Cheapest, no JWT decode.
  *   2. Synthetic unsigned JWT in the Authorization header — handlers that
  *      still call `extractUserFromBearerToken` directly will decode the
  *      payload and continue. SAFE because:

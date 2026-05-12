@@ -1806,7 +1806,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 parameters: {
                     radiusMiles: NUM('OPTIONAL. Search radius in miles (default 50). Only pass if user asked for a specific distance.'),
                     jobType: STR('OPTIONAL. temporary | multi_day_consulting | permanent. Only pass if user mentioned a specific type.'),
-                    professionalRole: STR('OPTIONAL. Role filter in snake_case: dental_hygienist, dentist, associate_dentist, dental_assistant, expanded_functions_da, dual_role_front_da, patient_coordinator_front, treatment_coordinator_front, hygienist, dh_tc_pc. Only pass if user explicitly named a different role than their own.'),
+                    professionalRole: STR('OPTIONAL — usually leave UNSET. Server already returns jobs relevant to the user; setting role NARROWS results and often empties them. Only pass if the user explicitly names a DIFFERENT role (e.g. "show me dentist jobs"). Format: snake_case dbValue (dental_hygienist | dentist | associate_dentist | dental_assistant | expanded_functions_da | dual_role_front_da | patient_coordinator_front | treatment_coordinator_front | hygienist | dh_tc_pc). NEVER pass Cognito-group form like "DentalHygienist".'),
                     shiftSpeciality: STR('OPTIONAL. Specialty filter. Only pass if user mentioned one.'),
                     minRate: NUM('OPTIONAL. Minimum rate. Only pass if user specified.'),
                     maxRate: NUM('OPTIONAL. Maximum rate. Only pass if user specified.'),
@@ -1868,8 +1868,8 @@ export class DentiPalCDKStack extends cdk.Stack {
             { name: 'get_my_applications', description: 'List the professional\'s applications and statuses.', parameters: {} },
             { name: 'get_my_invitations', description: 'List pending clinic invitations.', parameters: {} },
             { name: 'get_my_negotiations', description: 'List the pro\'s open negotiations.', parameters: {} },
-            { name: 'get_scheduled_shifts', description: 'List accepted, future shifts for the pro.', parameters: { clinicId: STR('Optional clinic filter') } },
-            { name: 'get_completed_shifts', description: 'List the pro\'s completed shifts.', parameters: { clinicId: STR('Optional clinic filter') } },
+            { name: 'get_scheduled_shifts', description: 'List the professional\'s accepted upcoming shifts. No parameters — the pro\'s own applications with status="accepted" or "scheduled" are returned.', parameters: {} },
+            { name: 'get_completed_shifts', description: 'List the professional\'s completed shifts. No parameters — returns the pro\'s own completed applications.', parameters: {} },
             // --- response: apply ---
             {
                 name: 'preview_apply_to_job',
@@ -2617,9 +2617,19 @@ export class DentiPalCDKStack extends cdk.Stack {
             description: 'DentiPal natural-language assistant for dental professionals — search jobs, apply, negotiate, manage shifts.',
             agentResourceRoleArn: bedrockAgentServiceRole.roleArn,
             foundationModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+            // Auto-prepare DRAFT on every deploy so the live alias actually
+            // serves the new tool list. Without this, CfnAgent updates land in
+            // DRAFT but the numbered version (which the alias serves) stays
+            // stuck on the original deploy — agent uses stale legacy tools.
+            autoPrepare: true,
             idleSessionTtlInSeconds: 900, // 15 min, matches ChatConnections TTL
             instruction: [
-                'You are DentiPal Assistant for dental professionals. Be action-first: when the user expresses intent, IMMEDIATELY call the matching tool with sensible defaults from their context. DO NOT ask clarifying questions before calling a tool — only ask if a tool returns an error naming a missing field.',
+                '═══ ROLE ═══',
+                'You serve DENTAL PROFESSIONALS ONLY. The user is a hygienist / dentist / assistant looking for shifts. They DO NOT own or manage clinics. They DO NOT post jobs. They DO NOT see applicants. They APPLY to jobs that clinics post.',
+                'NEVER ask the user "which clinic?" — they don\'t have any. NEVER act as if they have a clinicId. NEVER mention posting jobs.',
+                '═══════════',
+                '',
+                'Be action-first: when the user expresses intent, IMMEDIATELY call the matching tool with sensible defaults from their context. DO NOT ask clarifying questions before calling a tool — only ask if a tool returns an error naming a missing field.',
                 '',
                 'Intent → tool map (call IMMEDIATELY, no questions):',
                 '- "search jobs" / "find work" / "show shifts" / "what\'s available" → search_jobs_near_me with NO parameters. The server already knows the user\'s 50-mile radius from their home address.',
@@ -2640,6 +2650,8 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- Rates only come into play during a negotiation (preview_negotiate). If the user says "apply at $80", interpret as a counter-offer flow: call apply_to_job first to create the application, then preview_negotiate to send the counter.',
                 '',
                 'When a tool returns results, summarize concisely in 1-2 sentences AND let the rendered card do the heavy lifting. Don\'t dump JSON. Don\'t list every field. Trust the UI to show the list.',
+                '',
+                'NEVER paraphrase or guess numbers, dates, rates, names, or IDs from a tool result — use them verbatim or refer to the card. If the tool returned zero results, say so plainly ("you have no scheduled shifts right now") instead of fabricating.',
             ].join('\n'),
             guardrailConfiguration: {
                 guardrailIdentifier: chatGuardrail.attrGuardrailId,
@@ -2670,9 +2682,17 @@ export class DentiPalCDKStack extends cdk.Stack {
             description: 'DentiPal natural-language assistant for clinic staff — post jobs, manage applicants, hire/reject, see action-needed.',
             agentResourceRoleArn: bedrockAgentServiceRole.roleArn,
             foundationModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+            // Same reason as the pro agent — without this every CDK update
+            // gets stuck in DRAFT.
+            autoPrepare: true,
             idleSessionTtlInSeconds: 900,
             instruction: [
-                'You are DentiPal Assistant for clinic staff. Be action-first: when the user expresses intent, IMMEDIATELY call the matching tool. DO NOT ask clarifying questions before calling a tool — only ask if a tool returns an error naming a missing field.',
+                '═══ ROLE ═══',
+                'You serve DENTAL CLINIC STAFF ONLY. The user is a clinic admin / manager. They MANAGE clinics. They POST jobs. They REVIEW applicants and HIRE professionals. They DO NOT apply to jobs themselves. They DO NOT have scheduled shifts of their own.',
+                'NEVER act as if the user is a professional looking for work. NEVER call professional-side tools like search_jobs_near_me or apply_to_job.',
+                '═══════════',
+                '',
+                'Be action-first: when the user expresses intent, IMMEDIATELY call the matching tool. DO NOT ask clarifying questions before calling a tool — only ask if a tool returns an error naming a missing field.',
                 '',
                 'Intent → tool map (call IMMEDIATELY):',
                 '- "my clinics" / "which clinics do I manage" → get_my_clinics.',
@@ -2691,6 +2711,8 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'When a tool returns an error (e.g. validation), THEN and only then ask the user for the specific missing field. Never pre-emptively interrogate.',
                 '',
                 'When a tool returns results, summarize concisely in 1-2 sentences and let the rendered card show the details. Don\'t dump JSON or list every field.',
+                '',
+                'NEVER paraphrase or guess numbers, dates, rates, names, or IDs from a tool result — use them verbatim or refer to the card. If the tool returned zero results, say so plainly instead of fabricating.',
             ].join('\n'),
             guardrailConfiguration: {
                 guardrailIdentifier: chatGuardrail.attrGuardrailId,
@@ -2770,10 +2792,15 @@ export class DentiPalCDKStack extends cdk.Stack {
         feedbackTable.grantReadWriteData(chatMessageHandler);
         referralsTable.grantReadWriteData(chatMessageHandler);
 
-        // Cognito AdminGetUser — some handlers (createTemporaryJob, etc.)
-        // pull given_name / family_name claims for the `created_by` field.
+        // Cognito access — AdminGetUser for given_name/family_name (used by
+        // refactored handlers like createTemporaryJob), AdminListGroupsForUser
+        // for the chatbot's server-side agent-type override (resolves whether
+        // the caller is clinic vs professional from groups, source of truth).
         chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
-            actions: ['cognito-idp:AdminGetUser'],
+            actions: [
+                'cognito-idp:AdminGetUser',
+                'cognito-idp:AdminListGroupsForUser',
+            ],
             resources: [userPool.userPoolArn],
         }));
 

@@ -40,6 +40,10 @@ export interface ChatSession {
   /** True after the context preamble has been injected into the agent's first
    *  inputText. Persists across turns of the same 15-min session. */
   contextInjected?: boolean;
+  /** Cognito groups the user belongs to, fetched at bootstrap via AdminGetUser.
+   *  Source of truth for agent-type derivation and downstream RBAC checks
+   *  (canWriteClinic etc.). Replaces the empty array we used to pass. */
+  userGroups?: string[];
 }
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
@@ -222,6 +226,28 @@ export async function setUserContext(
     ExpressionAttributeNames: { "#ttl": "ttl" },
     ExpressionAttributeValues: {
       ":ctx": userContext,
+      ":now": now,
+      ":ttl": now + SESSION_TTL_SECONDS,
+    },
+  }));
+}
+
+/** Cache the user's Cognito groups + canonical agent type on the session. */
+export async function setUserGroupsAndAgentType(
+  userSub: string,
+  connectionId: string,
+  userGroups: string[],
+  agentType: AgentType,
+): Promise<void> {
+  const now = nowSec();
+  await ddb.send(new UpdateCommand({
+    TableName: CHAT_CONNECTIONS_TABLE,
+    Key: { userSub, connectionId },
+    UpdateExpression: "SET userGroups = :g, agentType = :a, lastActivityAt = :now, #ttl = :ttl",
+    ExpressionAttributeNames: { "#ttl": "ttl" },
+    ExpressionAttributeValues: {
+      ":g": userGroups,
+      ":a": agentType,
       ":now": now,
       ":ttl": now + SESSION_TTL_SECONDS,
     },

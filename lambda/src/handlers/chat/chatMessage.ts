@@ -10,10 +10,14 @@ import {
 } from "@aws-sdk/client-apigatewaymanagementapi";
 import { DynamoDBClient, QueryCommand } from "@aws-sdk/client-dynamodb";
 import {
+  CognitoIdentityProviderClient,
+} from "@aws-sdk/client-cognito-identity-provider";
+import {
   getSessionByConnectionId,
   refreshSession,
   createSessionForConnection,
   setUserContext,
+  setUserGroupsAndAgentType,
   markContextInjected,
   AgentType,
   ChatSession,
@@ -24,6 +28,7 @@ import { AuthContext, CLINIC_ROLES } from "../utils";
 
 const REGION = process.env.REGION || "us-east-1";
 const CONNS_TABLE = process.env.CONNS_TABLE || "DentiPal-V5-Connections"; // existing user-to-user table
+const USER_POOL_ID = process.env.USER_POOL_ID || "";
 
 const PROFESSIONAL_AGENT_ID = process.env.BEDROCK_PROFESSIONAL_AGENT_ID || "";
 const PROFESSIONAL_AGENT_ALIAS_ID = process.env.BEDROCK_PROFESSIONAL_AGENT_ALIAS_ID || "";
@@ -34,6 +39,38 @@ const PUBLIC_AGENT_ALIAS_ID = process.env.BEDROCK_PUBLIC_AGENT_ALIAS_ID || "";
 
 const bedrock = new BedrockAgentRuntimeClient({ region: REGION });
 const ddb = new DynamoDBClient({ region: REGION });
+const cognito = new CognitoIdentityProviderClient({ region: REGION });
+
+const CLINIC_GROUPS_LOWER = new Set((CLINIC_ROLES as readonly string[]).map(g => g.toLowerCase()));
+
+/**
+ * Fetch the user's Cognito groups + derive the canonical agent type.
+ * Source of truth for "is this a clinic or professional user?". Used to
+ * override the frontend's requestedAgent if it disagrees with the JWT-side
+ * truth (frontend reads localStorage.userRole, which can drift).
+ */
+async function resolveGroupsAndAgentType(userSub: string): Promise<{
+  groups: string[];
+  canonicalAgent: AgentType;
+}> {
+  if (!USER_POOL_ID) {
+    console.warn("[chatMessage] USER_POOL_ID not set — cannot resolve groups; defaulting to professional");
+    return { groups: [], canonicalAgent: "professional" };
+  }
+  try {
+    const { AdminListGroupsForUserCommand } = await import("@aws-sdk/client-cognito-identity-provider");
+    const groupsRes = await cognito.send(new AdminListGroupsForUserCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: userSub,
+    }));
+    const groups = (groupsRes.Groups || []).map(g => g.GroupName || "").filter(Boolean);
+    const isClinic = groups.some(g => CLINIC_GROUPS_LOWER.has(g.toLowerCase()));
+    return { groups, canonicalAgent: isClinic ? "clinic" : "professional" };
+  } catch (e) {
+    console.warn("[chatMessage] resolveGroupsAndAgentType failed; defaulting to professional", e);
+    return { groups: [], canonicalAgent: "professional" };
+  }
+}
 
 interface ChatMessageFrame {
   action: "chatMessage";
@@ -93,23 +130,35 @@ async function bootstrapSessionFromExistingConnection(
     return { error: "No active authenticated connection found", status: 401 };
   }
   const userSub = row.sub.S;
-  // We trust the frontend's agent-type routing (it picks based on
-  // localStorage.userRole which is set at login time). The Connections-row
-  // userType field has inconsistent casing/values across user types and
-  // attempting strict server-side matching here just creates false denies.
-  // Per-tool RBAC (canWriteClinic etc.) is the real gate downstream — that
-  // gate runs inside each refactored handler and is the security boundary.
-  // Log the value for observability.
-  console.log(`[chatMessage] bootstrap userSub=${userSub} requestedAgent=${requestedAgent} userType="${row.userType?.S || "<empty>"}"`);
 
-  const session = await createSessionForConnection(userSub, connectionId, requestedAgent);
+  // Server-side agent-type derivation. Frontend reads localStorage.userRole
+  // which can drift; the canonical truth is the user's Cognito groups. If
+  // they disagree, override silently and log for observability.
+  const { groups, canonicalAgent } = await resolveGroupsAndAgentType(userSub);
+  const effectiveAgent: AgentType = canonicalAgent;
+  if (canonicalAgent !== requestedAgent) {
+    console.warn(`[chatMessage] agent override: requested=${requestedAgent} resolved=${canonicalAgent} userSub=${userSub} groups=[${groups.join(",")}]`);
+  } else {
+    console.log(`[chatMessage] bootstrap userSub=${userSub} agent=${effectiveAgent} groups=[${groups.join(",")}]`);
+  }
+
+  const session = await createSessionForConnection(userSub, connectionId, effectiveAgent);
+  session.userGroups = groups;
+
+  // Persist groups + canonical agent type so subsequent turns of this session
+  // pick up the override on each refreshSession round-trip.
+  try {
+    await setUserGroupsAndAgentType(userSub, connectionId, groups, effectiveAgent);
+  } catch (e) {
+    console.warn("[chatMessage] setUserGroupsAndAgentType failed (continuing without persistent cache):", e);
+  }
 
   // Pre-fetch user context (profile, address, clinics) once at bootstrap so
   // the agent can ground its first response without an extra round-trip.
   // Best-effort: a missing profile or geocode failure just yields a thinner
   // preamble; never blocks the session.
   try {
-    const ctx = await fetchUserContext(userSub, requestedAgent);
+    const ctx = await fetchUserContext(userSub, effectiveAgent);
     if (ctx) {
       await setUserContext(userSub, connectionId, ctx as unknown as Record<string, any>);
       session.userContext = ctx as unknown as Record<string, any>;
@@ -270,26 +319,46 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
 
   // ---- 2b. confirmAction shortcut: bypass the LLM, run the confirm_* tool directly ----
   if (frame.action === "confirmAction") {
-    const auth: AuthContext = {
-      userSub: session.userSub,
-      userGroups: [],
-      userType: session.agentType === "clinic" ? "clinic" : session.agentType === "professional" ? "professional" : "public",
-    };
-    const result = await executeTool(
-      { toolName: frame.toolName, input: frame.payload },
-      auth,
-      connectionId,
-      session.userContext as any,
-    );
-    await postFrame(api, connectionId, {
-      type: "toolResult",
-      tool: frame.toolName,
-      ok: result.ok,
-      data: result.ok ? result.data : undefined,
-      error: result.ok ? undefined : result.error,
-    });
-    await postFrame(api, connectionId, { type: "final", stopReason: "user_confirmed" });
-    return { statusCode: 200, body: "ok" };
+    try {
+      const auth: AuthContext = {
+        userSub: session.userSub,
+        userGroups: session.userGroups || [],
+        userType: session.agentType === "clinic" ? "clinic" : session.agentType === "professional" ? "professional" : "public",
+      };
+      const result = await executeTool(
+        { toolName: frame.toolName, input: frame.payload },
+        auth,
+        connectionId,
+        session.userContext as any,
+      );
+      await postFrame(api, connectionId, {
+        type: "toolResult",
+        tool: frame.toolName,
+        ok: result.ok,
+        data: result.ok ? result.data : undefined,
+        // Guarantee a non-empty error string so the widget renders a usable
+        // message rather than the dreaded "undefined".
+        error: result.ok ? undefined : (result.error || "Tool returned no error detail"),
+      });
+      await postFrame(api, connectionId, { type: "final", stopReason: "user_confirmed" });
+      return { statusCode: 200, body: "ok" };
+    } catch (err: any) {
+      console.error("[chatMessage] confirmAction unhandled error", err);
+      // Best-effort error frame so the widget shows something specific
+      // instead of falling back to "Error (undefined)". If postFrame itself
+      // is what threw, the inner try silently swallows that — nothing more
+      // we can do at that point.
+      try {
+        await postFrame(api, connectionId, {
+          type: "error",
+          reason: "confirm_failed",
+          detail: err?.message || String(err) || "Unknown confirm error",
+        });
+      } catch (postErr) {
+        console.error("[chatMessage] postFrame error frame ALSO failed", postErr);
+      }
+      return { statusCode: 500, body: "confirm_failed" };
+    }
   }
 
   // ---- 3. Resolve Bedrock target ----
@@ -308,7 +377,7 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
   // the synthetic anon-* userSub the connect handler stored.
   const auth: AuthContext = {
     userSub: session.userSub,
-    userGroups: [], // Phase 1: agent-level scoping handled at $connect; per-tool group checks live in the run* fns.
+    userGroups: session.userGroups || [],
     userType: session.agentType === "clinic" ? "clinic" : session.agentType === "professional" ? "professional" : "public",
   };
 

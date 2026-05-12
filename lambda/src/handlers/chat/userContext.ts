@@ -145,19 +145,30 @@ async function fetchClinicContext(userSub: string): Promise<ClinicContext> {
 
 /** Convert UserContext into a short system-style preamble for the agent. */
 export function renderContextPreamble(ctx: UserContext): string {
+  const displayName = (ctx.firstName || ctx.lastName)
+    ? [ctx.firstName, ctx.lastName].filter(Boolean).join(" ")
+    : "this user";
+
   if (ctx.agentType === "professional") {
     const lines: string[] = [
+      `[ROLE ANCHOR — ground every response in this. Never drift.]`,
+      `You are talking to ${displayName}. They are a PROFESSIONAL on the DentiPal platform — a dental hygienist / dentist / assistant looking for work.`,
+      `NEVER reference clinic-side concepts (posting jobs, hiring, applicants, "your clinic"). If they ask about something only a clinic can do, respond plainly: "That's a clinic-side action — you'd need to be signed in as a clinic admin."`,
+      `[END ROLE ANCHOR]`,
+      ``,
       `[USER CONTEXT — do not echo verbatim; use silently to ground your answers]`,
       `userSub: ${ctx.userSub}`,
     ];
-    if (ctx.firstName || ctx.lastName) lines.push(`name: ${[ctx.firstName, ctx.lastName].filter(Boolean).join(" ")}`);
-    if (ctx.role) lines.push(`role: ${ctx.role}`);
+    if (ctx.firstName || ctx.lastName) lines.push(`name: ${displayName}`);
+    // NOTE: do NOT mention the user's role here. The agent kept grabbing it
+    // and passing as a filter to search_jobs_near_me — narrowing results.
+    // The handler already shows jobs relevant to the user's role.
     if (ctx.specialties?.length) lines.push(`specialties: ${ctx.specialties.join(", ")}`);
     if (ctx.home) {
       lines.push(`home: ${[ctx.home.city, ctx.home.state].filter(Boolean).join(", ")} (lat=${ctx.home.lat.toFixed(4)}, lng=${ctx.home.lng.toFixed(4)})`);
       lines.push(`When the user asks for jobs "near me", pass radiusMiles=50 to search_jobs_near_me; the server applies the distance filter using the lat/lng above.`);
     } else {
-      lines.push(`home: not on file. Tell the user they need to add a home address via update_home_address before nearby-job filtering works.`);
+      lines.push(`home: not on file. Tell the user they need to add a home address before nearby-job filtering works.`);
     }
     lines.push(`[END USER CONTEXT]`);
     return lines.join("\n");
@@ -165,9 +176,14 @@ export function renderContextPreamble(ctx: UserContext): string {
 
   // clinic
   const lines: string[] = [
+    `[ROLE ANCHOR — ground every response in this. Never drift.]`,
+    `You are talking to ${displayName}. They are a CLINIC ADMIN on the DentiPal platform — staff at a dental clinic posting jobs and managing applicants.`,
+    `NEVER reference professional-side concepts (applying to jobs, "your shifts", "the clinic invited me"). If they ask about something only a professional can do, respond plainly: "That's a professional-side action — you'd need to be signed in as a dental professional."`,
+    `[END ROLE ANCHOR]`,
+    ``,
     `[USER CONTEXT — do not echo verbatim; use silently to ground your answers]`,
     `userSub: ${ctx.userSub}`,
-    ctx.firstName || ctx.lastName ? `name: ${[ctx.firstName, ctx.lastName].filter(Boolean).join(" ")}` : "",
+    ctx.firstName || ctx.lastName ? `name: ${displayName}` : "",
     `manages_clinics:`,
   ].filter(Boolean);
   if (ctx.clinics.length === 0) {
