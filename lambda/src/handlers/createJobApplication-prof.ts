@@ -2,28 +2,22 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
-import { extractUserFromBearerToken } from "./utils";
+import { extractAuthFromEvent, AuthContext } from "./utils";
 import { corsHeaders } from "./corsHeaders";
 import { fireAndForgetJobApplicationIncrement } from "./jobPostingCounters";
 
 // --- 1. Configuration ---
 const REGION = process.env.REGION || "us-east-1";
-// Using separate tables for Postings and Applications is best practice
-const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings"; 
+const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
 const APPLICATIONS_TABLE = process.env.APPLICATIONS_TABLE || "DentiPal-JobApplications";
 
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
-// --- 2. Helpers ---
-const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
-    statusCode,
-    headers: corsHeaders(event),
-    body: JSON.stringify(bodyObj)
-});
+// --- 2. Types ---
 
-// --- 3. Types ---
-interface ApplyJobBody {
+/** Shape the chatbot tool (and the existing form) sends. */
+export interface CreateJobApplicationInput {
     message: string;
     proposedRate: number;
     availability: string;
@@ -32,32 +26,146 @@ interface ApplyJobBody {
     [key: string]: any;
 }
 
+export interface CreateJobApplicationResult {
+    status: number;
+    body: any;
+}
+
+// --- 3. Core logic (callable from handler OR chatbot toolExecutor in-process) ---
+
+export async function runCreateJobApplication(
+    jobId: string,
+    input: CreateJobApplicationInput,
+    auth: AuthContext
+): Promise<CreateJobApplicationResult> {
+    if (!jobId) {
+        return { status: 400, body: { error: "jobId is required" } };
+    }
+
+    if (!input.message || !input.proposedRate || !input.availability) {
+        return {
+            status: 400,
+            body: { error: "Missing required fields (message, proposedRate, availability)." },
+        };
+    }
+
+    // 1. Check if Job Exists
+    const jobResult = await ddbDoc.send(new GetCommand({
+        TableName: JOB_POSTINGS_TABLE,
+        Key: { jobId },
+    }));
+
+    if (!jobResult.Item) {
+        return { status: 404, body: { error: "Job posting not found" } };
+    }
+
+    const jobItem = jobResult.Item;
+    const clinicIdFromJob = jobItem.clinicUserSub || jobItem.clinicId;
+    if (!clinicIdFromJob) {
+        return { status: 400, body: { error: "Clinic ID not found in job posting configuration." } };
+    }
+
+    const jobStatus = jobItem.status || 'active';
+    if (jobStatus !== 'active') {
+        return { status: 400, body: { error: `Cannot apply to ${jobStatus} job posting` } };
+    }
+
+    // 2. Duplicate check (rejected applications can be re-applied to)
+    const existingAppsResponse = await ddbDoc.send(new QueryCommand({
+        TableName: APPLICATIONS_TABLE,
+        KeyConditionExpression: "jobId = :jobId",
+        FilterExpression: "professionalUserSub = :userSub",
+        ExpressionAttributeValues: {
+            ":jobId": jobId,
+            ":userSub": auth.userSub,
+        },
+    }));
+
+    if (existingAppsResponse.Items && existingAppsResponse.Items.length > 0) {
+        return { status: 409, body: { error: "You have already applied to this job" } };
+    }
+
+    // 3. Create Application
+    const applicationId = uuidv4();
+    const timestamp = new Date().toISOString();
+
+    const applicationItem = {
+        jobId,
+        professionalUserSub: auth.userSub,
+        applicationId,
+        clinicId: clinicIdFromJob,
+        applicationStatus: 'pending',
+        appliedAt: timestamp,
+        updatedAt: timestamp,
+        applicationMessage: input.message,
+        proposedRate: Number(input.proposedRate),
+        availability: input.availability,
+        startDate: input.startDate || null,
+        notes: input.notes || null,
+    };
+
+    await ddbDoc.send(new PutCommand({
+        TableName: APPLICATIONS_TABLE,
+        Item: applicationItem,
+    }));
+
+    fireAndForgetJobApplicationIncrement(jobItem);
+
+    const jobInfo = {
+        title: jobItem.job_title || `${jobItem.professional_role || 'Professional'} Position`,
+        type: jobItem.job_type || 'unknown',
+        role: jobItem.professional_role || '',
+        rate: jobItem.rate
+            ?? (jobItem.pay_type === "per_transaction"
+                ? jobItem.rate_per_transaction
+                : jobItem.pay_type === "percentage_of_revenue"
+                    ? jobItem.revenue_percentage
+                    : jobItem.hourly_rate)
+            ?? 0,
+        payType: jobItem.pay_type || "per_hour",
+        date: jobItem.date,
+        dates: jobItem.dates,
+    };
+
+    return {
+        status: 201,
+        body: {
+            message: "Job application submitted successfully",
+            applicationId,
+            jobId,
+            status: "pending",
+            appliedAt: timestamp,
+            job: jobInfo,
+        },
+    };
+}
+
+// --- 4. Helpers ---
+const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
+    statusCode,
+    headers: corsHeaders(event),
+    body: JSON.stringify(bodyObj),
+});
+
+// --- 5. Thin API Gateway adapter ---
+
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 
-    // 1. Handle CORS Preflight
     if (method === "OPTIONS") {
         return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
 
     try {
-        console.log("Received event path:", event.path);
-
-        // 2. Extract jobId
-        // Robust extraction handles /applications/{jobId} (REST) or proxy integration
+        // Extract jobId (path param or last path segment)
         let jobId = event.pathParameters?.jobId;
-
         if (!jobId) {
-            // Fallback logic matching original code: parsing path parts
-            const fullPath = event.pathParameters?.proxy || event.path || ''; 
+            const fullPath = event.pathParameters?.proxy || event.path || '';
             const pathParts = fullPath.split('/').filter(Boolean);
-            
-            // Assuming structure like /applications/{jobId} -> index 1
             if (pathParts.length >= 2) {
-                 jobId = pathParts[1];
+                jobId = pathParts[1];
             } else if (pathParts.length === 1) {
-                 // Fallback for structure /{jobId}
-                 jobId = pathParts[0];
+                jobId = pathParts[0];
             }
         }
 
@@ -65,130 +173,34 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(event, 400, { error: "jobId is required in the path parameters" });
         }
 
-        console.log("Job ID extracted:", jobId);
+        // Auth
+        let auth: AuthContext;
+        try {
+            auth = extractAuthFromEvent(event);
+        } catch (authError: any) {
+            return json(event, 401, { error: authError.message || "Invalid access token" });
+        }
 
-        // 3. Authentication (Switched to Access Token)
-        const authHeader = event.headers?.Authorization || event.headers?.authorization;
-        const userInfo = extractUserFromBearerToken(authHeader);
-        const userSub = userInfo.sub;
-        console.log("User authenticated:", userSub);
-
-        // 4. Parse & Validate Body
+        // Body
         if (!event.body) {
             return json(event, 400, { error: "Request body is required" });
         }
-        
-        let applicationData: ApplyJobBody;
+        let input: CreateJobApplicationInput;
         try {
-            applicationData = JSON.parse(event.body);
+            input = JSON.parse(event.body);
         } catch {
             return json(event, 400, { error: "Invalid JSON in request body" });
         }
 
-        if (!applicationData.message || !applicationData.proposedRate || !applicationData.availability) {
-            return json(event, 400, { error: "Missing required fields (message, proposedRate, availability)." });
-        }
-
-        // 5. Check if Job Exists
-        // Note: We query the JOB_POSTINGS_TABLE, not the applications table, to verify the job.
-        const jobResult = await ddbDoc.send(new GetCommand({
-            TableName: JOB_POSTINGS_TABLE,
-            Key: { jobId: jobId }
-        }));
-        
-        if (!jobResult.Item) {
-            return json(event, 404, { error: "Job posting not found" });
-        }
-
-        const jobItem = jobResult.Item;
-        // Support both field naming conventions commonly used
-        const clinicIdFromJob = jobItem.clinicUserSub || jobItem.clinicId; 
-
-        if (!clinicIdFromJob) {
-            return json(event, 400, { error: "Clinic ID not found in job posting configuration." });
-        }
-
-        const jobStatus = jobItem.status || 'active';
-        if (jobStatus !== 'active') {
-            return json(event, 400, { error: `Cannot apply to ${jobStatus} job posting` });
-        }
-
-        // 6. Check for Duplicate Application
-        // Query the Applications table to see if this user already applied to this job.
-        // A "rejected" application does NOT block re-application: if the clinic rejected
-        // the pro and later invited them back, the stale rejected record must not stand
-        // in the way. The PutCommand below will overwrite it.
-        const existingAppsResponse = await ddbDoc.send(new QueryCommand({
-            TableName: APPLICATIONS_TABLE,
-            KeyConditionExpression: "jobId = :jobId",
-            FilterExpression: "professionalUserSub = :userSub",
-            ExpressionAttributeValues: {
-                ":jobId": jobId,
-                ":userSub": userSub
-            }
-        }));
-
-        if (existingAppsResponse.Items && existingAppsResponse.Items.length > 0) {
-            return json(event, 409, { error: "You have already applied to this job" });
-        }
-
-        // 7. Create Application
-        const applicationId = uuidv4();
-        const timestamp = new Date().toISOString();
-
-        const applicationItem = {
-            jobId: jobId,               // Partition Key
-            professionalUserSub: userSub, // Sort Key (allows querying all apps for a job)
-            applicationId: applicationId,
-            clinicId: clinicIdFromJob,
-            applicationStatus: 'pending',
-            appliedAt: timestamp,
-            updatedAt: timestamp,
-            // Application Details
-            applicationMessage: applicationData.message,
-            proposedRate: Number(applicationData.proposedRate),
-            availability: applicationData.availability,
-            startDate: applicationData.startDate || null,
-            notes: applicationData.notes || null
-        };
-
-        await ddbDoc.send(new PutCommand({
-            TableName: APPLICATIONS_TABLE,
-            Item: applicationItem
-        }));
-
-        console.log("Job application saved successfully.");
-
-        // Bump the lifetime applicationsCount on the job posting (non-blocking).
-        // Feeds the popularity term in computeRelevanceScore for the "Trending" sort.
-        fireAndForgetJobApplicationIncrement(jobItem);
-
-        // 8. Construct Response
-        const jobInfo = {
-            title: jobItem.job_title || `${jobItem.professional_role || 'Professional'} Position`,
-            type: jobItem.job_type || 'unknown',
-            role: jobItem.professional_role || '',
-            rate: jobItem.rate ?? (jobItem.pay_type === "per_transaction" ? jobItem.rate_per_transaction : jobItem.pay_type === "percentage_of_revenue" ? jobItem.revenue_percentage : jobItem.hourly_rate) ?? 0,
-            payType: jobItem.pay_type || "per_hour",
-            date: jobItem.date,
-            dates: jobItem.dates
-        };
-
-        return json(event, 201, {
-            message: "Job application submitted successfully",
-            applicationId,
-            jobId,
-            status: "pending",
-            appliedAt: timestamp,
-            job: jobInfo
-        });
+        const { status, body } = await runCreateJobApplication(jobId, input, auth);
+        return json(event, status, body);
 
     } catch (err) {
         const error = err as Error;
         console.error("Error creating job application:", error);
-        return json(event, 500, { 
-            error: "Failed to submit job application.", 
-            details: error.message 
+        return json(event, 500, {
+            error: "Failed to submit job application.",
+            details: error.message,
         });
     }
 };
