@@ -188,6 +188,10 @@ import { handler as respondToNewPasswordHandler } from "./handlers/respondToNewP
 import { handler as getNotificationPreferencesHandler } from "./handlers/getNotificationPreferences";
 import { handler as updateNotificationPreferencesHandler } from "./handlers/updateNotificationPreferences";
 
+// In-app notification feed (bell icon / notifications page).
+import { handler as listNotificationsHandler } from "./handlers/listNotifications";
+import { handler as markNotificationsReadHandler } from "./handlers/markNotificationsRead";
+
 import { corsHeaders } from "./handlers/corsHeaders";
 
 // Inline handler — the frontend calls GET /jobs/user-clinics from useHeaderData,
@@ -474,6 +478,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         // Notification preferences
         "GET:/notifications/preferences": getNotificationPreferencesHandler,
         "PUT:/notifications/preferences": updateNotificationPreferencesHandler,
+
+        // In-app notification feed
+        "GET:/notifications": listNotificationsHandler,
+        "POST:/notifications/read": markNotificationsReadHandler,
 
     };
 

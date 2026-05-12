@@ -449,6 +449,49 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
       }
     }
 
+    // 10b. Negotiation-specific events for the in-app notification feed.
+    //      Only fired when the *clinic* is the actor (so the professional is
+    //      the recipient). The event-to-notification consumer writes one row
+    //      per recipient; clinic-side notifications are out of scope for v1.
+    if (actor === "clinic" && professionalUserSub) {
+      const negotiationEventType =
+        body.response === "accepted"
+          ? "negotiation-accepted"
+          : body.response === "declined"
+            ? "negotiation-declined"
+            : "negotiation-counter";
+
+      const negotiationClinicId =
+        strFrom(negotiationItem.clinicId) ||
+        strFrom(jobItem.clinicId) ||
+        strFrom(appItem.clinicId);
+
+      try {
+        await eb.send(new PutEventsCommand({
+          Entries: [{
+            Source: "denti-pal.api",
+            DetailType: "ShiftEvent",
+            Detail: JSON.stringify({
+              eventType: negotiationEventType,
+              clinicId: negotiationClinicId,
+              professionalSub: professionalUserSub,
+              negotiationId,
+              applicationId,
+              jobId,
+              shiftDetails: {
+                date: strFrom(jobItem.date) || strFrom(jobItem.shiftDate) || "TBD",
+                role: strFrom(jobItem.role) || strFrom(jobItem.professionalRole) || strFrom(jobItem.jobTitle) || "Professional",
+                rate: finalAcceptedRate || 0,
+              },
+            }),
+          }],
+        }));
+        console.log(`EventBridge ShiftEvent (${negotiationEventType}) published for professional notification.`);
+      } catch (ebError: any) {
+        console.error(`Failed to publish EventBridge event for ${negotiationEventType}:`, ebError.message);
+      }
+    }
+
     // 11. Success Response
     return json(event, 200, {
       message: `Negotiation ${body.response} successfully`,
