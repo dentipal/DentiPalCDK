@@ -8,7 +8,14 @@ const CONNECTION_ID_INDEX = "connectionId-index";
 
 const SESSION_TTL_SECONDS = 15 * 60; // 15 minutes
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
+// `removeUndefinedValues: true` lets us write rows whose optional profile
+// fields (firstName/lastName/specialties/home) are undefined without the
+// marshaller rejecting them. Without this, fetchUserContext writes fail on
+// any pro that hasn't filled in every optional profile field.
+const ddb = DynamoDBDocumentClient.from(
+  new DynamoDBClient({ region: REGION }),
+  { marshallOptions: { removeUndefinedValues: true } },
+);
 
 export type AgentType = "clinic" | "professional" | "public";
 

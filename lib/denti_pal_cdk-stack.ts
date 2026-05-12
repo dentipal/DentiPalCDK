@@ -1686,9 +1686,12 @@ export class DentiPalCDKStack extends cdk.Stack {
             },
             contentPolicyConfig: {
                 filtersConfig: [
-                    { type: 'PROMPT_ATTACK', inputStrength: 'HIGH', outputStrength: 'NONE' },
-                    { type: 'INSULTS', inputStrength: 'HIGH', outputStrength: 'HIGH' },
-                    { type: 'VIOLENCE', inputStrength: 'HIGH', outputStrength: 'HIGH' },
+                    // HIGH on PROMPT_ATTACK was over-eager — flagged "hi" as
+                    // an injection attempt. MEDIUM catches real abuse without
+                    // blocking benign greetings.
+                    { type: 'PROMPT_ATTACK', inputStrength: 'MEDIUM', outputStrength: 'NONE' },
+                    { type: 'INSULTS', inputStrength: 'MEDIUM', outputStrength: 'MEDIUM' },
+                    { type: 'VIOLENCE', inputStrength: 'MEDIUM', outputStrength: 'MEDIUM' },
                     { type: 'SEXUAL', inputStrength: 'HIGH', outputStrength: 'HIGH' },
                 ],
             },
@@ -1703,10 +1706,23 @@ export class DentiPalCDKStack extends cdk.Stack {
         bedrockAgentServiceRole.addToPolicy(new iam.PolicyStatement({
             actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
             resources: [
-                // Haiku 4.5 cross-region inference profile (US)
-                `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
-                `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0`,
+                // The `us.*` inference profile is a cross-region pointer — it
+                // can dispatch to any of us-east-1, us-east-2, us-west-2. The
+                // role therefore needs InvokeModel on the foundation-model
+                // ARN in every region the profile may route to, plus the
+                // profile itself in this region.
+                `arn:aws:bedrock:us-east-1:${this.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
             ],
+        }));
+        // The agent's orchestration calls ApplyGuardrail on every input/output
+        // when a guardrail is attached. Without this, InvokeAgent returns
+        // HTTP 200 but the stream contains "Access denied when calling Bedrock."
+        bedrockAgentServiceRole.addToPolicy(new iam.PolicyStatement({
+            actions: ['bedrock:ApplyGuardrail'],
+            resources: [`arn:aws:bedrock:${this.region}:${this.account}:guardrail/${chatGuardrail.attrGuardrailId}`],
         }));
 
         // --- 6a.3 Professional CfnAgent (Phase 1: no action groups yet) ---
@@ -1723,6 +1739,57 @@ export class DentiPalCDKStack extends cdk.Stack {
         const BOOL = (d: string, r = false) => P('boolean', d, r);
         const ARR = (d: string, r = false) => P('array', d, r);
 
+        // Bedrock Agents caps total functions PER AGENT at 11 by default
+        // (despite the misleading "APIs in an agent action group" naming the
+        // quota is actually agent-wide, not group-wide). Until the quota is
+        // raised via AWS support, we ship a curated v1 slice of the catalog.
+        // After the quota raises, drop the .filter(...) at the action-group
+        // assignment sites and the full toolset returns automatically.
+        const PRO_V1_FUNCTIONS = [
+            'search_jobs_near_me',
+            'get_my_invitations',
+            'get_my_applications',
+            'get_my_negotiations',
+            'get_scheduled_shifts',
+            'get_completed_shifts',
+            'preview_apply_to_job',
+            'confirm_apply_to_job',
+            'preview_respond_invitation',
+            'confirm_respond_invitation',
+        ];
+        const CLINIC_V1_FUNCTIONS = [
+            'get_my_clinics',
+            'get_action_needed',
+            'list_applicants_for_job',
+            'get_professional_info',
+            'preview_post_temporary_job',
+            'confirm_post_temporary_job',
+            'preview_accept_professional',
+            'confirm_accept_professional',
+            'preview_reject_professional',
+            'confirm_reject_professional',
+        ];
+
+        const ACTION_GROUP_CHUNK_SIZE = 10;
+        const chunkFunctionsIntoActionGroups = (
+            baseName: string,
+            baseDescription: string,
+            functions: any[],
+        ): any[] => {
+            const groups: any[] = [];
+            for (let i = 0; i < functions.length; i += ACTION_GROUP_CHUNK_SIZE) {
+                const slice = functions.slice(i, i + ACTION_GROUP_CHUNK_SIZE);
+                const idx = groups.length + 1;
+                groups.push({
+                    actionGroupName: `${baseName}${idx}`,
+                    description: `${baseDescription} (part ${idx})`,
+                    actionGroupExecutor: { customControl: 'RETURN_CONTROL' },
+                    functionSchema: { functions: slice as any },
+                });
+            }
+            return groups;
+        };
+
         // Action-group function schemas. Mirrors the JSON Schemas in
         // lambda/src/handlers/chat/toolSchemas.ts. Kept inline here because
         // CDK synth runs before Lambda compilation.
@@ -1734,7 +1801,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 parameters: {
                     radiusMiles: NUM('Search radius in miles (default 50).'),
                     jobType: STR('temporary | multi_day_consulting | permanent'),
-                    professionalRole: STR('Role filter (e.g. DentalHygienist)'),
+                    professionalRole: STR('Role filter. MUST be one of (snake_case): dental_hygienist, dentist, associate_dentist, dental_assistant, expanded_functions_da, dual_role_front_da, patient_coordinator_front, treatment_coordinator_front, hygienist, dh_tc_pc. Map user phrases like "dental hygienist" → "dental_hygienist".'),
                     shiftSpeciality: STR('Specialty filter'),
                     minRate: NUM('Minimum rate'), maxRate: NUM('Maximum rate'),
                     dateFrom: STR('ISO date lower bound'), dateTo: STR('ISO date upper bound'),
@@ -2490,7 +2557,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             },
         ];
 
-        const professionalAgent = new bedrock.CfnAgent(this, 'DentiPalProfessionalAgent', {
+        const professionalAgent = new bedrock.CfnAgent(this, 'DentiPalProfessionalAgentV2', {
             agentName: 'DentiPal-Professional-Agent',
             description: 'DentiPal natural-language assistant for dental professionals — search jobs, apply, negotiate, manage shifts.',
             agentResourceRoleArn: bedrockAgentServiceRole.roleArn,
@@ -2517,25 +2584,27 @@ export class DentiPalCDKStack extends cdk.Stack {
                 guardrailIdentifier: chatGuardrail.attrGuardrailId,
                 guardrailVersion: 'DRAFT',
             },
-            actionGroups: [
-                {
-                    actionGroupName: 'DentiPalTools',
-                    description: 'Search jobs, view invitations, preview/confirm applications. RETURN_CONTROL mode — execution happens in chatMessage Lambda.',
-                    actionGroupExecutor: { customControl: 'RETURN_CONTROL' },
-                    functionSchema: { functions: professionalAgentFunctions },
-                },
-            ],
+            // v1 slim list — Bedrock currently caps total functions per agent
+            // at 11. We keep the 10 most essential covering the user's spec
+            // (search, apply, respond invitation, scheduled/completed shifts,
+            // applications, negotiations summary). Restore full list after
+            // the "Number of APIs per agent" quota is raised via support.
+            actionGroups: chunkFunctionsIntoActionGroups(
+                'DentiPalProTools',
+                'Professional-agent tools — search jobs, apply, respond to invitations.',
+                professionalAgentFunctions.filter(f => PRO_V1_FUNCTIONS.includes(f.name)),
+            ),
         });
         professionalAgent.addDependency(chatGuardrail);
 
-        const professionalAgentAlias = new bedrock.CfnAgentAlias(this, 'DentiPalProfessionalAgentAlias', {
+        const professionalAgentAlias = new bedrock.CfnAgentAlias(this, 'DentiPalProfessionalAgentAliasV2', {
             agentAliasName: 'live',
             agentId: professionalAgent.attrAgentId,
             description: 'Production alias for the professional agent.',
         });
 
         // --- 6a.3b Clinic CfnAgent ---
-        const clinicAgent = new bedrock.CfnAgent(this, 'DentiPalClinicAgent', {
+        const clinicAgent = new bedrock.CfnAgent(this, 'DentiPalClinicAgentV2', {
             agentName: 'DentiPal-Clinic-Agent',
             description: 'DentiPal natural-language assistant for clinic staff — post jobs, manage applicants, hire/reject, see action-needed.',
             agentResourceRoleArn: bedrockAgentServiceRole.roleArn,
@@ -2563,18 +2632,15 @@ export class DentiPalCDKStack extends cdk.Stack {
                 guardrailIdentifier: chatGuardrail.attrGuardrailId,
                 guardrailVersion: 'DRAFT',
             },
-            actionGroups: [
-                {
-                    actionGroupName: 'DentiPalClinicTools',
-                    description: 'Manage clinics, post jobs, review applicants, invite professionals. RETURN_CONTROL.',
-                    actionGroupExecutor: { customControl: 'RETURN_CONTROL' },
-                    functionSchema: { functions: clinicAgentFunctions },
-                },
-            ],
+            actionGroups: chunkFunctionsIntoActionGroups(
+                'DentiPalClinicTools',
+                'Clinic-agent tools — post temp jobs, manage applicants, hire/reject.',
+                clinicAgentFunctions.filter(f => CLINIC_V1_FUNCTIONS.includes(f.name)),
+            ),
         });
         clinicAgent.addDependency(chatGuardrail);
 
-        const clinicAgentAlias = new bedrock.CfnAgentAlias(this, 'DentiPalClinicAgentAlias', {
+        const clinicAgentAlias = new bedrock.CfnAgentAlias(this, 'DentiPalClinicAgentAliasV2', {
             agentAliasName: 'live',
             agentId: clinicAgent.attrAgentId,
             description: 'Production alias for the clinic agent.',
@@ -2647,14 +2713,40 @@ export class DentiPalCDKStack extends cdk.Stack {
             resources: [userPool.userPoolArn],
         }));
 
-        // Bedrock invoke permission — scoped to both agent ARNs.
+        // Amazon Location — geocode user home address for `search_jobs_near_me`
+        // radius filter. Scoped to the DentiPalGeocoder place-index.
         chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
-            actions: ['bedrock:InvokeAgent', 'bedrock-agent-runtime:InvokeAgent'],
+            actions: ['geo:SearchPlaceIndexForText'],
+            resources: [`arn:aws:geo:${this.region}:${this.account}:place-index/DentiPalGeocoder`],
+        }));
+
+        // Bedrock invoke permission — agent ARNs + guardrail + foundation-model
+        // (cross-region). Wide enough to avoid 'Access denied' on the runtime
+        // path; the agent's own service role still gates model inference.
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'bedrock:InvokeAgent',
+                'bedrock-agent-runtime:InvokeAgent',
+                'bedrock:GetAgent',
+                'bedrock:GetAgentAlias',
+                'bedrock:ApplyGuardrail',
+                'bedrock:InvokeModel',
+                'bedrock:InvokeModelWithResponseStream',
+            ],
             resources: [
+                // Agents + aliases
                 `arn:aws:bedrock:${this.region}:${this.account}:agent/${professionalAgent.attrAgentId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${professionalAgent.attrAgentId}/${professionalAgentAlias.attrAgentAliasId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent/${clinicAgent.attrAgentId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${clinicAgent.attrAgentId}/${clinicAgentAlias.attrAgentAliasId}`,
+                // Guardrail (any version)
+                `arn:aws:bedrock:${this.region}:${this.account}:guardrail/${chatGuardrail.attrGuardrailId}`,
+                // Foundation model + inference profile — some accounts require
+                // InvokeModel on the runtime caller's role too.
+                `arn:aws:bedrock:us-east-1:${this.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+                `arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
             ],
         }));
 

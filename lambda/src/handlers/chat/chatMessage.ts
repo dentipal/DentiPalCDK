@@ -377,12 +377,18 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
           const inputs = event.returnControl.invocationInputs || [];
           for (const inv of inputs) {
             const fn = inv.functionInvocationInput;
-            if (fn?.function && fn.parameters) {
+            if (fn?.function) {
               const params: Record<string, any> = {};
-              for (const p of fn.parameters) {
+              for (const p of fn.parameters || []) {
                 if (p.name) params[p.name] = coerceParam(p.value, p.type);
               }
-              pendingToolCalls.push({ toolName: fn.function, input: params });
+              pendingToolCalls.push({
+                toolName: fn.function,
+                input: params,
+                // Echo the EXACT action-group name back in functionResult.
+                // With chunked groups (DentiPalProTools1/2/3) hardcoding is wrong.
+                actionGroup: fn.actionGroup,
+              });
             }
           }
         }
@@ -408,7 +414,7 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
         });
         results.push({
           functionResult: {
-            actionGroup: deriveActionGroup(call.toolName),
+            actionGroup: call.actionGroup || 'DentiPalProTools1', // fallback, but should always be set
             function: call.toolName,
             responseBody: {
               TEXT: {
@@ -458,10 +464,3 @@ function coerceParam(value: string | undefined, type: string | undefined): any {
   return value;
 }
 
-/**
- * AgentCore action groups bucket tools by group. For Phase 1 we use a single
- * action group "DentiPalTools"; later phases may split by bucket.
- */
-function deriveActionGroup(_toolName: string): string {
-  return "DentiPalTools";
-}

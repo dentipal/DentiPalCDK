@@ -56,6 +56,10 @@ import { getToolDefinition } from "./toolSchemas";
 export interface ToolCall {
   toolName: string;
   input: Record<string, any>;
+  /** Action-group name from the model's returnControl event. Must be echoed
+   *  back in the functionResult; otherwise Bedrock rejects the result with
+   *  "Unexpected actionGroup". Populated by chatMessage.ts. */
+  actionGroup?: string;
 }
 
 export interface ToolResultOK { ok: true; toolName: string; data: any; }
