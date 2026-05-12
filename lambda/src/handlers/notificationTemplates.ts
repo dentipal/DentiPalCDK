@@ -214,6 +214,20 @@ export function shiftCompleted(ctx: ShiftContext): RenderedEmail {
     return { subject, html, text };
 }
 
+export function applicationReceived(ctx: ShiftContext): RenderedEmail {
+    const who = ctx.professionalName?.trim() || "A professional";
+    const subject = `New applicant${ctx.role ? ` for your ${ctx.role} shift` : ""}`;
+    const intro = `${who} just applied to your shift${ctx.role ? ` for ${ctx.role}` : ""}. Review their profile and respond from the Action Needed view.`;
+    const { html, text } = layout({
+        headline: "New applicant",
+        intro,
+        detailRows: detailLines(ctx),
+        cta: { label: "Review candidates", url: `${APP_URL}/dashboard?view=actionNeeded` },
+        footerNote: "Strong candidates often get hired within hours — quick responses help you secure them.",
+    });
+    return { subject, html, text };
+}
+
 export function shiftNoShow(ctx: ShiftContext): RenderedEmail {
     const subject = `Shift marked as no-show${ctx.date ? ` — ${ctx.date}` : ""}`;
     const intro = `${greeting(ctx.professionalName)} the clinic has reported that you did not appear for this scheduled shift. The DentiPal admin team has been notified and will review.`;
@@ -232,6 +246,7 @@ export function renderTemplate(eventType: string, ctx: ShiftContext): RenderedEm
         case "shift-scheduled": return shiftScheduled(ctx);
         case "application-rejected": return applicationRejected(ctx);
         case "invite-sent": return inviteSent(ctx);
+        case "application-received": return applicationReceived(ctx);
         case "shift-cancelled": return shiftCancelled(ctx);
         case "shift-modified": return shiftEdited(ctx);
         case "shift-reminder-h24": return shiftReminderH24(ctx);
