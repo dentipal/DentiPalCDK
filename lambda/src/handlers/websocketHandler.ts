@@ -1674,6 +1674,23 @@ async function onDefault(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayP
     return { statusCode: 200, body: "Unknown action" };
 }
 
+/**
+ * Client-driven keep-alive. The browser fires this every few minutes so that
+ * API Gateway sees activity on the connection and doesn't apply its hard
+ * 10-minute idle timeout. The round-trip (request → response) is what
+ * actually keeps things alive — a one-way send would still count, but the
+ * response gives the client a definitive "still connected" signal it can
+ * use to detect a stalled socket.
+ */
+async function onPing(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayProxyResultV2> {
+    const connClient = wsClientFromEvent(event);
+    await send(connClient, event.requestContext.connectionId, {
+        type: "pong",
+        ts: Date.now(),
+    });
+    return { statusCode: 200, body: "pong" };
+}
+
 // ============== MAIN HANDLER ==============
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
     // Assert the event shape to include connectionId, as it must be present for WebSocket invocations
@@ -1684,11 +1701,20 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
         const route = wsEvent.requestContext.routeKey;
         let action = route;
 
-        // Handle custom routes sent through the $default route by checking the body 'action' field
+        // Handle custom routes sent through the $default route by checking the
+        // body's `action` field. Also accept `type: "ping"` for backwards
+        // compatibility with older clients that sent the heartbeat as a typed
+        // frame instead of an action — both forms now route to the ping handler.
         if (route === "$default" && wsEvent.body) {
             try {
-                const body = JSON.parse(wsEvent.body) as { action?: string };
-                action = body.action || route;
+                const body = JSON.parse(wsEvent.body) as { action?: string; type?: string };
+                if (body.action) {
+                    action = body.action;
+                } else if (body.type === "ping") {
+                    action = "ping";
+                } else {
+                    action = route;
+                }
             } catch (e) {
                 console.warn("[ws] handler body parse failed:", (e as Error).message);
             }
@@ -1703,6 +1729,8 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
         if (action === "$connect") return await onConnect(wsEvent);
         if (action === "$disconnect") return await onDisconnect(wsEvent);
+
+        if (action === "ping") return await onPing(wsEvent);
 
         if (action === "sendMessage") return await onSendMessage(wsEvent);
         if (action === "getHistory") return await onGetHistory(wsEvent);
