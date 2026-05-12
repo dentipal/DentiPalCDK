@@ -1,0 +1,33 @@
+"Test Case ID","Test Scenario","Test Case","Pre-Condition","Test Steps","Test Data","Expected Result","Post Condition","Actual Result","Status (Pass/Fail)"
+"TC-FB-001","Verify feedback page loads","Open feedback page","User logged in","1. Navigate to /feedback or click ""Send Feedback"" link","N/A","Feedback form loads with subject/category, message, and Submit button","Form rendered","",""
+"TC-FB-002","Verify feedback submit happy path","Submit feedback - happy path","On feedback form","1. Select category
+2. Enter message
+3. Click Submit","category: Bug Report
+message: Login is slow on Safari","POST /submitfeedback succeeds; toast ""Thanks for your feedback""; form clears","Feedback stored in DB","",""
+"TC-FB-003","Verify required field validation","Submit with empty message","On feedback form","1. Leave message blank
+2. Click Submit","message: (empty)","Inline error ""Message is required""; no API call","Form remains open","",""
+"TC-FB-004","Verify category required","Submit without category","On feedback form","1. Leave category unselected
+2. Fill message
+3. Submit","category: (empty)
+message: Test","Error ""Please select a category""","No submission","",""
+"TC-FB-005","Verify max length","Long message handling","On feedback form","1. Paste 5000-char message
+2. Submit","messageLength: 5000","Either accepted up to limit OR rejected with ""Message too long (max N chars)""","Limit enforced","",""
+"TC-FB-006","Verify special characters","Special characters in message","On feedback form","1. Enter message with quotes, emoji, unicode
+2. Submit","message: ""It's great! 😀 José tried it""","Submission succeeds; characters preserved in stored record","Data preserved","",""
+"TC-FB-007","Verify XSS protection","XSS attempt in feedback","On feedback form","1. Enter script payload
+2. Submit","message: <script>alert(1)</script>","Stored as text; if admin views feedback, script does NOT execute","No XSS","",""
+"TC-FB-008","Verify rate-limit","Spam protection","Submit many times in short window","1. Submit form 10 times in 30 seconds","count: 10/30s","After threshold, error ""Too many submissions, please wait""","Spam blocked","",""
+"TC-FB-009","Verify anonymous feedback option","Anonymous feedback (if supported)","On feedback form","1. Check ""Submit anonymously"" toggle
+2. Submit","anonymous: true","Feedback stored without user identifier; userSub set to anonymous","Anonymity preserved","",""
+"TC-FB-010","Verify file attachment","Attach screenshot to feedback","On feedback form","1. Click attach
+2. Upload screenshot.png
+3. Submit","file: screenshot.png (1MB)","File uploaded via presigned URL; feedback record references S3 key","Attachment saved","",""
+"TC-FB-011","Verify attachment type validation","Reject disallowed attachment types","On feedback form","1. Try uploading .exe","file: malware.exe","Rejected with ""File type not allowed""","No upload","",""
+"TC-FB-012","Verify attachment size limit","Reject oversized attachment","On feedback form","1. Upload 25MB file","file: huge.zip (25MB)","Rejected with ""File too large (max 10MB)""","No upload","",""
+"TC-FB-013","Verify confirmation message","Confirmation shown after submit","After successful submit","1. Submit valid feedback","valid payload","Success toast or modal shown for ~3 seconds; form clears","User informed","",""
+"TC-FB-014","Verify backend storage","Feedback stored in DynamoDB","After submit","1. Submit feedback
+2. Check DynamoDB Feedback table","valid payload","New record present with userSub, category, message, timestamp, attachmentKey","Record persisted","",""
+"TC-FB-015","Verify admin can view feedback","Admin retrieves feedback list","Admin role","1. GET /feedback (admin endpoint, if exists) OR open admin tool","role: admin","List returns ordered by timestamp desc with all required fields","Admin view works","",""
+"TC-FB-016","Verify feedback API auth","Feedback endpoint auth requirement","No token","1. POST /submitfeedback without Authorization header","N/A","Either accepts as anonymous (200) per design, OR returns 401 - consistent with design spec","Auth behavior consistent","",""
+"TC-FB-017","Verify feedback mobile UX","Feedback form on mobile","Viewport 375px","1. Open feedback form on mobile","viewport: 375px","Form fields stack vertically; Submit button reachable without zoom","Mobile usable","",""
+"TC-FB-018","Verify error handling","Feedback API failure handling","Backend returns 500","1. Submit feedback during API failure","backend: 500","Friendly error toast ""Couldn't send feedback - please retry""; form data preserved","User can retry","",""
