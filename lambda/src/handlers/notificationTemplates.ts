@@ -161,151 +161,151 @@ function layout(input: LayoutInput): { html: string; text: string } {
 }
 
 function greeting(name?: string): string {
-    return name ? `Hi ${name},` : "Hi there,";
+    return name ? `Hello ${name},` : "Hello,";
 }
 
 export function shiftScheduled(ctx: ShiftContext): RenderedEmail {
     const subject = `Shift confirmed${ctx.date ? ` — ${ctx.date}` : ""}`;
-    const intro = `${greeting(ctx.professionalName)} good news — your application was accepted. Your shift is locked in and the details are below.`;
+    const intro = `${greeting(ctx.professionalName)} we are pleased to confirm that your application has been accepted. Your shift details are listed below for your reference.`;
     const { html, text } = layout({
         eyebrow: "Shift confirmed",
-        headline: "You're on the schedule",
+        headline: "Your shift has been confirmed",
         intro,
         detailRows: detailLines(ctx),
-        cta: { label: "View shift", url: `${APP_URL}/professional/scheduled-shifts` },
-        secondaryCta: { label: "Add to calendar in DentiPal", url: `${APP_URL}/professional/scheduled-shifts` },
-        footerNote: "Please arrive a few minutes early. If anything changes, message the clinic directly through DentiPal chat.",
+        cta: { label: "View shift details", url: `${APP_URL}/professional/scheduled-shifts` },
+        secondaryCta: { label: "Add this shift to your calendar", url: `${APP_URL}/professional/scheduled-shifts` },
+        footerNote: "Please plan to arrive a few minutes ahead of your scheduled start time. Should anything change on your end, kindly notify the clinic at the earliest opportunity.",
     });
     return { subject, html, text };
 }
 
 export function applicationRejected(ctx: ShiftContext): RenderedEmail {
-    const subject = `Update on your application${ctx.role ? ` for ${ctx.role}` : ""}`;
-    const intro = `${greeting(ctx.professionalName)} the clinic chose another candidate for this role. It's not a reflection of your profile — fit and timing play a big part. New shifts go up every day.`;
+    const subject = `Application status update${ctx.role ? ` — ${ctx.role}` : ""}`;
+    const intro = `${greeting(ctx.professionalName)} thank you for submitting your application. After careful consideration, the clinic has chosen to proceed with another candidate for this position. This decision often reflects scheduling fit and specific requirements rather than the quality of your profile.`;
     const { html, text } = layout({
         eyebrow: "Application update",
-        headline: "Not selected this time",
+        headline: "Application status update",
         intro,
         detailRows: detailLines(ctx),
-        cta: { label: "Browse open shifts", url: `${APP_URL}/professional/dashboard` },
-        footerNote: "Tip: a complete profile with up-to-date certifications and availability gets noticed faster.",
+        cta: { label: "Browse available shifts", url: `${APP_URL}/professional/dashboard` },
+        footerNote: "Maintaining a complete profile with current certifications and availability significantly improves your visibility to clinics on the platform.",
     });
     return { subject, html, text };
 }
 
 export function inviteSent(ctx: ShiftContext): RenderedEmail {
-    const subject = `${ctx.clinicName || "A clinic"} invited you to apply${ctx.role ? ` — ${ctx.role}` : ""}`;
-    const intro = `${greeting(ctx.professionalName)} ${ctx.clinicName || "a clinic"} thinks you'd be a great fit for an upcoming shift and sent you a direct invitation.`;
+    const subject = `Invitation to apply${ctx.role ? ` — ${ctx.role}` : ""}${ctx.clinicName ? ` at ${ctx.clinicName}` : ""}`;
+    const intro = `${greeting(ctx.professionalName)} ${ctx.clinicName || "a clinic"} has identified you as a strong match for an upcoming shift and has extended a direct invitation to apply.`;
     const { html, text } = layout({
         eyebrow: "New invitation",
-        headline: "You've been invited",
+        headline: "You have received an invitation",
         intro,
         detailRows: detailLines(ctx),
         cta: { label: "Review invitation", url: `${APP_URL}/professional/invites` },
-        footerNote: "Invitations are time-sensitive. Reviewing within a few hours gives you the best chance of securing the shift.",
+        footerNote: "Invitations are time-sensitive. We recommend responding at your earliest convenience to secure this opportunity.",
     });
     return { subject, html, text };
 }
 
 export function shiftCancelled(ctx: ShiftContext): RenderedEmail {
     const subject = `Shift cancelled${ctx.date ? ` — ${ctx.date}` : ""}`;
-    const intro = `${greeting(ctx.professionalName)} the clinic has cancelled this scheduled shift. No action is needed on your end — the time slot is free again.`;
+    const intro = `${greeting(ctx.professionalName)} we regret to inform you that the clinic has cancelled this scheduled shift. No further action is required on your part, and your availability has been restored for this time.`;
     const { html, text } = layout({
         eyebrow: "Shift cancelled",
         headline: "Your shift has been cancelled",
         intro,
         detailRows: detailLines(ctx),
-        cta: { label: "Find another shift", url: `${APP_URL}/professional/dashboard` },
-        footerNote: "We know cancellations are frustrating. Reach out to DentiPal support if this happens repeatedly with the same clinic.",
+        cta: { label: "Browse available shifts", url: `${APP_URL}/professional/dashboard` },
+        footerNote: "We understand cancellations can be disruptive. Should you experience repeated cancellations from the same clinic, please contact DentiPal support so we can review the situation.",
     });
     return { subject, html, text };
 }
 
 export function shiftEdited(ctx: ShiftContext): RenderedEmail {
     const subject = `Shift details updated${ctx.date ? ` — ${ctx.date}` : ""}`;
-    const intro = `${greeting(ctx.professionalName)} the clinic updated the details of your scheduled shift. Please review the latest information below carefully.`;
+    const intro = `${greeting(ctx.professionalName)} the clinic has updated the details of your scheduled shift. Please review the revised information below carefully prior to your shift.`;
     const { html, text } = layout({
         eyebrow: "Shift updated",
-        headline: "Your shift details changed",
+        headline: "Your shift details have been updated",
         intro,
         detailRows: detailLines(ctx),
         cta: { label: "View updated shift", url: `${APP_URL}/professional/scheduled-shifts` },
-        footerNote: "If the new time or location no longer works for you, please cancel and notify the clinic as soon as possible.",
+        footerNote: "If the revised time or location is no longer suitable, please cancel the shift and notify the clinic at the earliest opportunity.",
     });
     return { subject, html, text };
 }
 
 export function shiftReminderH24(ctx: ShiftContext): RenderedEmail {
     const subject = `Reminder: shift tomorrow${ctx.startTime ? ` at ${ctx.startTime}` : ""}`;
-    const intro = `${greeting(ctx.professionalName)} a quick heads-up — you're scheduled for a shift in about 24 hours. Here's everything you need to know.`;
+    const intro = `${greeting(ctx.professionalName)} this is a courtesy reminder that you are scheduled for a shift in approximately 24 hours. The full details are provided below for your reference.`;
     const { html, text } = layout({
         eyebrow: "24-hour reminder",
-        headline: "Your shift is tomorrow",
+        headline: "Your shift is scheduled for tomorrow",
         intro,
         detailRows: detailLines(ctx),
         cta: { label: "View shift details", url: `${APP_URL}/professional/scheduled-shifts` },
-        footerNote: "Plan your travel, prep your uniform, and confirm any special requirements with the clinic through DentiPal chat.",
+        footerNote: "Please plan your travel, prepare your uniform, and confirm any specific requirements with the clinic in advance.",
     });
     return { subject, html, text };
 }
 
 export function shiftReminderH1(ctx: ShiftContext): RenderedEmail {
-    const subject = `Starting soon${ctx.startTime ? ` — ${ctx.startTime}` : ""}`;
-    const intro = `${greeting(ctx.professionalName)} your shift starts in about an hour. Time to head out so you arrive a few minutes early.`;
+    const subject = `Shift starting soon${ctx.startTime ? ` at ${ctx.startTime}` : ""}`;
+    const intro = `${greeting(ctx.professionalName)} your shift is scheduled to begin in approximately one hour. We recommend departing now to ensure you arrive a few minutes early.`;
     const { html, text } = layout({
         eyebrow: "Starting in 1 hour",
-        headline: "Your shift starts soon",
+        headline: "Your shift begins shortly",
         intro,
         detailRows: detailLines(ctx),
-        cta: { label: "Open DentiPal", url: `${APP_URL}/professional/scheduled-shifts` },
-        footerNote: "Running late? Message the clinic immediately through DentiPal chat — they appreciate the heads-up.",
+        cta: { label: "View shift details", url: `${APP_URL}/professional/scheduled-shifts` },
+        footerNote: "Should you anticipate any delay, please notify the clinic immediately so they can make appropriate arrangements.",
     });
     return { subject, html, text };
 }
 
 export function shiftCompleted(ctx: ShiftContext): RenderedEmail {
     const subject = `Shift completed${ctx.date ? ` — ${ctx.date}` : ""}`;
-    const intro = `${greeting(ctx.professionalName)} the clinic has marked your shift as complete. Thanks for the great work — your record has been updated.`;
+    const intro = `${greeting(ctx.professionalName)} the clinic has confirmed the successful completion of your shift. Thank you for your contribution — your shift record has been updated accordingly.`;
     const detailRows = detailLines(ctx);
     if (ctx.actualHoursWorked !== undefined && ctx.actualHoursWorked !== null && ctx.actualHoursWorked !== "") {
         detailRows.push(["Hours worked", `${ctx.actualHoursWorked}h`]);
     }
     const { html, text } = layout({
         eyebrow: "Shift completed",
-        headline: "Nice work today",
+        headline: "Your shift has been completed",
         intro,
         detailRows,
         cta: { label: "View completed shifts", url: `${APP_URL}/professional/dashboard` },
-        footerNote: "Payment is processed by the clinic on their normal pay cycle. If anything looks off, reach out to DentiPal support and we'll help sort it out.",
+        footerNote: "Payment is processed by the clinic in accordance with their standard pay cycle. Should you have any concerns regarding payment, please contact DentiPal support for assistance.",
     });
     return { subject, html, text };
 }
 
 export function applicationReceived(ctx: ShiftContext): RenderedEmail {
     const who = ctx.professionalName?.trim() || "A professional";
-    const subject = `New applicant${ctx.role ? ` for your ${ctx.role} shift` : ""}`;
-    const intro = `${who} just applied to your shift${ctx.role ? ` for ${ctx.role}` : ""}. Take a look at their profile and respond from the Action Needed view to keep them engaged.`;
+    const subject = `New application received${ctx.role ? ` — ${ctx.role}` : ""}`;
+    const intro = `${who} has submitted an application for your ${ctx.role ? `${ctx.role} ` : ""}shift. Please review their profile and respond from the Action Needed view to keep the candidate engaged.`;
     const { html, text } = layout({
-        eyebrow: "New applicant",
-        headline: "You have a new applicant",
+        eyebrow: "New application",
+        headline: "A new application has been received",
         intro,
         detailRows: detailLines(ctx),
         cta: { label: "Review candidate", url: `${APP_URL}/dashboard?view=actionNeeded` },
-        footerNote: "Top professionals often accept other shifts within hours — quick responses dramatically improve your hire rate.",
+        footerNote: "Qualified professionals often accept other opportunities within hours. Prompt responses significantly improve your hiring success rate.",
     });
     return { subject, html, text };
 }
 
 export function shiftNoShow(ctx: ShiftContext): RenderedEmail {
     const subject = `No-show reported${ctx.date ? ` — ${ctx.date}` : ""}`;
-    const intro = `${greeting(ctx.professionalName)} the clinic reported that you did not appear for this scheduled shift. The DentiPal admin team has been notified and will review the report.`;
+    const intro = `${greeting(ctx.professionalName)} the clinic has reported that you did not attend this scheduled shift. The DentiPal administration team has been notified and will review the report.`;
     const { html, text } = layout({
         eyebrow: "Attendance report",
-        headline: "Shift marked as no-show",
+        headline: "Shift reported as a no-show",
         intro,
         detailRows: detailLines(ctx),
         cta: { label: "Contact support", url: `${APP_URL}/professional/dashboard` },
-        footerNote: "If you believe this report is incorrect — for example, you arrived but were not signed in — please contact DentiPal support right away with any supporting details.",
+        footerNote: "If you believe this report has been recorded in error — for example, you attended but were not formally signed in — please contact DentiPal support promptly with any supporting information.",
     });
     return { subject, html, text };
 }

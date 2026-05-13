@@ -269,8 +269,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 </tr>
               </table>
 
-              <h1 style="margin:18px 0 8px;color:#1d1d1f;font-size:24px;font-weight:700;letter-spacing:-0.025em;line-height:1.2;">New feedback received</h1>
-              <p style="margin:0 0 28px;color:#6e6e73;font-size:14px;letter-spacing:-0.005em;">${escapeHtml(sentAtIST)}</p>
+              <h1 style="margin:18px 0 8px;color:#1d1d1f;font-size:24px;font-weight:700;letter-spacing:-0.025em;line-height:1.2;">New feedback submission</h1>
+              <p style="margin:0 0 28px;color:#6e6e73;font-size:14px;letter-spacing:-0.005em;">Submitted on ${escapeHtml(sentAtIST)}</p>
 
               <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Reporter</p>
               <table cellpadding="0" cellspacing="0" width="100%" style="background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;margin:0 0 24px;">
@@ -279,7 +279,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                   <p style="margin:0 0 8px;color:#6e6e73;font-size:13px;letter-spacing:-0.005em;">${escapeHtml(userType)} account</p>
                   <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">
                     ${metaRow("Email", escapeHtml(effectiveEmail || "Not provided"))}
-                    ${metaRow("Wants a reply", contact ? "Yes" : "No", true)}
+                    ${metaRow("Reply requested", contact ? "Yes" : "No", true)}
                   </table>
                 </td></tr>
               </table>
@@ -304,7 +304,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         <tr><td style="padding:24px 24px 8px;text-align:center;">
           <p style="margin:0;color:#86868b;font-size:12px;line-height:1.55;letter-spacing:-0.005em;">
-            Internal report. Reply to this email to respond directly to the reporter${contact ? " (they've requested a reply)" : ""}.
+            Internal report. Reply to this email to respond directly to the reporter${contact ? " (a reply has been requested)" : ""}.
           </p>
           <p style="margin:18px 0 0;color:#a1a1a6;font-size:11px;letter-spacing:0.01em;">&copy; ${year} DentiPal</p>
         </td></tr>

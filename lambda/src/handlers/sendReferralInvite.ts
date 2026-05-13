@@ -103,10 +103,10 @@ function createReferralEmail(
     const year = new Date().getFullYear();
 
     const benefits: Array<[string, string]> = [
-        ["Exclusive shifts", "First access to roles posted by clinics in your area."],
-        ["Apply in seconds", "One profile, every application — no repeated paperwork."],
-        ["Transparent pay", "See the hourly rate up front, before you apply."],
-        ["Direct messaging", "Talk to clinics directly. No agencies in the middle."],
+        ["Exclusive opportunities", "Receive priority access to shifts posted by clinics in your area."],
+        ["Streamlined applications", "Submit applications through a single profile, eliminating repetitive paperwork."],
+        ["Transparent compensation", "Review the hourly rate and full shift details before submitting an application."],
+        ["Direct communication", "Engage directly with hiring clinics without intermediaries."],
     ];
 
     const benefitsHtml = benefits.map(([title, body], idx) => {
@@ -120,7 +120,7 @@ function createReferralEmail(
 
     const personalMessageHtml = safeMessage ? `
         <div style="margin:0 0 28px;padding:22px 24px;background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;">
-          <p style="margin:0 0 8px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">A note from ${safeReferrer}</p>
+          <p style="margin:0 0 8px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">A message from ${safeReferrer}</p>
           <p style="margin:0;color:#1d1d1f;font-size:15px;line-height:1.55;letter-spacing:-0.01em;font-style:italic;">&ldquo;${safeMessage}&rdquo;</p>
         </div>` : "";
 
@@ -148,9 +148,9 @@ function createReferralEmail(
             <tr><td style="padding:44px 40px 32px;">
 
               <p style="margin:0 0 10px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Personal invitation</p>
-              <h1 style="margin:0 0 14px;color:#1d1d1f;font-size:28px;font-weight:700;letter-spacing:-0.025em;line-height:1.15;">${safeReferrer} invited you to DentiPal</h1>
+              <h1 style="margin:0 0 14px;color:#1d1d1f;font-size:28px;font-weight:700;letter-spacing:-0.025em;line-height:1.15;">${safeReferrer} has invited you to DentiPal</h1>
               <p style="margin:0 0 28px;color:#424245;font-size:16px;line-height:1.55;letter-spacing:-0.01em;">
-                Hi there — ${safeReferrer} thinks you'd be a great fit for DentiPal, the platform dental professionals use to find shifts at trusted clinics. They've sent this invite to <strong style="color:#1d1d1f;font-weight:600;">${safeFriend}</strong>.
+                Hello, ${safeReferrer} has invited you to join DentiPal — the platform dental professionals use to find shifts at trusted clinics. This invitation has been sent to <strong style="color:#1d1d1f;font-weight:600;">${safeFriend}</strong>.
               </p>
 
               ${personalMessageHtml}
@@ -160,11 +160,11 @@ function createReferralEmail(
                   <a href="${signupUrl}" style="display:inline-block;background:#1d1d1f;color:#ffffff;padding:14px 32px;border-radius:980px;font-size:15px;font-weight:500;text-decoration:none;letter-spacing:-0.01em;line-height:1;">Accept invitation</a>
                 </td></tr>
                 <tr><td align="center" style="padding-top:14px;">
-                  <p style="margin:0;color:#86868b;font-size:13px;letter-spacing:-0.005em;">Free to join · Takes about 2 minutes</p>
+                  <p style="margin:0;color:#86868b;font-size:13px;letter-spacing:-0.005em;">Free to join · Registration takes approximately two minutes</p>
                 </td></tr>
               </table>
 
-              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">What DentiPal offers</p>
+              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Why join DentiPal</p>
               <table cellpadding="0" cellspacing="0" width="100%" style="background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;margin:0 0 28px;">
                 <tr><td style="padding:6px 22px;">
                   <table width="100%" cellpadding="0" cellspacing="0">${benefitsHtml}</table>
@@ -173,7 +173,7 @@ function createReferralEmail(
 
               <div style="margin:0 0 0;padding:18px 20px;background:rgba(245,245,247,0.7);border:1px solid rgba(0,0,0,0.04);border-radius:14px;">
                 <p style="margin:0;color:#6e6e73;font-size:13px;line-height:1.55;letter-spacing:-0.005em;">
-                  Signing up through this link credits ${safeReferrer} as your referrer. Both of you may be eligible for referral rewards once you complete your first shift.
+                  Registering through this link will record ${safeReferrer} as your referrer. Both parties may become eligible for referral rewards upon the completion of your first shift.
                 </p>
               </div>
 
@@ -182,11 +182,8 @@ function createReferralEmail(
         </td></tr>
 
         <tr><td style="padding:24px 24px 8px;text-align:center;">
-          <p style="margin:0 0 10px;color:#86868b;font-size:12px;line-height:1.55;letter-spacing:-0.005em;">
-            This invitation was sent to ${safeFriend}. If you weren't expecting it, you can safely ignore this email.
-          </p>
           <p style="margin:0;color:#86868b;font-size:12px;line-height:1.55;letter-spacing:-0.005em;">
-            Questions? <a href="mailto:support@dentipal.com" style="color:#1d1d1f;text-decoration:none;font-weight:500;">support@dentipal.com</a>
+            This invitation was sent to ${safeFriend}. If you were not expecting it, you may disregard this message.
           </p>
           <p style="margin:18px 0 0;color:#a1a1a6;font-size:11px;letter-spacing:0.01em;">&copy; ${year} DentiPal</p>
         </td></tr>
@@ -200,21 +197,20 @@ function createReferralEmail(
     const textBody = [
         "DentiPal",
         "",
-        `${referrerName} invited you to DentiPal`,
+        `${referrerName} has invited you to DentiPal`,
         "",
-        `Hi there — ${referrerName} thinks you'd be a great fit for DentiPal, the platform dental professionals use to find shifts at trusted clinics. This invitation was sent to ${friendEmail}.`,
-        ...(personalMessage ? ["", `A note from ${referrerName}:`, `"${personalMessage}"`] : []),
+        `Hello, ${referrerName} has invited you to join DentiPal — the platform dental professionals use to find shifts at trusted clinics. This invitation has been sent to ${friendEmail}.`,
+        ...(personalMessage ? ["", `A message from ${referrerName}:`, `"${personalMessage}"`] : []),
         "",
-        "What DentiPal offers:",
+        "Why join DentiPal:",
         ...benefits.map(([t, b]) => `  • ${t} — ${b}`),
         "",
         `Accept invitation: ${signupUrl}`,
-        "Free to join · Takes about 2 minutes",
+        "Free to join · Registration takes approximately two minutes",
         "",
-        `Signing up through this link credits ${referrerName} as your referrer. Both of you may be eligible for referral rewards once you complete your first shift.`,
+        `Registering through this link will record ${referrerName} as your referrer. Both parties may become eligible for referral rewards upon the completion of your first shift.`,
         "",
-        "—",
-        "Questions? support@dentipal.com",
+        `This invitation was sent to ${friendEmail}. If you were not expecting it, you may disregard this message.`,
     ].join("\n");
 
     return { subject, htmlBody, textBody };
