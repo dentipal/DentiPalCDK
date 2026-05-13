@@ -1,4 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context, Handler } from 'aws-lambda';
+import { extractUserFromBearerToken, checkSessionNotInvalidated, SessionInvalidatedError } from "./handlers/utils";
 
 import { handler as createUserHandler } from "./handlers/createUser";
 import { handler as getUserHandler } from "./handlers/getUser";
@@ -617,6 +618,34 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
                 tried: Array.from(candidates)
             })
         };
+    }
+
+    // --- STEP 3.5: Session-invalidation denylist check ---
+    // If the user's password was changed (or session otherwise force-revoked)
+    // AFTER this access token was issued, reject the request with 401 so the
+    // frontend redirects to login. We skip the check for unauthenticated /
+    // OPTIONS / auth-flow routes — those don't carry a JWT yet.
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    if (authHeader && httpMethod !== "OPTIONS") {
+        try {
+            const userInfo = extractUserFromBearerToken(authHeader);
+            await checkSessionNotInvalidated(userInfo);
+        } catch (err: any) {
+            if (err instanceof SessionInvalidatedError) {
+                return {
+                    statusCode: 401,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        error: "Unauthorized",
+                        code: "SESSION_INVALIDATED",
+                        message: "Your session is no longer valid. Please sign in again.",
+                    }),
+                };
+            }
+            // Any other JWT-decode error: let the downstream handler do
+            // its own auth check / return its own error. We don't want
+            // to short-circuit unauthenticated public endpoints.
+        }
     }
 
     // --- STEP 4: Execute Handler ---
