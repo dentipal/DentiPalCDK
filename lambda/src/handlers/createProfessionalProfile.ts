@@ -7,6 +7,7 @@ import {
 import { extractUserFromBearerToken } from "./utils";
 import { VALID_ROLE_VALUES, DB_TO_DISPLAY_MAPPING } from "./professionalRoles";
 import { corsHeaders } from "./corsHeaders";
+import { geocodeAddressParts } from "./geo";
 
 // --- Type Definitions ---
 
@@ -205,6 +206,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
             if (addressData!.addressLine3?.trim()) {
                 addressItem.addressLine3 = { S: addressData!.addressLine3.trim() };
+            }
+
+            // Geocode on create — best-effort, non-fatal. Mirrors createClinic so
+            // professionals show up in the frontend's "Near me" radius filter.
+            try {
+                const coords = await geocodeAddressParts({
+                    addressLine1: addressData!.addressLine1!.trim(),
+                    city:         addressData!.city!.trim(),
+                    state:        addressData!.state!.trim(),
+                    pincode:      String(addressData!.pincode).trim(),
+                    country:      (addressData!.country || "USA").trim(),
+                });
+                if (coords) {
+                    console.log(`[createProfessionalProfile] Geocoded ${userSub} → (${coords.lat}, ${coords.lng})`);
+                    addressItem.lat = { N: String(coords.lat) };
+                    addressItem.lng = { N: String(coords.lng) };
+                } else {
+                    console.warn(`[createProfessionalProfile] Could not geocode address for ${userSub}`);
+                }
+            } catch (geocodeErr) {
+                console.error("[createProfessionalProfile] ⚠️ Geocode failed (non-fatal):", geocodeErr);
             }
 
             try {

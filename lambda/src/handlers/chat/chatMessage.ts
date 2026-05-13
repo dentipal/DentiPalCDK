@@ -10,10 +10,14 @@ import {
 } from "@aws-sdk/client-apigatewaymanagementapi";
 import { DynamoDBClient, QueryCommand } from "@aws-sdk/client-dynamodb";
 import {
+  CognitoIdentityProviderClient,
+} from "@aws-sdk/client-cognito-identity-provider";
+import {
   getSessionByConnectionId,
   refreshSession,
   createSessionForConnection,
   setUserContext,
+  setUserGroupsAndAgentType,
   markContextInjected,
   AgentType,
   ChatSession,
@@ -24,6 +28,7 @@ import { AuthContext, CLINIC_ROLES } from "../utils";
 
 const REGION = process.env.REGION || "us-east-1";
 const CONNS_TABLE = process.env.CONNS_TABLE || "DentiPal-V5-Connections"; // existing user-to-user table
+const USER_POOL_ID = process.env.USER_POOL_ID || "";
 
 const PROFESSIONAL_AGENT_ID = process.env.BEDROCK_PROFESSIONAL_AGENT_ID || "";
 const PROFESSIONAL_AGENT_ALIAS_ID = process.env.BEDROCK_PROFESSIONAL_AGENT_ALIAS_ID || "";
@@ -34,6 +39,38 @@ const PUBLIC_AGENT_ALIAS_ID = process.env.BEDROCK_PUBLIC_AGENT_ALIAS_ID || "";
 
 const bedrock = new BedrockAgentRuntimeClient({ region: REGION });
 const ddb = new DynamoDBClient({ region: REGION });
+const cognito = new CognitoIdentityProviderClient({ region: REGION });
+
+const CLINIC_GROUPS_LOWER = new Set((CLINIC_ROLES as readonly string[]).map(g => g.toLowerCase()));
+
+/**
+ * Fetch the user's Cognito groups + derive the canonical agent type.
+ * Source of truth for "is this a clinic or professional user?". Used to
+ * override the frontend's requestedAgent if it disagrees with the JWT-side
+ * truth (frontend reads localStorage.userRole, which can drift).
+ */
+async function resolveGroupsAndAgentType(userSub: string): Promise<{
+  groups: string[];
+  canonicalAgent: AgentType;
+}> {
+  if (!USER_POOL_ID) {
+    console.warn("[chatMessage] USER_POOL_ID not set — cannot resolve groups; defaulting to professional");
+    return { groups: [], canonicalAgent: "professional" };
+  }
+  try {
+    const { AdminListGroupsForUserCommand } = await import("@aws-sdk/client-cognito-identity-provider");
+    const groupsRes = await cognito.send(new AdminListGroupsForUserCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: userSub,
+    }));
+    const groups = (groupsRes.Groups || []).map(g => g.GroupName || "").filter(Boolean);
+    const isClinic = groups.some(g => CLINIC_GROUPS_LOWER.has(g.toLowerCase()));
+    return { groups, canonicalAgent: isClinic ? "clinic" : "professional" };
+  } catch (e) {
+    console.warn("[chatMessage] resolveGroupsAndAgentType failed; defaulting to professional", e);
+    return { groups: [], canonicalAgent: "professional" };
+  }
+}
 
 interface ChatMessageFrame {
   action: "chatMessage";
@@ -93,23 +130,35 @@ async function bootstrapSessionFromExistingConnection(
     return { error: "No active authenticated connection found", status: 401 };
   }
   const userSub = row.sub.S;
-  // We trust the frontend's agent-type routing (it picks based on
-  // localStorage.userRole which is set at login time). The Connections-row
-  // userType field has inconsistent casing/values across user types and
-  // attempting strict server-side matching here just creates false denies.
-  // Per-tool RBAC (canWriteClinic etc.) is the real gate downstream — that
-  // gate runs inside each refactored handler and is the security boundary.
-  // Log the value for observability.
-  console.log(`[chatMessage] bootstrap userSub=${userSub} requestedAgent=${requestedAgent} userType="${row.userType?.S || "<empty>"}"`);
 
-  const session = await createSessionForConnection(userSub, connectionId, requestedAgent);
+  // Server-side agent-type derivation. Frontend reads localStorage.userRole
+  // which can drift; the canonical truth is the user's Cognito groups. If
+  // they disagree, override silently and log for observability.
+  const { groups, canonicalAgent } = await resolveGroupsAndAgentType(userSub);
+  const effectiveAgent: AgentType = canonicalAgent;
+  if (canonicalAgent !== requestedAgent) {
+    console.warn(`[chatMessage] agent override: requested=${requestedAgent} resolved=${canonicalAgent} userSub=${userSub} groups=[${groups.join(",")}]`);
+  } else {
+    console.log(`[chatMessage] bootstrap userSub=${userSub} agent=${effectiveAgent} groups=[${groups.join(",")}]`);
+  }
+
+  const session = await createSessionForConnection(userSub, connectionId, effectiveAgent);
+  session.userGroups = groups;
+
+  // Persist groups + canonical agent type so subsequent turns of this session
+  // pick up the override on each refreshSession round-trip.
+  try {
+    await setUserGroupsAndAgentType(userSub, connectionId, groups, effectiveAgent);
+  } catch (e) {
+    console.warn("[chatMessage] setUserGroupsAndAgentType failed (continuing without persistent cache):", e);
+  }
 
   // Pre-fetch user context (profile, address, clinics) once at bootstrap so
   // the agent can ground its first response without an extra round-trip.
   // Best-effort: a missing profile or geocode failure just yields a thinner
   // preamble; never blocks the session.
   try {
-    const ctx = await fetchUserContext(userSub, requestedAgent);
+    const ctx = await fetchUserContext(userSub, effectiveAgent);
     if (ctx) {
       await setUserContext(userSub, connectionId, ctx as unknown as Record<string, any>);
       session.userContext = ctx as unknown as Record<string, any>;
@@ -215,6 +264,33 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
 
   const api = buildApiGwClient(event);
 
+  // Outer guard: catch ANY uncaught exception from the body below so the
+  // client never sees API Gateway's default malformed error frame (which
+  // the widget renders as `Error (undefined)`). Always 200 to API Gateway —
+  // the user-visible failure is the error frame we send ourselves.
+  try {
+    return await handlerBody(connectionId, api, event);
+  } catch (outerErr: any) {
+    console.error("[chatMessage] outermost unhandled exception", outerErr);
+    try {
+      await postFrame(api, connectionId, {
+        type: "error",
+        reason: "internal_error",
+        detail: outerErr?.message || String(outerErr) || "Uncaught exception",
+      });
+    } catch (postErr) {
+      console.error("[chatMessage] error frame post itself failed", postErr);
+    }
+    return { statusCode: 200, body: "ok" };
+  }
+};
+
+async function handlerBody(
+  connectionId: string,
+  api: ApiGatewayManagementApiClient,
+  event: any,
+): Promise<APIGatewayProxyResult> {
+
   // ---- 1. Parse frame ----
   let frame: InboundFrame;
   try {
@@ -223,6 +299,7 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
     await postFrame(api, connectionId, { type: "error", reason: "invalid_json" });
     return { statusCode: 400, body: "Invalid JSON" };
   }
+  console.log(`[chatMessage] inbound frame: action=${(frame as any)?.action} toolName=${(frame as any)?.toolName ?? "(n/a)"} connectionId=${connectionId}`);
   if (frame.action !== "chatMessage" && frame.action !== "confirmAction") {
     await postFrame(api, connectionId, { type: "error", reason: "invalid_frame" });
     return { statusCode: 400, body: "Invalid frame" };
@@ -270,26 +347,48 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
 
   // ---- 2b. confirmAction shortcut: bypass the LLM, run the confirm_* tool directly ----
   if (frame.action === "confirmAction") {
-    const auth: AuthContext = {
-      userSub: session.userSub,
-      userGroups: [],
-      userType: session.agentType === "clinic" ? "clinic" : session.agentType === "professional" ? "professional" : "public",
-    };
-    const result = await executeTool(
-      { toolName: frame.toolName, input: frame.payload },
-      auth,
-      connectionId,
-      session.userContext as any,
-    );
-    await postFrame(api, connectionId, {
-      type: "toolResult",
-      tool: frame.toolName,
-      ok: result.ok,
-      data: result.ok ? result.data : undefined,
-      error: result.ok ? undefined : result.error,
-    });
-    await postFrame(api, connectionId, { type: "final", stopReason: "user_confirmed" });
-    return { statusCode: 200, body: "ok" };
+    console.log(`[chatMessage] confirmAction enter — toolName=${frame.toolName} payloadKeys=${Object.keys(frame.payload || {}).join(",")} userSub=${session.userSub}`);
+    try {
+      const auth: AuthContext = {
+        userSub: session.userSub,
+        userGroups: session.userGroups || [],
+        userType: session.agentType === "clinic" ? "clinic" : session.agentType === "professional" ? "professional" : "public",
+      };
+      const result = await executeTool(
+        { toolName: frame.toolName, input: frame.payload },
+        auth,
+        connectionId,
+        session.userContext as any,
+      );
+      console.log(`[chatMessage] confirmAction result — tool=${frame.toolName} ok=${result.ok} error=${result.ok ? "(none)" : result.error}`);
+      await postFrame(api, connectionId, {
+        type: "toolResult",
+        tool: frame.toolName,
+        ok: result.ok,
+        data: result.ok ? result.data : undefined,
+        // Guarantee a non-empty error string so the widget renders a usable
+        // message rather than the dreaded "undefined".
+        error: result.ok ? undefined : (result.error || "Tool returned no error detail"),
+      });
+      await postFrame(api, connectionId, { type: "final", stopReason: "user_confirmed" });
+      return { statusCode: 200, body: "ok" };
+    } catch (err: any) {
+      console.error("[chatMessage] confirmAction unhandled error", err);
+      // Best-effort error frame so the widget shows something specific
+      // instead of falling back to "Error (undefined)". If postFrame itself
+      // is what threw, the inner try silently swallows that — nothing more
+      // we can do at that point.
+      try {
+        await postFrame(api, connectionId, {
+          type: "error",
+          reason: "confirm_failed",
+          detail: err?.message || String(err) || "Unknown confirm error",
+        });
+      } catch (postErr) {
+        console.error("[chatMessage] postFrame error frame ALSO failed", postErr);
+      }
+      return { statusCode: 500, body: "confirm_failed" };
+    }
   }
 
   // ---- 3. Resolve Bedrock target ----
@@ -308,7 +407,7 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
   // the synthetic anon-* userSub the connect handler stored.
   const auth: AuthContext = {
     userSub: session.userSub,
-    userGroups: [], // Phase 1: agent-level scoping handled at $connect; per-tool group checks live in the run* fns.
+    userGroups: session.userGroups || [],
     userType: session.agentType === "clinic" ? "clinic" : session.agentType === "professional" ? "professional" : "public",
   };
 
@@ -354,8 +453,14 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
               returnControlInvocationResults,
             }
           : undefined,
-        enableTrace: false,
+        // Trace enabled: surfaces guardrail decisions, model rationale, and
+        // any safety-decline cause in the event stream. Required to diagnose
+        // canned "Sorry, I am unable to assist..." responses — without trace
+        // we only see the user-facing text and have no idea why.
+        enableTrace: true,
       });
+
+      console.log(`[chatMessage] InvokeAgent loop=${loop} sessionId=${session.bedrockSessionId} hasReturnControl=${!!returnControlInvocationResults} inputText="${(inputText || "").slice(0, 120)}"`);
 
       const response = await bedrock.send(command);
       if (!response.completion) {
@@ -365,10 +470,12 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
 
       let pendingToolCalls: ToolCall[] = [];
       let pendingInvocationId: string | undefined;
+      let assistantTextThisTurn = "";
 
       for await (const event of response.completion) {
         if (event.chunk?.bytes) {
           const delta = decoder.decode(event.chunk.bytes);
+          assistantTextThisTurn += delta;
           await postFrame(api, connectionId, { type: "token", delta });
           continue;
         }
@@ -393,7 +500,29 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
             }
           }
         }
+
+        // Trace events — log a compact view so we can see what Bedrock was
+        // actually doing on every turn. The trace object is deep; stringify
+        // and truncate to keep the log bytes reasonable.
+        if (event.trace) {
+          try {
+            const t = event.trace;
+            const truncated = JSON.stringify(t).slice(0, 1800);
+            console.log(`[chatMessage] trace loop=${loop}: ${truncated}`);
+          } catch {
+            console.log(`[chatMessage] trace loop=${loop}: <unserializable>`);
+          }
+        }
+
+        // Catch any other unhandled event keys.
+        const knownKeys = new Set(["chunk", "returnControl", "trace"]);
+        const unknown = Object.keys(event).filter((k) => !knownKeys.has(k));
+        if (unknown.length > 0) {
+          console.log(`[chatMessage] unknown event keys loop=${loop}: ${unknown.join(",")} payload=${JSON.stringify(event).slice(0, 800)}`);
+        }
       }
+
+      console.log(`[chatMessage] turn complete loop=${loop} pendingToolCalls=${pendingToolCalls.length} assistantTextLen=${assistantTextThisTurn.length} text="${assistantTextThisTurn.slice(0, 200)}"`);
 
       // No tool calls => assistant turn is complete.
       if (pendingToolCalls.length === 0) {

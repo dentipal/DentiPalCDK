@@ -667,6 +667,8 @@ import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as location from 'aws-cdk-lib/aws-location';
 import * as eventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as bedrock from 'aws-cdk-lib/aws-bedrock';
+import * as cr from 'aws-cdk-lib/custom-resources';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as path from 'path';
 
 export class DentiPalCDKStack extends cdk.Stack {
@@ -1240,6 +1242,19 @@ export class DentiPalCDKStack extends cdk.Stack {
             projectionType: dynamodb.ProjectionType.ALL,
         });
 
+        // 22. DentiPal-PasswordOtp — short-lived OTPs for password-change flows.
+        //     PK = userSub, single row per user; overwrites on resend.
+        //     expiresAt is a UNIX epoch (s) used as DynamoDB TTL — DDB
+        //     auto-deletes expired rows within ~48h, but our handler also
+        //     enforces expiry in code so stale OTPs cannot be used.
+        const passwordOtpTable = new dynamodb.Table(this, 'PasswordOtpTable', {
+            tableName: 'DentiPal-V5-PasswordOtp',
+            partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            timeToLiveAttribute: 'expiresAt',
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+
         // Collect all tables for the main REST handler
         const allTables = [
             clinicProfilesTable, clinicFavoritesTable, clinicsTable, connectionsTable,
@@ -1247,7 +1262,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             jobNegotiationsTable, jobPostingsTable, messagesTable,
             professionalProfilesTable, referralsTable, userAddressesTable,
             userClinicAssignmentsTable, jobPromotionsTable,
-            leadsTable, leadActivityTable, bansTable,
+            leadsTable, leadActivityTable, bansTable, passwordOtpTable,
             notificationPreferencesTable,
             notificationsTable,
         ];
@@ -1394,6 +1409,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 LEADS_TABLE: leadsTable.tableName,
                 LEAD_ACTIVITY_TABLE: leadActivityTable.tableName,
                 BANS_TABLE: bansTable.tableName,
+                PASSWORD_OTP_TABLE: passwordOtpTable.tableName,
 
                 // Stats/Alias mappings for code compatibility
                 CLINIC_JOBS_POSTED_TABLE: jobPostingsTable.tableName,
@@ -1445,7 +1461,8 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'cognito-idp:AdminInitiateAuth',
                 'cognito-idp:AdminRespondToAuthChallenge',
                 'cognito-idp:AdminDisableUser',
-                'cognito-idp:AdminEnableUser'
+                'cognito-idp:AdminEnableUser',
+                'cognito-idp:AdminUserGlobalSignOut'
             ],
             resources: [userPool.userPoolArn],
         }));
@@ -1824,7 +1841,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 parameters: {
                     radiusMiles: NUM('OPTIONAL. Search radius in miles (default 50). Only pass if user asked for a specific distance.'),
                     jobType: STR('OPTIONAL. temporary | multi_day_consulting | permanent. Only pass if user mentioned a specific type.'),
-                    professionalRole: STR('OPTIONAL. Role filter in snake_case: dental_hygienist, dentist, associate_dentist, dental_assistant, expanded_functions_da, dual_role_front_da, patient_coordinator_front, treatment_coordinator_front, hygienist, dh_tc_pc. Only pass if user explicitly named a different role than their own.'),
+                    professionalRole: STR('OPTIONAL — usually leave UNSET. Server already returns jobs relevant to the user; setting role NARROWS results and often empties them. Only pass if the user explicitly names a DIFFERENT role (e.g. "show me dentist jobs"). Format: snake_case dbValue (dental_hygienist | dentist | associate_dentist | dental_assistant | expanded_functions_da | dual_role_front_da | patient_coordinator_front | treatment_coordinator_front | hygienist | dh_tc_pc). NEVER pass Cognito-group form like "DentalHygienist".'),
                     shiftSpeciality: STR('OPTIONAL. Specialty filter. Only pass if user mentioned one.'),
                     minRate: NUM('OPTIONAL. Minimum rate. Only pass if user specified.'),
                     maxRate: NUM('OPTIONAL. Maximum rate. Only pass if user specified.'),
@@ -1886,8 +1903,8 @@ export class DentiPalCDKStack extends cdk.Stack {
             { name: 'get_my_applications', description: 'List the professional\'s applications and statuses.', parameters: {} },
             { name: 'get_my_invitations', description: 'List pending clinic invitations.', parameters: {} },
             { name: 'get_my_negotiations', description: 'List the pro\'s open negotiations.', parameters: {} },
-            { name: 'get_scheduled_shifts', description: 'List accepted, future shifts for the pro.', parameters: { clinicId: STR('Optional clinic filter') } },
-            { name: 'get_completed_shifts', description: 'List the pro\'s completed shifts.', parameters: { clinicId: STR('Optional clinic filter') } },
+            { name: 'get_scheduled_shifts', description: 'List the professional\'s accepted upcoming shifts. No parameters — the pro\'s own applications with status="accepted" or "scheduled" are returned.', parameters: {} },
+            { name: 'get_completed_shifts', description: 'List the professional\'s completed shifts. No parameters — returns the pro\'s own completed applications.', parameters: {} },
             // --- response: apply ---
             {
                 name: 'preview_apply_to_job',
@@ -2129,7 +2146,7 @@ export class DentiPalCDKStack extends cdk.Stack {
         const clinicAgentFunctions = [
             // --- info ---
             { name: 'get_my_clinics', description: 'List clinics the current user manages. Use BEFORE post_*_job.', parameters: {} },
-            { name: 'get_action_needed', description: 'List items needing the clinic\'s action.', parameters: { clinicId: STR('Clinic UUID', true) } },
+            { name: 'get_action_needed', description: 'Returns all pending applicants and open negotiations across a clinic\'s job postings. Use this for "recent applicants", "pending applicants", "what needs my attention", "what\'s pending". Pass the clinicId (auto-pick the first if the user manages only one).', parameters: { clinicId: STR('Clinic UUID', true) } },
             { name: 'get_open_shifts', description: 'List upcoming unfilled shifts for a clinic.', parameters: { clinicId: STR('Clinic UUID', true) } },
             { name: 'get_scheduled_shifts', description: 'List accepted, future shifts for a clinic.', parameters: { clinicId: STR('Optional clinic filter') } },
             { name: 'get_completed_shifts', description: 'List completed shifts for a clinic.', parameters: { clinicId: STR('Optional clinic filter') } },
@@ -2635,13 +2652,35 @@ export class DentiPalCDKStack extends cdk.Stack {
             description: 'DentiPal natural-language assistant for dental professionals — search jobs, apply, negotiate, manage shifts.',
             agentResourceRoleArn: bedrockAgentServiceRole.roleArn,
             foundationModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+            // Auto-prepare DRAFT on every deploy so the live alias actually
+            // serves the new tool list. Without this, CfnAgent updates land in
+            // DRAFT but the numbered version (which the alias serves) stays
+            // stuck on the original deploy — agent uses stale legacy tools.
+            autoPrepare: true,
             idleSessionTtlInSeconds: 900, // 15 min, matches ChatConnections TTL
             instruction: [
-                'You are DentiPal Assistant for dental professionals. Be action-first: when the user expresses intent, IMMEDIATELY call the matching tool with sensible defaults from their context. DO NOT ask clarifying questions before calling a tool — only ask if a tool returns an error naming a missing field.',
+                '═══ ROLE ═══',
+                'You serve DENTAL PROFESSIONALS ONLY. The user is a hygienist / dentist / assistant looking for shifts. They DO NOT own or manage clinics. They DO NOT post jobs. They DO NOT see applicants. They APPLY to jobs that clinics post.',
+                'NEVER ask the user "which clinic?" — they don\'t have any. NEVER act as if they have a clinicId. NEVER mention posting jobs.',
+                '═══════════',
+                '',
+                '═══ ABSOLUTE RULE FOR APPLY (read this every turn) ═══',
+                'If the user expresses ANY intent to apply to a job — "apply", "I want this one", "go for it", "submit me", anything similar — your NEXT action is EXACTLY one tool call: apply_to_job({jobId}).',
+                'Forbidden before that tool call:',
+                '  • Asking "what rate would you like to propose?" — apply_to_job has no rate parameter. Don\'t ask.',
+                '  • Asking "what is your availability?" — apply_to_job has no availability parameter. Don\'t ask.',
+                '  • Asking "any message for the clinic?" — message is optional and only included if the user already typed one unprompted. Don\'t ask.',
+                '  • Asking "should I proceed?" / "are you sure?" — apply_to_job IS the action. There is no preview step.',
+                '  • Any other clarifying question.',
+                'If you find yourself about to ask any question before calling apply_to_job: STOP, discard the question, call apply_to_job({jobId}) immediately.',
+                'The clinic\'s posted rate is implicit. The professional applies at the posted rate. Rate negotiation is a SEPARATE flow (preview_negotiate) that ONLY happens AFTER apply succeeds, AND ONLY if the user explicitly mentioned a counter rate in their original message (e.g. "apply at $80").',
+                '════════════════════════════════════════════════',
+                '',
+                'Be action-first: when the user expresses intent, IMMEDIATELY call the matching tool with sensible defaults from their context. DO NOT ask clarifying questions before calling a tool — only ask if a tool returns an error naming a missing field.',
                 '',
                 'Intent → tool map (call IMMEDIATELY, no questions):',
                 '- "search jobs" / "find work" / "show shifts" / "what\'s available" → search_jobs_near_me with NO parameters. The server already knows the user\'s 50-mile radius from their home address.',
-                '- "apply to N" / "apply to that one" / "apply to the third one" → apply_to_job with just {jobId: <resolved from prior search results>}. NEVER ask for rate, message, or availability — those are optional.',
+                '- "apply to N" / "apply to that one" / "apply to the third one" / "I\'ll take that one" → apply_to_job({jobId}) IMMEDIATELY. See ABSOLUTE RULE above. No questions.',
                 '- "my invites" / "who invited me" → get_my_invitations.',
                 '- "accept invite N" / "decline invite N" → respond_invitation with {invitationId, response: "accepted"|"declined"}. No follow-up questions.',
                 '- "my applications" / "what did I apply to" → get_my_applications.',
@@ -2653,11 +2692,44 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "the first/second/third one", "that job", "the latest" → resolve from the MOST RECENT tool result in your conversation memory. Don\'t ask the user "which one?".',
                 '- "negotiate on my latest" → call get_my_applications first if needed, then use the most recent applicationId + its negotiationId.',
                 '',
-                'Apply vs. negotiate (important):',
-                '- Pure apply (apply_to_job) DOES NOT take any rate. The clinic\'s posted rate is implicit.',
-                '- Rates only come into play during a negotiation (preview_negotiate). If the user says "apply at $80", interpret as a counter-offer flow: call apply_to_job first to create the application, then preview_negotiate to send the counter.',
+                '═══ AFTER LIST TOOLS — ONE SHORT LINE ONLY ═══',
+                'When a tool returns a LIST (search_jobs_near_me, get_my_invitations, get_my_applications, get_my_negotiations, get_scheduled_shifts, get_completed_shifts, get_my_clinics), respond with EXACTLY ONE short sentence and stop. Examples: "Here you go." / "Found 5." / "No pending invitations." The UI renders the cards — your sentence is just a verbal handoff.',
+                'NEVER list, number, bullet, repeat, or recap the items. NEVER use markdown bold or numbered lists. The cards already show the data.',
+                'NEVER respond with an empty turn — always emit one sentence, even if very short.',
+                '═════════════════════════════════════════════════',
                 '',
-                'When a tool returns results, summarize concisely in 1-2 sentences AND let the rendered card do the heavy lifting. Don\'t dump JSON. Don\'t list every field. Trust the UI to show the list.',
+                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields.',
+                '',
+                'When a tool returns a single-shot result (apply_to_job, respond_invitation), one short sentence is fine ("Applied. Status: pending.").',
+                '',
+                'NEVER paraphrase or guess numbers, dates, rates, names, or IDs from a tool result — use them verbatim or refer to the card. If the tool returned zero results, say so plainly ("you have no scheduled shifts right now") instead of fabricating.',
+                '',
+                '═══ FEW-SHOT EXAMPLES (match this exact behavior) ═══',
+                'USER: "search jobs near me"',
+                'YOU: <call search_jobs_near_me({}) immediately — no questions about role, rate, date>',
+                '',
+                'USER: "apply to the second one"',
+                'YOU: <call apply_to_job({jobId: "<UUID of the 2nd result from the last search>"}) — NO other parameters, NO message>',
+                'YOU (after tool returns): "Done — applied. Status: pending."',
+                'WRONG: "What rate would you like to propose?" — FORBIDDEN. apply_to_job has no rate.',
+                'WRONG: "What\'s your availability?" — FORBIDDEN. apply_to_job has no availability.',
+                'WRONG: "Any message for the clinic?" — FORBIDDEN. Don\'t solicit a message.',
+                'WRONG: "Are you sure you want to apply?" — FORBIDDEN. Just apply.',
+                '',
+                'USER: "I want to apply to this one"',
+                'YOU: <call apply_to_job({jobId: "<UUID of the job most recently discussed>"}) — no questions>',
+                '',
+                'USER: "apply to job <uuid> with note: looking forward to it"',
+                'YOU: <call apply_to_job({jobId: "<uuid>", message: "looking forward to it"}) — the user volunteered the message, so include it; still no rate, no availability>',
+                '',
+                'USER: "apply at $80/hr to the third one" (rate explicitly stated by user)',
+                'YOU: <STEP 1: apply_to_job({jobId: "<UUID>"}) — no rate goes in this call>',
+                'YOU: <STEP 2 (only after STEP 1 returned): preview_negotiate({applicationId, negotiationId, response: "counter_offer", professionalCounterRate: 80})>',
+                'YOU: "Applied and sent a counter-offer at $80/hr — waiting for the clinic to respond."',
+                '',
+                'USER: "decline invite 1"',
+                'YOU: <call respond_invitation({invitationId: "<UUID of 1st invite from get_my_invitations>", response: "declined"}) immediately>',
+                '═════════════════════════════════════════════════',
             ].join('\n'),
             guardrailConfiguration: {
                 guardrailIdentifier: chatGuardrail.attrGuardrailId,
@@ -2688,16 +2760,24 @@ export class DentiPalCDKStack extends cdk.Stack {
             description: 'DentiPal natural-language assistant for clinic staff — post jobs, manage applicants, hire/reject, see action-needed.',
             agentResourceRoleArn: bedrockAgentServiceRole.roleArn,
             foundationModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+            // Same reason as the pro agent — without this every CDK update
+            // gets stuck in DRAFT.
+            autoPrepare: true,
             idleSessionTtlInSeconds: 900,
             instruction: [
-                'You are DentiPal Assistant for clinic staff. Be action-first: when the user expresses intent, IMMEDIATELY call the matching tool. DO NOT ask clarifying questions before calling a tool — only ask if a tool returns an error naming a missing field.',
+                '═══ ROLE ═══',
+                'You serve DENTAL CLINIC STAFF ONLY. The user is a clinic admin / manager. They MANAGE clinics. They POST jobs. They REVIEW applicants and HIRE professionals. They DO NOT apply to jobs themselves. They DO NOT have scheduled shifts of their own.',
+                'NEVER act as if the user is a professional looking for work. NEVER call professional-side tools like search_jobs_near_me or apply_to_job.',
+                '═══════════',
+                '',
+                'Be action-first: when the user expresses intent, IMMEDIATELY call the matching tool. DO NOT ask clarifying questions before calling a tool — only ask if a tool returns an error naming a missing field.',
                 '',
                 'Intent → tool map (call IMMEDIATELY):',
                 '- "my clinics" / "which clinics do I manage" → get_my_clinics.',
-                '- "what needs my attention" / "action items" / "what\'s pending" → get_action_needed. (If multiple clinics exist and user didn\'t name one, silently pick the first from get_my_clinics — don\'t ask.)',
-                '- "who applied to job X" / "applicants" → list_applicants_for_job.',
+                '- "what needs my attention" / "action items" / "what\'s pending" / "recent applicants" / "pending applicants" / "applicants" (with no specific job named) → get_action_needed. This returns all pending applicants + negotiations across the clinic\'s jobs in one call. If multiple clinics exist and user didn\'t name one, silently pick the first from get_my_clinics — don\'t ask.',
+                '- "who applied to job X" / "applicants for <job>" (a specific job is named) → list_applicants_for_job with that jobId.',
                 '- "show me <name>\'s profile" / "tell me about that pro" → get_professional_info.',
-                '- "post a temp shift" / "post a job" → preview_post_temporary_job (then wait for user confirm).',
+                '- "post a temp shift" / "post a job" → If you have ALL required fields (clinic, role, date, start_time, end_time, rate, shift_speciality), call preview_post_temporary_job IMMEDIATELY. If anything is missing, ask for the missing pieces in ONE short conversational sentence with an inline example — NEVER as a numbered checklist, never with bold markdown, never asking 8 questions at once. Example response when ALL fields are missing: "Sure — clinic, role, date, time window, and rate? e.g., \'Qwerty Clinic, Dental Assistant, May 21 9am–2pm, $50/hr\'". When only the rate is missing: "What rate? e.g., $40/hr".',
                 '- "accept <pro>" / "hire <pro> for job X" → preview_accept_professional → wait for confirm.',
                 '- "reject <pro>" / "decline <pro>" → preview_reject_professional → wait for confirm.',
                 '',
@@ -2708,7 +2788,17 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '',
                 'When a tool returns an error (e.g. validation), THEN and only then ask the user for the specific missing field. Never pre-emptively interrogate.',
                 '',
-                'When a tool returns results, summarize concisely in 1-2 sentences and let the rendered card show the details. Don\'t dump JSON or list every field.',
+                '═══ AFTER LIST TOOLS — ONE SHORT LINE ONLY ═══',
+                'When a tool returns a LIST (get_my_clinics, get_action_needed, list_applicants_for_job, get_open_shifts), respond with EXACTLY ONE short sentence and stop. Examples: "Here you go." / "Found 3 pending applicants." / "No applicants yet." The UI renders the cards — your sentence is just a verbal handoff.',
+                'NEVER list, number, bullet, repeat, or recap the items. NEVER use markdown bold or numbered lists. The cards already show the data.',
+                'NEVER respond with an empty turn — always emit one sentence, even if very short. If you need to ask a follow-up to proceed (e.g., missing rate when posting), do so in ONE sentence.',
+                '═════════════════════════════════════════════════',
+                '',
+                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields.',
+                '',
+                'When a tool returns a single-shot success (e.g., accept_professional confirmed), one short sentence is fine.',
+                '',
+                'NEVER paraphrase or guess numbers, dates, rates, names, or IDs from a tool result — use them verbatim or refer to the card. If the tool returned zero results, say so plainly instead of fabricating.',
             ].join('\n'),
             guardrailConfiguration: {
                 guardrailIdentifier: chatGuardrail.attrGuardrailId,
@@ -2727,6 +2817,84 @@ export class DentiPalCDKStack extends cdk.Stack {
             agentId: clinicAgent.attrAgentId,
             description: 'Production alias for the clinic agent.',
         });
+
+        // --- 6a.3c Alias bumper — keeps `live` tracking the latest DRAFT ---
+        //
+        // Bedrock aliases are pinned to a single numbered version (1, 2, 3…).
+        // `autoPrepare: true` updates DRAFT on every deploy, but the alias
+        // KEEPS pointing to whatever version it was first created with — so
+        // every CDK update silently no-ops the runtime unless we re-point the
+        // alias by hand. This custom resource automates that re-point on
+        // every `cdk deploy` by:
+        //   1. PrepareAgent (idempotent) — ensures DRAFT is settled.
+        //   2. CreateAgentAlias (throwaway) — the ONLY API that snapshots
+        //      DRAFT into a new numbered version. We want the version, not
+        //      the alias.
+        //   3. UpdateAgentAlias on `live` → point to that new version.
+        //   4. DeleteAgentAlias on the throwaway.
+        //
+        // The `deployTimestamp` property forces CloudFormation to re-run the
+        // CR on every deploy regardless of whether the agent definition
+        // actually changed — small Lambda cost (~30-60s) traded for never
+        // needing to remember "did I bump the alias?".
+        const aliasBumperFn = new lambda.Function(this, 'AliasBumperFn', {
+            functionName: 'DentiPal-AliasBumper',
+            runtime: lambda.Runtime.NODEJS_18_X,
+            handler: 'dist/handlers/internal/bumpAliases.handler',
+            code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
+            timeout: cdk.Duration.minutes(10),
+            memorySize: 256,
+            environment: { REGION: this.region },
+            logRetention: logs.RetentionDays.ONE_WEEK,
+        });
+        aliasBumperFn.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'bedrock:PrepareAgent',
+                'bedrock:GetAgent',
+                'bedrock:CreateAgentAlias',
+                'bedrock:GetAgentAlias',
+                'bedrock:ListAgentAliases',
+                'bedrock:UpdateAgentAlias',
+                'bedrock:DeleteAgentAlias',
+            ],
+            resources: [
+                `arn:aws:bedrock:${this.region}:${this.account}:agent/${professionalAgent.attrAgentId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent/${clinicAgent.attrAgentId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${professionalAgent.attrAgentId}/*`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${clinicAgent.attrAgentId}/*`,
+            ],
+        }));
+
+        const aliasBumperProvider = new cr.Provider(this, 'AliasBumperProvider', {
+            onEventHandler: aliasBumperFn,
+            logRetention: logs.RetentionDays.ONE_WEEK,
+        });
+
+        // Force re-run on every deploy by feeding a fresh timestamp.
+        // Stored as a CR property so CFN diff sees a change every synth.
+        const bumperTimestamp = new Date().toISOString();
+
+        const proAliasBumper = new cdk.CustomResource(this, 'ProAliasBumper', {
+            serviceToken: aliasBumperProvider.serviceToken,
+            properties: {
+                agentId: professionalAgent.attrAgentId,
+                aliasId: professionalAgentAlias.attrAgentAliasId,
+                aliasName: 'live',
+                deployTimestamp: bumperTimestamp,
+            },
+        });
+        proAliasBumper.node.addDependency(professionalAgentAlias);
+
+        const clinicAliasBumper = new cdk.CustomResource(this, 'ClinicAliasBumper', {
+            serviceToken: aliasBumperProvider.serviceToken,
+            properties: {
+                agentId: clinicAgent.attrAgentId,
+                aliasId: clinicAgentAlias.attrAgentAliasId,
+                aliasName: 'live',
+                deployTimestamp: bumperTimestamp,
+            },
+        });
+        clinicAliasBumper.node.addDependency(clinicAgentAlias);
 
         // --- 6a.4 chatMessage Lambda — handles the new WebSocket route ---
         const chatMessageHandler = new lambda.Function(this, 'ChatMessageHandler', {
@@ -2783,15 +2951,25 @@ export class DentiPalCDKStack extends cdk.Stack {
         userClinicAssignmentsTable.grantReadWriteData(chatMessageHandler); // upgraded for team management (Phase 4)
         professionalProfilesTable.grantReadWriteData(chatMessageHandler);
         userAddressesTable.grantReadWriteData(chatMessageHandler); // upgraded for update_home_address (Phase 4)
+        // getProfessionalFilteredJobs overlays "promoted" jobs on top of search
+        // results by Query-ing JobPromotions/status-expiresAt-index. Without
+        // this grant the canonical pro search throws AccessDeniedException at
+        // /var/task/dist/handlers/getProfessionalFilteredJobs.js:164.
+        jobPromotionsTable.grantReadWriteData(chatMessageHandler);
         // Phase 4: notifications, feedback, referrals
         notificationPreferencesTable.grantReadWriteData(chatMessageHandler);
         feedbackTable.grantReadWriteData(chatMessageHandler);
         referralsTable.grantReadWriteData(chatMessageHandler);
 
-        // Cognito AdminGetUser — some handlers (createTemporaryJob, etc.)
-        // pull given_name / family_name claims for the `created_by` field.
+        // Cognito access — AdminGetUser for given_name/family_name (used by
+        // refactored handlers like createTemporaryJob), AdminListGroupsForUser
+        // for the chatbot's server-side agent-type override (resolves whether
+        // the caller is clinic vs professional from groups, source of truth).
         chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
-            actions: ['cognito-idp:AdminGetUser'],
+            actions: [
+                'cognito-idp:AdminGetUser',
+                'cognito-idp:AdminListGroupsForUser',
+            ],
             resources: [userPool.userPoolArn],
         }));
 
@@ -2842,10 +3020,21 @@ export class DentiPalCDKStack extends cdk.Stack {
             }, this)],
         }));
 
-        // --- 6a.5 Mount the new `chatMessage` route on the existing API ---
+        // --- 6a.5 Mount the new `chatMessage` and `confirmAction` routes ---
+        // Both routes target the SAME Lambda — the handler branches on
+        // frame.action internally. Without an explicit `confirmAction` route,
+        // API Gateway falls back to the existing $default handler (the user-
+        // to-user inbox lambda), which responds with `{type:"error", error:"..."}`
+        // — the widget reads `frame.reason` and renders "Error (undefined)".
         webSocketApi.addRoute('chatMessage', {
             integration: new apigwv2integrations.WebSocketLambdaIntegration(
                 'ChatMessageIntegration',
+                chatMessageHandler,
+            ),
+        });
+        webSocketApi.addRoute('confirmAction', {
+            integration: new apigwv2integrations.WebSocketLambdaIntegration(
+                'ConfirmActionIntegration',
                 chatMessageHandler,
             ),
         });
@@ -3044,6 +3233,62 @@ export class DentiPalCDKStack extends cdk.Stack {
         reminderRule.addTarget(new targets.LambdaFunction(sendShiftRemindersHandler));
 
         // ========================================================================
+        // 6b. Professional Backup Resources (delete-account only)
+        //     DynamoDB table (all field data) + S3 bucket (file copies only).
+        //     The delete-account handler runs inside the monolith and writes
+        //     a backup snapshot just-in-time before purging the user's data.
+        //     Encryption: DynamoDB default + S3-managed AES-256. No KMS.
+        // ========================================================================
+
+        // Single backup table: holds every professional's data + nested
+        // related rows (addresses, invitations, referrals) per snapshot.
+        // PK = userSub, SK = snapshotId (e.g. "2026-05-13T03:00:00Z" for
+        // daily backups, "delete-<ts>" for pre-deletion archives).
+        const professionalBackupTable = new dynamodb.Table(this, 'ProfessionalBackupTable', {
+            tableName: 'DentiPal-V5-ProfessionalBackup',
+            partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'snapshotId', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            pointInTimeRecovery: true,
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
+        });
+        // GSI to list all snapshots of a given type (daily / delete)
+        professionalBackupTable.addGlobalSecondaryIndex({
+            indexName: 'snapshotType-snapshotId-index',
+            partitionKey: { name: 'snapshotType', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'snapshotId', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
+        const profBackupsBucket = new s3.Bucket(this, 'ProfBackups', {
+            bucketName: `dentipal-prof-backups-${this.account}`,
+            versioned: true,
+            encryption: s3.BucketEncryption.S3_MANAGED,
+            blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            enforceSSL: true,
+            lifecycleRules: [{
+                id: 'archive-and-expire',
+                transitions: [
+                    { storageClass: s3.StorageClass.INFREQUENT_ACCESS, transitionAfter: cdk.Duration.days(30) },
+                    { storageClass: s3.StorageClass.GLACIER, transitionAfter: cdk.Duration.days(90) },
+                ],
+                expiration: cdk.Duration.days(730),
+                noncurrentVersionExpiration: cdk.Duration.days(90),
+            }],
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
+        });
+
+        // The delete-account handler runs inside the existing monolith Lambda
+        // (wired via index.ts router as DELETE /professionals/me/account).
+        // The monolith already has Cognito AdminDeleteUser, ReadWrite on all
+        // source buckets, and ReadWrite on all live tables. We grant it
+        // write access to the backup bucket + backup table and expose names.
+        profBackupsBucket.grantReadWrite(lambdaFunction);
+        professionalBackupTable.grantReadWriteData(lambdaFunction);
+        lambdaFunction.addEnvironment('BACKUP_BUCKET', profBackupsBucket.bucketName);
+        lambdaFunction.addEnvironment('PROFESSIONAL_BACKUP_TABLE', professionalBackupTable.tableName);
+
+        // ========================================================================
         // 7. Outputs
         // ========================================================================
         new cdk.CfnOutput(this, 'UserPoolId', { value: userPool.userPoolId });
@@ -3057,5 +3302,9 @@ export class DentiPalCDKStack extends cdk.Stack {
         new cdk.CfnOutput(this, 'VideoResumesBucketName', { value: videoResumesBucket.bucketName });
         new cdk.CfnOutput(this, 'DrivingLicensesBucketName', { value: drivingLicensesBucket.bucketName });
         new cdk.CfnOutput(this, 'ProfessionalLicensesBucketName', { value: professionalLicensesBucket.bucketName });
+
+        // Backup-related outputs
+        new cdk.CfnOutput(this, 'ProfBackupsBucketName', { value: profBackupsBucket.bucketName });
+        new cdk.CfnOutput(this, 'ProfessionalBackupTableName', { value: professionalBackupTable.tableName });
     }
 }
