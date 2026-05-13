@@ -1,4 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context, Handler } from 'aws-lambda';
+import { checkSessionNotInvalidated, SessionInvalidatedError } from "./handlers/utils";
 
 import { handler as createUserHandler } from "./handlers/createUser";
 import { handler as getUserHandler } from "./handlers/getUser";
@@ -619,6 +620,53 @@ export const handler: Handler<APIGatewayProxyEvent | any, APIGatewayProxyResult>
                 tried: Array.from(candidates)
             })
         };
+    }
+
+    // --- STEP 3.5: Session-invalidation denylist check ---
+    // If the user's password was changed (or session otherwise force-revoked)
+    // AFTER this access token was issued, reject the request with 401 so the
+    // frontend redirects to login.
+    //
+    // We use a LIGHTWEIGHT decode here that only reads `sub` + `iat` — we do
+    // NOT call extractUserFromBearerToken / extractUserInfoFromClaims because
+    // those functions throw for users who don't yet have a `custom:user_type`
+    // attribute set (e.g. brand-new signups before the profile is created).
+    // The denylist check doesn't need userType — only sub + iat.
+    const authHeader = event.headers?.Authorization || event.headers?.authorization;
+    if (authHeader && httpMethod !== "OPTIONS") {
+        try {
+            const raw = authHeader.replace(/^Bearer\s+/i, "").trim();
+            const parts = raw.split(".");
+            if (parts.length === 3) {
+                const padded = parts[1] + "===".slice((parts[1].length + 3) % 4);
+                const payloadJson = Buffer.from(padded, "base64").toString("utf8");
+                const payload = JSON.parse(payloadJson);
+                if (payload?.sub && typeof payload.iat === "number") {
+                    await checkSessionNotInvalidated({
+                        sub: payload.sub,
+                        iat: payload.iat,
+                        // Minimal shim — checkSessionNotInvalidated only reads sub + iat
+                        userType: "",
+                        groups: [],
+                    });
+                }
+            }
+        } catch (err: any) {
+            if (err instanceof SessionInvalidatedError) {
+                return {
+                    statusCode: 401,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        error: "Unauthorized",
+                        code: "SESSION_INVALIDATED",
+                        message: "Your session is no longer valid. Please sign in again.",
+                    }),
+                };
+            }
+            // Any other decode error: let the downstream handler do its own
+            // auth check / return its own error. Public/unauthenticated
+            // endpoints don't have valid JWTs and that's fine.
+        }
     }
 
     // --- STEP 4: Execute Handler ---

@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
-    DynamoDBDocumentClient, GetCommand, UpdateCommand, DeleteCommand,
+    DynamoDBDocumentClient, GetCommand, UpdateCommand, DeleteCommand, PutCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { corsHeaders } from "../corsHeaders";
 import { extractUserFromBearerToken } from "../utils";
@@ -139,8 +139,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             Username: userSub,
         }));
 
-        // 8. Re-issue tokens so the current device stays logged in
+        // 8. Re-issue tokens FIRST so we know the exact `iat` of the new
+        //    access token. We then use that timestamp as the denylist
+        //    boundary, which guarantees the current device's brand-new
+        //    token passes the check (iat == invalidatedBefore → passes
+        //    because the router uses strict `<`).
         let newTokens: any = null;
+        let newTokenIat: number | undefined;
         if (email) {
             try {
                 const auth = await cognito.send(new AdminInitiateAuthCommand({
@@ -158,12 +163,52 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     refreshToken: auth.AuthenticationResult?.RefreshToken,
                     expiresIn: auth.AuthenticationResult?.ExpiresIn,
                 };
+
+                // Decode the new access token JWT to read its `iat`.
+                // Format: header.payload.signature — all base64url.
+                const access = newTokens.accessToken as string | undefined;
+                if (access) {
+                    const parts = access.split(".");
+                    if (parts.length === 3) {
+                        const padded = parts[1] + "===".slice((parts[1].length + 3) % 4);
+                        const payloadJson = Buffer.from(padded, "base64").toString("utf8");
+                        const payload = JSON.parse(payloadJson);
+                        if (typeof payload.iat === "number") newTokenIat = payload.iat;
+                    }
+                }
             } catch (e) {
                 console.warn("Re-auth after password change failed", e);
             }
         }
 
-        // 9. Clean up the OTP row
+        // 9. Write to the session-invalidation denylist so existing ACCESS
+        //    tokens (which Cognito does NOT revoke) are rejected by the
+        //    router on their next request.
+        //
+        //    invalidatedBefore = the new token's `iat` if we have it,
+        //    otherwise "now". Router check is strict `<`, so any token
+        //    issued strictly BEFORE the new one fails — the new token
+        //    itself (iat == invalidatedBefore) passes.
+        const invalidatedBefore = newTokenIat ?? Math.floor(Date.now() / 1000);
+        if (process.env.SESSION_INVALIDATIONS_TABLE) {
+            try {
+                await ddb.send(new PutCommand({
+                    TableName: process.env.SESSION_INVALIDATIONS_TABLE,
+                    Item: {
+                        userSub,
+                        invalidatedBefore,
+                        reason: "password_change",
+                        invalidatedAt: new Date().toISOString(),
+                        ttl: invalidatedBefore + 31 * 24 * 60 * 60,   // 31 days
+                    },
+                }));
+            } catch (e) {
+                console.error("Failed to write session invalidation", e);
+                // Not fatal — refresh-token invalidation still works.
+            }
+        }
+
+        // 10. Clean up the OTP row
         await ddb.send(new DeleteCommand({
             TableName: process.env.PASSWORD_OTP_TABLE!,
             Key: { userSub },

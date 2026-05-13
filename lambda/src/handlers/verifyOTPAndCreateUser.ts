@@ -63,84 +63,102 @@ interface CognitoAttribute {
  * @returns An EmailContent object.
  */
 function createCongratulationsEmail(fullName: string, userType: string): EmailContent {
-    const subject: string = "Welcome to DentiPal - Registration Complete!";
+    const subject: string = "Welcome to DentiPal";
     const isProfessional = userType === 'professional';
-    const accountLabel = isProfessional ? 'Professional' : 'Clinic';
+    const accountLabel = isProfessional ? 'professional' : 'clinic';
+    const escapeForHtml = (s: string) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] as string));
+    const safeName = escapeForHtml(fullName);
+    const fontStack = "-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+    const year = new Date().getFullYear();
 
-    const features = isProfessional ? [
-        { icon: "1", text: "Complete your professional profile" },
-        { icon: "2", text: "Browse available job opportunities" },
-        { icon: "3", text: "Get notified about relevant positions" },
-        { icon: "4", text: "Connect with dental clinics" },
-        { icon: "5", text: "Refer friends and earn rewards" },
+    const features: Array<{ title: string; body: string }> = isProfessional ? [
+        { title: "Complete your profile", body: "Upload your credentials and set your availability so clinics can find and evaluate you." },
+        { title: "Browse available shifts", body: "Review real-time openings in your area, with hourly rates and clinic details displayed in advance." },
+        { title: "Apply efficiently", body: "Your profile is submitted with every application, eliminating the need for repetitive paperwork." },
+        { title: "Receive timely notifications", body: "Be informed promptly when clinics post roles that match your qualifications." },
+        { title: "Participate in our referral program", body: "Invite qualified colleagues to the platform. Both parties receive rewards upon the completion of their first shift." },
     ] : [
-        { icon: "1", text: "Set up your clinic profile" },
-        { icon: "2", text: "Post job opportunities" },
-        { icon: "3", text: "Find qualified dental professionals" },
-        { icon: "4", text: "Build your favorite professionals list" },
-        { icon: "5", text: "Manage your hiring workflow" },
+        { title: "Configure your clinic profile", body: "Add your location, operating hours, and team details to give candidates a clear understanding of your practice." },
+        { title: "Publish your first shift", body: "Specify the role, set the compensation, and publish — the process typically takes under a minute." },
+        { title: "Discover qualified professionals", body: "Filter candidates by role, certifications, location, and availability." },
+        { title: "Build a list of preferred professionals", body: "Maintain a shortlist of trusted professionals you wish to engage again." },
+        { title: "Manage your hiring workflow", body: "Track applications, approvals, and shift history within a single, integrated workflow." },
     ];
 
-    const featureRowsHtml = features.map(f => `
-              <tr>
-                <td style="width:36px;padding:10px 0;">
-                  <div style="width:28px;height:28px;border-radius:50%;background:#f8ccc1;color:#532b21;font-size:13px;font-weight:700;text-align:center;line-height:28px;">${f.icon}</div>
-                </td>
-                <td style="padding:10px 0 10px 12px;font-size:15px;color:#333;border-bottom:1px solid #fde8e4;">${f.text}</td>
-              </tr>`).join("");
+    const featureRowsHtml = features.map((f, i) => {
+        const isLast = i === features.length - 1;
+        const border = isLast ? "" : "border-bottom:1px solid #e8e8ed;";
+        return `<tr>
+            <td valign="top" style="width:36px;padding:16px 0;${border}">
+              <div style="width:28px;height:28px;border-radius:50%;background:#1d1d1f;color:#ffffff;font-size:13px;font-weight:600;text-align:center;line-height:28px;letter-spacing:-0.01em;">${i + 1}</div>
+            </td>
+            <td style="padding:16px 0 16px 14px;${border}">
+              <p style="margin:0 0 4px;color:#1d1d1f;font-size:15px;font-weight:600;letter-spacing:-0.01em;">${escapeForHtml(f.title)}</p>
+              <p style="margin:0;color:#6e6e73;font-size:14px;line-height:1.5;letter-spacing:-0.005em;">${escapeForHtml(f.body)}</p>
+            </td>
+          </tr>`;
+    }).join("");
 
-    const htmlBody: string = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"/></head>
-<body style="margin:0;padding:0;background-color:#fff0f5;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#fff0f5;padding:32px 16px;">
-    <tr><td align="center">
-      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+    const htmlBody: string = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="color-scheme" content="light"/>
+<meta name="supported-color-schemes" content="light"/>
+<title>Welcome to DentiPal</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f7;font-family:${fontStack};-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">Your DentiPal ${accountLabel} account is verified and ready to use.</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f5f5f7;">
+    <tr><td align="center" style="padding:48px 16px;">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;">
 
-        <!-- Header -->
-        <tr><td style="background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);padding:40px;text-align:center;">
-          <h1 style="margin:0;font-size:32px;color:#532b21;letter-spacing:0.5px;">DentiPal</h1>
-          <p style="margin:8px 0 0;color:#7a4a3a;font-size:15px;">Connecting Dental Professionals</p>
+        <tr><td style="padding:0 8px 18px;text-align:center;">
+          <span style="display:inline-block;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-0.02em;">DentiPal</span>
         </td></tr>
 
-        <!-- Welcome Banner -->
-        <tr><td style="padding:32px 40px 0;text-align:center;">
-          <div style="background:linear-gradient(135deg,#532b21 0%,#7a4a3a 100%);color:#fff;padding:28px 32px;border-radius:14px;">
-            <p style="margin:0;font-size:14px;color:#f8ccc1;text-transform:uppercase;letter-spacing:1px;font-weight:600;">Welcome</p>
-            <h2 style="margin:8px 0 4px;font-size:24px;font-weight:700;">${fullName}</h2>
-            <p style="margin:0;font-size:14px;color:#ddd;">Your ${accountLabel} account is verified and ready to go</p>
-          </div>
-        </td></tr>
+        <tr><td style="background:#ffffff;border-radius:22px;box-shadow:0 1px 2px rgba(0,0,0,0.04),0 12px 40px rgba(0,0,0,0.06);overflow:hidden;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr><td style="padding:44px 40px 32px;">
 
-        <!-- Success Message -->
-        <tr><td style="padding:24px 40px;text-align:center;">
-          <p style="margin:0;font-size:15px;color:#666;line-height:1.6;">
-            You're now part of the DentiPal community &mdash; the premier platform connecting dental professionals with clinics.
-          </p>
-        </td></tr>
+              <p style="margin:0 0 10px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Account verified</p>
+              <h1 style="margin:0 0 14px;color:#1d1d1f;font-size:28px;font-weight:700;letter-spacing:-0.025em;line-height:1.15;">Welcome to DentiPal, ${safeName}</h1>
+              <p style="margin:0 0 28px;color:#424245;font-size:16px;line-height:1.55;letter-spacing:-0.01em;">
+                Your ${accountLabel} account has been successfully verified and is now active. You have joined a trusted network that connects dental professionals with the clinics that rely on their expertise.
+              </p>
 
-        <!-- What's Next -->
-        <tr><td style="padding:0 40px 8px;">
-          <p style="margin:0;font-size:13px;color:#999;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">What's Next</p>
-        </td></tr>
-        <tr><td style="padding:0 40px 24px;">
-          <table width="100%" style="background:#fef7f5;border-radius:12px;padding:8px 20px;" cellpadding="0" cellspacing="0">
-            ${featureRowsHtml}
+              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Recommended next steps</p>
+              <table cellpadding="0" cellspacing="0" width="100%" style="background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;margin:0 0 28px;">
+                <tr><td style="padding:0 22px;">
+                  <table width="100%" cellpadding="0" cellspacing="0">${featureRowsHtml}</table>
+                </td></tr>
+              </table>
+
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr><td align="center">
+                  <a href="https://dentipal.com/login" style="display:inline-block;background:#1d1d1f;color:#ffffff;padding:14px 32px;border-radius:980px;font-size:15px;font-weight:500;text-decoration:none;letter-spacing:-0.01em;line-height:1;">Open DentiPal</a>
+                </td></tr>
+                <tr><td align="center" style="padding-top:14px;">
+                  <p style="margin:0;color:#86868b;font-size:13px;letter-spacing:-0.005em;">Sign in using the email address provided during registration</p>
+                </td></tr>
+              </table>
+
+              <div style="margin:32px 0 0;padding:18px 20px;background:rgba(245,245,247,0.7);border:1px solid rgba(0,0,0,0.04);border-radius:14px;">
+                <p style="margin:0;color:#6e6e73;font-size:13px;line-height:1.55;letter-spacing:-0.005em;">
+                  Require assistance getting started? Simply reply to this email and a member of our team will respond promptly.
+                </p>
+              </div>
+
+            </td></tr>
           </table>
         </td></tr>
 
-        <!-- CTA Button -->
-        <tr><td style="padding:0 40px 32px;text-align:center;">
-          <a href="https://dentipal.com/login" style="display:inline-block;background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);color:#532b21;padding:14px 36px;border-radius:10px;font-weight:700;font-size:15px;text-decoration:none;letter-spacing:0.3px;">
-            Get Started Now
-          </a>
-        </td></tr>
-
-        <!-- Footer -->
-        <tr><td style="background:#fef7f5;padding:24px 40px;border-top:1px solid #fde8e4;text-align:center;">
-          <p style="margin:0 0 4px;font-size:13px;color:#999;">Need help? Contact us at support@dentipal.com</p>
-          <p style="margin:0;font-size:12px;color:#ccc;">DentiPal. All rights reserved.</p>
+        <tr><td style="padding:24px 24px 8px;text-align:center;">
+          <p style="margin:0 0 10px;color:#86868b;font-size:12px;line-height:1.55;letter-spacing:-0.005em;">
+            You are receiving this email because an account was recently created on DentiPal using this email address.
+          </p>
+          <p style="margin:18px 0 0;color:#a1a1a6;font-size:11px;letter-spacing:0.01em;">&copy; ${year} DentiPal</p>
         </td></tr>
 
       </table>
@@ -149,22 +167,20 @@ function createCongratulationsEmail(fullName: string, userType: string): EmailCo
 </body>
 </html>`;
 
-    const featureListText = features.map((f, i) => `  ${i + 1}. ${f.text}`).join("\n");
+    const featureListText = features.map((f, i) => `  ${i + 1}. ${f.title} — ${f.body}`).join("\n");
 
-    const textBody: string = `Welcome to DentiPal!
+    const textBody: string = `DentiPal
 
-Congratulations, ${fullName}!
+Welcome to DentiPal, ${fullName}
 
-Your ${accountLabel} account has been successfully created and verified.
+Your ${accountLabel} account has been successfully verified and is now active. You have joined a trusted network that connects dental professionals with the clinics that rely on their expertise.
 
-You're now part of the DentiPal community - the premier platform connecting dental professionals with clinics.
-
-What's Next:
+Recommended next steps:
 ${featureListText}
 
-Get started: https://dentipal.com/login
+Open DentiPal: https://dentipal.com/login
 
-Need help? Contact support@dentipal.com
+Require assistance getting started? Simply reply to this email and a member of our team will respond promptly.
 `;
 
     return { subject, htmlBody, textBody };

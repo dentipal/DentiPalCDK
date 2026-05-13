@@ -376,9 +376,11 @@ export function matchesFilters(item: Record<string, AttributeValue>, filters: {
   // Pay type filter
   if (filters.payType) {
     const jpt = (str(item.pay_type) || str(item.payType)).toLowerCase();
-    if (filters.payType === "hourly") {
-      // Default/empty pay type is treated as hourly
-      if (jpt && jpt !== "hourly") return false;
+    // Hourly jobs are stored as "per_hour"; tolerate either spelling from the
+    // client so both new (per_hour) and legacy (hourly) filter values work,
+    // and treat jobs with no pay_type as hourly (default).
+    if (filters.payType === "per_hour" || filters.payType === "hourly") {
+      if (jpt && jpt !== "per_hour" && jpt !== "hourly") return false;
     } else if (jpt !== filters.payType) {
       return false;
     }

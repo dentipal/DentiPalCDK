@@ -193,74 +193,91 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (sendWelcomeEmail) {
             console.log(`Attempting to send welcome email to ${email}...`);
 
-            const subject = "Your DentiPal Account Details";
+            const subject = "Welcome to DentiPal — your account has been created";
             const clinicsLine = Array.isArray(clinicIds) && clinicIds.length ? clinicIds.join(", ") : "";
+            const escapeForHtml = (s: string) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] as string));
+            const safeFirstName = escapeForHtml(firstName);
+            const safeEmail = escapeForHtml(email);
+            const safePassword = escapeForHtml(password);
+            const safeSubgroup = escapeForHtml(subgroup);
+            const safeClinics = escapeForHtml(clinicsLine);
+            const fontStack = "-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+            const year = new Date().getFullYear();
 
-            const htmlBody = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"/></head>
-<body style="margin:0;padding:0;background-color:#fff0f5;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#fff0f5;padding:32px 16px;">
-    <tr><td align="center">
-      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+            const credentialRow = (label: string, value: string, mono: boolean = false, isLast: boolean = false) => {
+                const border = isLast ? "" : "border-bottom:1px solid #e8e8ed;";
+                const valueStyle = mono
+                    ? `font-family:'SF Mono','Menlo','Consolas',monospace;font-size:14px;background:rgba(245,245,247,0.8);padding:6px 10px;border-radius:6px;display:inline-block;letter-spacing:0;`
+                    : `font-size:14px;letter-spacing:-0.01em;`;
+                return `<tr>
+                    <td style="padding:14px 0;color:#6e6e73;font-size:14px;font-weight:400;letter-spacing:-0.01em;${border}">${label}</td>
+                    <td style="padding:14px 0;color:#1d1d1f;font-weight:500;text-align:right;${border}"><span style="${valueStyle}">${value}</span></td>
+                </tr>`;
+            };
 
-        <!-- Header -->
-        <tr><td style="background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);padding:32px 40px;text-align:center;">
-          <h1 style="margin:0;font-size:28px;color:#532b21;letter-spacing:0.5px;">DentiPal</h1>
-          <p style="margin:8px 0 0;color:#7a4a3a;font-size:14px;">Account Created</p>
+            const htmlBody = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="color-scheme" content="light"/>
+<meta name="supported-color-schemes" content="light"/>
+<title>Your DentiPal account is ready</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f7;font-family:${fontStack};-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">Your DentiPal account has been created. Sign in and change your password to get started.</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f5f5f7;">
+    <tr><td align="center" style="padding:48px 16px;">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;">
+
+        <tr><td style="padding:0 8px 18px;text-align:center;">
+          <span style="display:inline-block;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-0.02em;">DentiPal</span>
         </td></tr>
 
-        <!-- Greeting -->
-        <tr><td style="padding:32px 40px 16px;">
-          <h2 style="margin:0;font-size:22px;color:#333;">Hello, ${firstName}!</h2>
-          <p style="margin:8px 0 0;font-size:15px;color:#666;">Your DentiPal account has been created by your administrator. Here are your login details:</p>
-        </td></tr>
+        <tr><td style="background:#ffffff;border-radius:22px;box-shadow:0 1px 2px rgba(0,0,0,0.04),0 12px 40px rgba(0,0,0,0.06);overflow:hidden;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr><td style="padding:44px 40px 32px;">
 
-        <!-- Credentials Card -->
-        <tr><td style="padding:0 40px 24px;">
-          <table width="100%" style="background:#fef7f5;border-radius:12px;" cellpadding="0" cellspacing="0">
-            <tr><td style="padding:20px 24px;">
-              <table width="100%" cellpadding="0" cellspacing="0" style="font-size:15px;">
-                <tr>
-                  <td style="padding:8px 0;color:#999;width:100px;">Email</td>
-                  <td style="padding:8px 0;font-weight:600;color:#333;">${email}</td>
-                </tr>
-                <tr>
-                  <td style="padding:8px 0;color:#999;border-top:1px solid #fde8e4;">Password</td>
-                  <td style="padding:8px 0;font-weight:600;color:#333;border-top:1px solid #fde8e4;font-family:monospace;background:#fff5f3;padding-left:8px;border-radius:4px;">${password}</td>
-                </tr>
-                <tr>
-                  <td style="padding:8px 0;color:#999;border-top:1px solid #fde8e4;">Role</td>
-                  <td style="padding:8px 0;font-weight:600;color:#333;border-top:1px solid #fde8e4;">${subgroup}</td>
-                </tr>
-                ${clinicsLine ? `<tr>
-                  <td style="padding:8px 0;color:#999;border-top:1px solid #fde8e4;">Clinics</td>
-                  <td style="padding:8px 0;font-weight:600;color:#333;border-top:1px solid #fde8e4;">${clinicsLine}</td>
-                </tr>` : ""}
+              <p style="margin:0 0 10px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Account created</p>
+              <h1 style="margin:0 0 14px;color:#1d1d1f;font-size:28px;font-weight:700;letter-spacing:-0.025em;line-height:1.15;">Welcome, ${safeFirstName}</h1>
+              <p style="margin:0 0 28px;color:#424245;font-size:16px;line-height:1.55;letter-spacing:-0.01em;">
+                Your administrator has created a DentiPal account on your behalf. Please use the credentials provided below to sign in. For security reasons, you will be prompted to change your password upon your first sign-in.
+              </p>
+
+              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Your sign-in credentials</p>
+              <table cellpadding="0" cellspacing="0" width="100%" style="background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;margin:0 0 28px;">
+                <tr><td style="padding:6px 22px;">
+                  <table width="100%" cellpadding="0" cellspacing="0">
+                    ${credentialRow("Email", safeEmail)}
+                    ${credentialRow("Temporary password", safePassword, true)}
+                    ${credentialRow("Role", safeSubgroup, false, !safeClinics)}
+                    ${safeClinics ? credentialRow("Clinics", safeClinics, false, true) : ""}
+                  </table>
+                </td></tr>
               </table>
+
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr><td align="center">
+                  <a href="https://dentipal.com/login" style="display:inline-block;background:#1d1d1f;color:#ffffff;padding:14px 32px;border-radius:980px;font-size:15px;font-weight:500;text-decoration:none;letter-spacing:-0.01em;line-height:1;">Sign in to DentiPal</a>
+                </td></tr>
+              </table>
+
+              <div style="margin:32px 0 0;padding:18px 20px;background:rgba(245,245,247,0.7);border:1px solid rgba(0,0,0,0.04);border-radius:14px;">
+                <p style="margin:0 0 6px;color:#1d1d1f;font-size:13px;font-weight:600;letter-spacing:-0.005em;">Security advisory</p>
+                <p style="margin:0;color:#6e6e73;font-size:13px;line-height:1.55;letter-spacing:-0.005em;">
+                  Please change your temporary password immediately upon signing in. Do not share your password with anyone — DentiPal personnel will never request this information.
+                </p>
+              </div>
+
             </td></tr>
           </table>
         </td></tr>
 
-        <!-- Security Warning -->
-        <tr><td style="padding:0 40px 24px;">
-          <div style="background:#fff5f3;border-left:4px solid #f8ccc1;padding:14px 18px;border-radius:0 8px 8px 0;">
-            <p style="margin:0;font-size:14px;color:#532b21;font-weight:600;">For security, please sign in and change your password immediately.</p>
-          </div>
-        </td></tr>
-
-        <!-- CTA Button -->
-        <tr><td style="padding:0 40px 32px;text-align:center;">
-          <a href="https://dentipal.com/login" style="display:inline-block;background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);color:#532b21;padding:14px 36px;border-radius:10px;font-weight:700;font-size:15px;text-decoration:none;">
-            Sign In Now
-          </a>
-        </td></tr>
-
-        <!-- Footer -->
-        <tr><td style="background:#fef7f5;padding:20px 40px;border-top:1px solid #fde8e4;text-align:center;">
-          <p style="margin:0 0 4px;font-size:13px;color:#999;">If you did not expect this email, please contact your administrator.</p>
-          <p style="margin:0;font-size:12px;color:#ccc;">DentiPal. All rights reserved.</p>
+        <tr><td style="padding:24px 24px 8px;text-align:center;">
+          <p style="margin:0 0 10px;color:#86868b;font-size:12px;line-height:1.55;letter-spacing:-0.005em;">
+            If you did not expect to receive this email, please contact your administrator.
+          </p>
+          <p style="margin:18px 0 0;color:#a1a1a6;font-size:11px;letter-spacing:0.01em;">&copy; ${year} DentiPal</p>
         </td></tr>
 
       </table>
@@ -270,15 +287,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 </html>`;
 
             const textBody =
-                `Hello ${firstName},\n\n` +
-                `Your DentiPal account has been created.\n\n` +
-                `Email: ${email}\n` +
-                `Password: ${password}\n` +
-                `Role: ${subgroup}\n` +
-                (clinicsLine ? `Clinics: ${clinicsLine}\n` : "") +
-                `\nFor security, please sign in and change your password immediately.\n` +
-                `Sign in: https://dentipal.com/login\n\n` +
-                `If you did not expect this email, please contact your administrator.\n`;
+                `DentiPal\n\n` +
+                `Welcome, ${firstName}\n\n` +
+                `Your administrator has created a DentiPal account on your behalf. Please use the credentials below to sign in. For security reasons, you will be prompted to change your password upon your first sign-in.\n\n` +
+                `Your sign-in credentials:\n` +
+                `  Email:              ${email}\n` +
+                `  Temporary password: ${password}\n` +
+                `  Role:               ${subgroup}\n` +
+                (clinicsLine ? `  Clinics:            ${clinicsLine}\n` : "") +
+                `\nSign in: https://dentipal.com/login\n\n` +
+                `Security advisory: please change your temporary password immediately upon signing in. DentiPal personnel will never request your password.\n\n` +
+                `If you did not expect to receive this email, please contact your administrator.\n`;
 
             const emailParams: SendEmailCommandInput = {
                 Source: process.env.SES_FROM_EMAIL || "swarajparamata@gmail.com",

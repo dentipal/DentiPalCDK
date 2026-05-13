@@ -31,6 +31,8 @@ export interface UserInfo {
     userType: string;
     email?: string;
     groups: string[];
+    iat?: number;       // JWT issued-at (Unix epoch seconds) — used by the
+                        // session-invalidation denylist (see checkSessionNotInvalidated)
     [key: string]: any;
 }
 
@@ -431,16 +433,23 @@ export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo
     console.log('>>> extractUserInfoFromClaims - Final groups array:', JSON.stringify(groups));
     console.log('>>> extractUserInfoFromClaims - Final groups count:', groups.length);
     
+    // Brand-new signups have an access token that lacks `cognito:groups`,
+    // `custom:user_type`, and sometimes `address` (Cognito hasn't yet
+    // propagated group membership to the access token). Throwing here
+    // breaks every authenticated request for new users until they're
+    // added to a group. Instead, leave userType empty when it can't be
+    // derived — handlers that actually need it can decide what to do
+    // (most professional-side endpoints work fine without it because they
+    // filter by `userSub` directly).
     const userType: string = claims['custom:user_type']
         || parseUserTypeFromAddress(claims.address)
-        || deriveUserTypeFromGroups(groups);
+        || deriveUserTypeFromGroups(groups)
+        || '';
 
     if (!userType) {
-        console.log('>>> extractUserInfoFromClaims - ERROR: userType could not be derived');
-        throw new Error(
-            `userType could not be derived for sub=${claims.sub}: ` +
-            `custom:user_type missing, address has no userType marker, and no clinic-role groups present. ` +
-            `Run the Cognito user_type backfill.`
+        console.log(
+            `>>> extractUserInfoFromClaims - userType empty for sub=${claims.sub}; ` +
+            `passing through with empty userType (likely brand-new signup).`
         );
     }
 
@@ -449,6 +458,7 @@ export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo
         userType,
         email: claims.email,
         groups,
+        iat: typeof claims.iat === "number" ? claims.iat : undefined,
     };
     
     console.log('>>> extractUserInfoFromClaims - Returning UserInfo:', JSON.stringify(userInfo, null, 2));
@@ -516,12 +526,71 @@ export const extractUserFromBearerToken = (authHeader: string | undefined): User
         const userInfo = extractUserInfoFromClaims(claims);
         console.log('>>> extractUserFromBearerToken - UserInfo extracted successfully');
         console.log('>>> extractUserFromBearerToken - EXIT with sub:', userInfo.sub, 'groups:', userInfo.groups);
-        
+
         return userInfo;
     } catch (error: any) {
         console.log('>>> extractUserFromBearerToken - ERROR ✗');
         console.error('>>> Error:', error.message);
         console.error('>>> Stack:', error.stack);
         throw error;
+    }
+};
+
+// ============================================================================
+// Session invalidation denylist
+// ----------------------------------------------------------------------------
+// When a user changes their password (or we otherwise need to force-logout
+// all their sessions), we write { userSub, invalidatedBefore } to the
+// SessionInvalidations table. Handlers that want instant-kick behavior call
+// `checkSessionNotInvalidated(userInfo)` after extracting the token; if the
+// token's `iat` is older than `invalidatedBefore`, this throws and the
+// caller returns 401 (which the frontend turns into a forced logout).
+//
+// Cost: one DynamoDB GetItem per authenticated request. Latency ~3-5ms.
+// ============================================================================
+
+export class SessionInvalidatedError extends Error {
+    constructor(message: string = "Session invalidated. Please sign in again.") {
+        super(message);
+        this.name = "SessionInvalidatedError";
+    }
+}
+
+/**
+ * Throws SessionInvalidatedError if the user's token was issued before the
+ * latest password change (or other forced-logout event) was recorded.
+ *
+ * Returns silently if:
+ *   - there's no invalidation record for the user (normal case)
+ *   - the token's iat is >= invalidatedBefore (token issued after the change)
+ *   - the user's iat couldn't be read (fail-open — never block a legitimate user
+ *     just because we can't read the timestamp)
+ */
+export const checkSessionNotInvalidated = async (userInfo: UserInfo): Promise<void> => {
+    const tableName = process.env.SESSION_INVALIDATIONS_TABLE;
+    if (!tableName) return;     // table not wired — skip (dev/test safety)
+    if (!userInfo?.sub) return;
+    if (typeof userInfo.iat !== "number") return;
+
+    try {
+        const res: GetItemCommandOutput = await dynamoClient.send(new GetItemCommand({
+            TableName: tableName,
+            Key: { userSub: { S: userInfo.sub } },
+            ProjectionExpression: "invalidatedBefore",
+        }));
+        const invalidatedBefore = res.Item?.invalidatedBefore?.N
+            ? parseInt(res.Item.invalidatedBefore.N, 10)
+            : undefined;
+
+        if (typeof invalidatedBefore !== "number") return;
+        if (userInfo.iat < invalidatedBefore) {
+            throw new SessionInvalidatedError();
+        }
+    } catch (err: any) {
+        if (err instanceof SessionInvalidatedError) throw err;
+        // Any other error reading the denylist — fail open (don't block).
+        // We'd rather let a request through than lock a user out due to
+        // a transient DynamoDB blip.
+        console.warn("[checkSessionNotInvalidated] denylist check failed (fail-open)", err?.message);
     }
 };
