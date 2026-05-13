@@ -82,113 +82,141 @@ const ses = new SESClient({ region: SES_REGION } as SESClientConfig);
 /**
  * Creates the HTML and text bodies for the referral email.
  */
+function escapeHtml(s: string): string {
+    return s.replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
+    }[c] as string));
+}
+
 function createReferralEmail(
     referrerName: string,
     friendEmail: string,
     personalMessage: string | undefined,
     referrerUserSub: string
 ): EmailTemplate {
-    const subject = `${referrerName} invites you to join DentiPal! 🦷`;
+    const subject = `${referrerName} invited you to DentiPal`;
     const signupUrl = `${APP_URL.replace(/\/$/, "")}/professional-signup?ref=${encodeURIComponent(referrerUserSub)}`;
-    
-    // HTML Body (long string for email content)
-    const htmlBody = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f9ff; }
-        .container { max-width: 600px; margin: 0 auto; background-color: white; padding: 40px; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
-        .header { text-align: center; margin-bottom: 30px; }
-        .logo { font-size: 32px; font-weight: bold; color: #2563eb; margin-bottom: 15px; }
-        .invite-icon { font-size: 48px; margin-bottom: 20px; }
-        .invite-box { background: linear-gradient(135deg, #D4E3F2 0%, #f8f8f8 100%); color: #000000; padding: 25px; border-radius: 10px; text-align: center; margin: 25px 0; }
-        .personal-message { background-color: #f8fafc; border-left: 4px solid #2563eb; padding: 20px; margin: 20px 0; font-style: italic; }
-        .benefits-list { background-color: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        .benefit-item { margin: 10px 0; padding: 8px 0; border-bottom: 1px solid #e2e8f0; }
-        .cta-button { display: inline-block; background-color: #2563eb; color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 20px 0; }
-        .footer { text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 14px; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <div class="logo">🦷 DentiPal</div>
-          <div class="invite-icon">👋</div>
-          <h1>You're Invited!</h1>
-        </div>
-        
-        <div class="invite-box">
-          <h2>Hi ${friendEmail}!</h2>
-          <p><strong>${referrerName}</strong> thinks you'd love DentiPal - the premier platform for dental professionals!</p>
-        </div>
-        
-        ${personalMessage ? 
-          `<div class="personal-message">
-            <strong>Personal message from ${referrerName}:</strong><br>
-            "${personalMessage}"
-          </div>` 
-        : ''}
-        
-        <p>DentiPal connects dental professionals with amazing career opportunities. Whether you're looking for temporary shifts, consulting projects, or permanent positions, we've got you covered!</p>
-        
-        <div class="benefits-list">
-          <h3>🌟 Why Join DentiPal?</h3>
-          <div class="benefit-item">💼 Access to exclusive job opportunities</div>
-          <div class="benefit-item">⚡ Fast and easy application process</div>
-          <div class="benefit-item">💰 Competitive compensation</div>
-          <div class="benefit-item">🤝 Direct connection with dental clinics</div>
-          <div class="benefit-item">📱 User-friendly mobile platform</div>
-          <div class="benefit-item">🎯 Personalized job matching</div>
-        </div>
-        
-        <div style="text-align: center;">
-          <a href="${signupUrl}" class="cta-button">Join DentiPal Now - It's Free!</a>
-        </div>
-        
-        <p style="text-align: center; margin-top: 20px;">
-          <small>By joining through this referral, both you and ${referrerName} may be eligible for special bonuses!</small>
-        </p>
-        
-        <div class="footer">
-          <p>Join thousands of dental professionals who trust DentiPal for their career growth.</p>
-          <p>Questions? Contact us at support@dentipal.com</p>
-          <p>© 2024 DentiPal. All rights reserved.</p>
-        </div>
-      </div>
-    </body>
-    </html>
-    `;
+    const safeReferrer = escapeHtml(referrerName);
+    const safeFriend = escapeHtml(friendEmail);
+    const safeMessage = personalMessage ? escapeHtml(personalMessage) : "";
+    const fontStack = "-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+    const year = new Date().getFullYear();
 
-    // Text Body
-    const textBody = `
-    ${referrerName} invites you to join DentiPal!
+    const benefits: Array<[string, string]> = [
+        ["Exclusive shifts", "First access to roles posted by clinics in your area."],
+        ["Apply in seconds", "One profile, every application — no repeated paperwork."],
+        ["Transparent pay", "See the hourly rate up front, before you apply."],
+        ["Direct messaging", "Talk to clinics directly. No agencies in the middle."],
+    ];
 
-    Hi ${friendEmail}!
+    const benefitsHtml = benefits.map(([title, body], idx) => {
+        const isLast = idx === benefits.length - 1;
+        const border = isLast ? "" : "border-bottom:1px solid #e8e8ed;";
+        return `<tr><td style="padding:18px 0;${border}">
+            <p style="margin:0 0 4px;color:#1d1d1f;font-size:15px;font-weight:600;letter-spacing:-0.01em;">${escapeHtml(title)}</p>
+            <p style="margin:0;color:#6e6e73;font-size:14px;line-height:1.5;letter-spacing:-0.005em;">${escapeHtml(body)}</p>
+          </td></tr>`;
+    }).join("");
 
-    ${referrerName} thinks you'd love DentiPal - the premier platform for dental professionals!
+    const personalMessageHtml = safeMessage ? `
+        <div style="margin:0 0 28px;padding:22px 24px;background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;">
+          <p style="margin:0 0 8px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">A note from ${safeReferrer}</p>
+          <p style="margin:0;color:#1d1d1f;font-size:15px;line-height:1.55;letter-spacing:-0.01em;font-style:italic;">&ldquo;${safeMessage}&rdquo;</p>
+        </div>` : "";
 
-    ${personalMessage ? `Personal message from ${referrerName}: "${personalMessage}"` : ''}
+    const htmlBody = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="color-scheme" content="light"/>
+<meta name="supported-color-schemes" content="light"/>
+<title>${safeReferrer} invited you to DentiPal</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f7;font-family:${fontStack};-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">${safeReferrer} thinks you'd be a great fit for DentiPal — the platform that connects dental professionals with clinics directly.</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f5f5f7;">
+    <tr><td align="center" style="padding:48px 16px;">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;">
 
-    DentiPal connects dental professionals with amazing career opportunities. Whether you're looking for temporary shifts, consulting projects, or permanent positions, we've got you covered!
+        <tr><td style="padding:0 8px 18px;text-align:center;">
+          <span style="display:inline-block;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-0.02em;">DentiPal</span>
+        </td></tr>
 
-    Why Join DentiPal?
-    💼 Access to exclusive job opportunities
-    ⚡ Fast and easy application process  
-    💰 Competitive compensation
-    🤝 Direct connection with dental clinics
-    📱 User-friendly mobile platform
-    🎯 Personalized job matching
+        <tr><td style="background:#ffffff;border-radius:22px;box-shadow:0 1px 2px rgba(0,0,0,0.04),0 12px 40px rgba(0,0,0,0.06);overflow:hidden;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr><td style="padding:44px 40px 32px;">
 
-    Join DentiPal Now: ${signupUrl}
+              <p style="margin:0 0 10px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Personal invitation</p>
+              <h1 style="margin:0 0 14px;color:#1d1d1f;font-size:28px;font-weight:700;letter-spacing:-0.025em;line-height:1.15;">${safeReferrer} invited you to DentiPal</h1>
+              <p style="margin:0 0 28px;color:#424245;font-size:16px;line-height:1.55;letter-spacing:-0.01em;">
+                Hi there — ${safeReferrer} thinks you'd be a great fit for DentiPal, the platform dental professionals use to find shifts at trusted clinics. They've sent this invite to <strong style="color:#1d1d1f;font-weight:600;">${safeFriend}</strong>.
+              </p>
 
-    By joining through this referral, both you and ${referrerName} may be eligible for special bonuses!
+              ${personalMessageHtml}
 
-    Questions? Contact us at support@dentipal.com
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 28px;">
+                <tr><td align="center">
+                  <a href="${signupUrl}" style="display:inline-block;background:#1d1d1f;color:#ffffff;padding:14px 32px;border-radius:980px;font-size:15px;font-weight:500;text-decoration:none;letter-spacing:-0.01em;line-height:1;">Accept invitation</a>
+                </td></tr>
+                <tr><td align="center" style="padding-top:14px;">
+                  <p style="margin:0;color:#86868b;font-size:13px;letter-spacing:-0.005em;">Free to join · Takes about 2 minutes</p>
+                </td></tr>
+              </table>
 
-    Join thousands of dental professionals who trust DentiPal for their career growth!
-    `;
-    
+              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">What DentiPal offers</p>
+              <table cellpadding="0" cellspacing="0" width="100%" style="background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;margin:0 0 28px;">
+                <tr><td style="padding:6px 22px;">
+                  <table width="100%" cellpadding="0" cellspacing="0">${benefitsHtml}</table>
+                </td></tr>
+              </table>
+
+              <div style="margin:0 0 0;padding:18px 20px;background:rgba(245,245,247,0.7);border:1px solid rgba(0,0,0,0.04);border-radius:14px;">
+                <p style="margin:0;color:#6e6e73;font-size:13px;line-height:1.55;letter-spacing:-0.005em;">
+                  Signing up through this link credits ${safeReferrer} as your referrer. Both of you may be eligible for referral rewards once you complete your first shift.
+                </p>
+              </div>
+
+            </td></tr>
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:24px 24px 8px;text-align:center;">
+          <p style="margin:0 0 10px;color:#86868b;font-size:12px;line-height:1.55;letter-spacing:-0.005em;">
+            This invitation was sent to ${safeFriend}. If you weren't expecting it, you can safely ignore this email.
+          </p>
+          <p style="margin:0;color:#86868b;font-size:12px;line-height:1.55;letter-spacing:-0.005em;">
+            Questions? <a href="mailto:support@dentipal.com" style="color:#1d1d1f;text-decoration:none;font-weight:500;">support@dentipal.com</a>
+          </p>
+          <p style="margin:18px 0 0;color:#a1a1a6;font-size:11px;letter-spacing:0.01em;">&copy; ${year} DentiPal</p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+    const textBody = [
+        "DentiPal",
+        "",
+        `${referrerName} invited you to DentiPal`,
+        "",
+        `Hi there — ${referrerName} thinks you'd be a great fit for DentiPal, the platform dental professionals use to find shifts at trusted clinics. This invitation was sent to ${friendEmail}.`,
+        ...(personalMessage ? ["", `A note from ${referrerName}:`, `"${personalMessage}"`] : []),
+        "",
+        "What DentiPal offers:",
+        ...benefits.map(([t, b]) => `  • ${t} — ${b}`),
+        "",
+        `Accept invitation: ${signupUrl}`,
+        "Free to join · Takes about 2 minutes",
+        "",
+        `Signing up through this link credits ${referrerName} as your referrer. Both of you may be eligible for referral rewards once you complete your first shift.`,
+        "",
+        "—",
+        "Questions? support@dentipal.com",
+    ].join("\n");
+
     return { subject, htmlBody, textBody };
 }
 

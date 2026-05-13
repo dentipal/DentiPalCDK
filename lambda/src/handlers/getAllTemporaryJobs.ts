@@ -12,6 +12,9 @@ import { extractUserFromBearerToken } from "./utils";
 
 // ✅ ADDED THIS LINE:
 import { corsHeaders } from "./corsHeaders";
+// Additive: read-time enrichment with live Clinics-table address. Never
+// mutates DynamoDB; on failure the response carries the original snapshot.
+import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -219,14 +222,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         });
 
+        // Additive enrichment: replace snapshotted addresses with the live
+        // Clinics-table values for the current response. DB rows untouched.
+        let jobsForResponse: any[] = jobs as any[];
+        try {
+            jobsForResponse = (await enrichRecordsWithLiveClinicAddress(jobs as any[])) as any[];
+        } catch (enrichErr) {
+            console.warn(
+                "[getAllTemporaryJobs] live clinic-address enrichment skipped:",
+                (enrichErr as Error)?.message
+            );
+        }
+
         return {
             statusCode: 200,
             headers: corsHeaders(event), // ✅ Uses imported headers
             body: JSON.stringify({
                 message: "Temporary jobs (today or in the future) retrieved successfully",
                 excludedCount: appliedJobIds.size, // helpful for debugging
-                count: jobs.length,
-                jobs,
+                count: jobsForResponse.length,
+                jobs: jobsForResponse,
             }),
         };
     } catch (error: any) {
