@@ -35,6 +35,11 @@ interface ReferralPayload {
 /** Defines the expected structure of a professional profile item for the referrer. */
 interface ProfileItem extends DynamoDBItem {
     userSub?: AttributeValue;
+    // ProfessionalProfiles stores names split: first_name + last_name. The
+    // legacy `full_name` field is checked as a fallback in case older rows
+    // still use it.
+    first_name?: AttributeValue;
+    last_name?: AttributeValue;
     full_name?: AttributeValue;
     // Stored on the profile row for some users — used as a fallback Reply-To
     // address when the Cognito access token doesn't carry an `email` claim.
@@ -263,7 +268,17 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
             };
         }
 
-        const referrerName: string = referrerProfile.full_name?.S || 'Your DentiPal friend';
+        // Resolve referrer's display name: prefer `first_name + last_name`
+        // (the canonical fields on ProfessionalProfiles), fall back to the
+        // legacy `full_name`, finally to a generic label so the email still
+        // sends if the profile is incomplete.
+        const firstName = referrerProfile.first_name?.S?.trim() || "";
+        const lastName = referrerProfile.last_name?.S?.trim() || "";
+        const joinedName = [firstName, lastName].filter(Boolean).join(" ");
+        const referrerName: string =
+            joinedName
+            || referrerProfile.full_name?.S?.trim()
+            || 'Your DentiPal friend';
 
         // Reply-To resolution order:
         //   1. email claim on the access token (set by Cognito when the app

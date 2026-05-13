@@ -1,11 +1,14 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { CognitoIdentityProviderClient, AdminGetUserCommand, AttributeType } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken } from "./utils";
 import { corsHeaders } from "./corsHeaders";
 import { fireAndForgetIncrement } from "./promotionCounters";
 import { fireAndForgetJobApplicationIncrement } from "./jobPostingCounters";
+import { sendNotificationEmail } from "./sendNotificationEmail";
+import { renderTemplate } from "./notificationTemplates";
 
 // --- 1. Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -16,6 +19,94 @@ const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-Cli
 
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
+const cognito = new CognitoIdentityProviderClient({ region: REGION });
+const USER_POOL_ID = process.env.USER_POOL_ID || "";
+
+function pickAttr(attrs: AttributeType[] | undefined, name: string): string {
+    return (attrs || []).find((x) => x.Name === name)?.Value || "";
+}
+
+async function getCognitoUser(sub: string): Promise<{ email: string; name: string } | null> {
+    if (!sub || !USER_POOL_ID) return null;
+    try {
+        const out = await cognito.send(new AdminGetUserCommand({
+            UserPoolId: USER_POOL_ID,
+            Username: sub,
+        }));
+        const email = pickAttr(out.UserAttributes, "email");
+        const given = pickAttr(out.UserAttributes, "given_name");
+        const family = pickAttr(out.UserAttributes, "family_name");
+        const fullname = pickAttr(out.UserAttributes, "name");
+        const name = [given, family].filter(Boolean).join(" ").trim()
+            || fullname?.trim()
+            || given?.trim()
+            || "";
+        return { email, name };
+    } catch (err) {
+        console.warn("[createJobApplication] cognito lookup failed", { sub, error: (err as Error).message });
+        return null;
+    }
+}
+
+async function notifyClinicOfApplication(args: {
+    clinicId: string;
+    clinicUserSub?: string;
+    clinicProfile?: Record<string, any> | null;
+    applicantSub: string;
+    jobItem: Record<string, any>;
+}): Promise<void> {
+    try {
+        let clinicEmail = (args.clinicProfile?.clinic_email || "").trim();
+        if (!clinicEmail && args.clinicUserSub) {
+            const u = await getCognitoUser(args.clinicUserSub);
+            clinicEmail = (u?.email || "").trim();
+        }
+        if (!clinicEmail || !clinicEmail.includes("@")) {
+            console.warn("[createJobApplication] could not resolve clinic email; skipping notification", {
+                clinicId: args.clinicId,
+            });
+            return;
+        }
+
+        const applicant = await getCognitoUser(args.applicantSub);
+        const professionalName = applicant?.name || "A professional";
+
+        const j = args.jobItem;
+        const role = j.professional_role || j.professionalRole || j.shift_speciality || j.shiftSpeciality
+            || j.job_title || j.jobTitle || j.title || "";
+        const rateNum = j.rate ?? (j.pay_type === "per_transaction"
+            ? j.rate_per_transaction
+            : j.pay_type === "percentage_of_revenue"
+                ? j.revenue_percentage
+                : j.hourly_rate);
+        const startTime = j.startTime || j.start_time || "";
+        const endTime = j.endTime || j.end_time || "";
+        const date = j.date || j.startDate || j.start_date || "";
+
+        const rendered = renderTemplate("application-received", {
+            professionalName,
+            clinicName: args.clinicProfile?.clinic_name || undefined,
+            role: role ? String(role) : undefined,
+            date: date ? String(date) : undefined,
+            startTime: startTime ? String(startTime) : undefined,
+            endTime: endTime ? String(endTime) : undefined,
+            rate: rateNum !== undefined && rateNum !== null ? rateNum : undefined,
+        });
+        if (!rendered) {
+            console.warn("[createJobApplication] no template rendered for application-received");
+            return;
+        }
+
+        await sendNotificationEmail({
+            to: clinicEmail,
+            subject: rendered.subject,
+            html: rendered.html,
+            text: rendered.text,
+        });
+    } catch (err) {
+        console.error("[createJobApplication] clinic notification failed (non-fatal):", (err as Error).message);
+    }
+}
 
 // --- 2. Helpers ---
 const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
@@ -243,17 +334,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 10. Fetch Clinic Info (Non-fatal)
         let clinicInfo: any = null;
+        let clinicProfileItem: Record<string, any> | null = null;
         try {
-            // Clinic Profiles usually keyed by clinicId (and sometimes userSub). 
+            // Clinic Profiles usually keyed by clinicId (and sometimes userSub).
             // Assuming PK: clinicId based on your provided snippet.
             // If your table uses composite key, you might need query or specific userSub logic here.
             const clinicRes = await ddbDoc.send(new GetCommand({
                 TableName: CLINIC_PROFILES_TABLE,
                 Key: { clinicId: clinicIdFromJob } // Note: Add userSub if it's part of PK in your schema
             }));
-            
+
             const clinic = clinicRes.Item;
             if (clinic) {
+                clinicProfileItem = clinic;
                 clinicInfo = {
                     name: clinic.clinic_name || "Unknown Clinic",
                     city: clinic.city || "",
@@ -266,6 +359,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         } catch (err) {
             console.warn("Failed to fetch clinic info (non-fatal):", (err as Error).message);
         }
+
+        // 10b. Notify the clinic by email that a new applicant arrived.
+        // Fire-and-forget on the same execution so it stays on the warm sandbox,
+        // but wrapped so SES / Cognito failures never break the 201 response.
+        notifyClinicOfApplication({
+            clinicId: clinicIdFromJob,
+            clinicUserSub: jobItem.clinicUserSub || jobItem.clinic_user_sub,
+            clinicProfile: clinicProfileItem,
+            applicantSub: userSub,
+            jobItem,
+        }).catch((err) => {
+            console.error("[createJobApplication] unhandled notify error:", (err as Error).message);
+        });
 
         // 11. Construct Response
         const jobInfo = {
