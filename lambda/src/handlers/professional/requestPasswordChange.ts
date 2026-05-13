@@ -1,7 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import {
     CognitoIdentityProviderClient,
-    AdminInitiateAuthCommand,
     AdminGetUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -36,7 +35,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const method = event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
     if (method === "OPTIONS") return { statusCode: 200, headers: corsHeaders(event), body: "" };
 
-    // 1. Authenticate
+    // 1. Authenticate (user must already be logged in)
     let userSub: string;
     let tokenEmail: string | undefined;
     try {
@@ -48,21 +47,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return json(event, 401, { error: "Unauthorized", message: err.message || "Invalid token" });
     }
 
-    // 2. Parse body
-    if (!event.body) return json(event, 400, { error: "Bad Request", message: "Request body required" });
-    let currentPassword: string;
     try {
-        const body = JSON.parse(event.body);
-        currentPassword = body.currentPassword;
-    } catch {
-        return json(event, 400, { error: "Bad Request", message: "Invalid JSON body" });
-    }
-    if (!currentPassword || currentPassword.length < 1) {
-        return json(event, 400, { error: "Bad Request", message: "Current password is required" });
-    }
-
-    try {
-        // 3. Look up the user's email (prefer JWT, fall back to Cognito lookup)
+        // 2. Resolve the user's email (prefer JWT, fall back to Cognito lookup)
         let email = tokenEmail;
         if (!email) {
             const user = await cognito.send(new AdminGetUserCommand({
@@ -75,29 +61,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(event, 500, { error: "Internal Server Error", message: "Could not resolve email" });
         }
 
-        // 4. Verify current password via Cognito
-        try {
-            await cognito.send(new AdminInitiateAuthCommand({
-                UserPoolId: process.env.USER_POOL_ID!,
-                ClientId: process.env.CLIENT_ID!,
-                AuthFlow: "ADMIN_USER_PASSWORD_AUTH",
-                AuthParameters: {
-                    USERNAME: email,
-                    PASSWORD: currentPassword,
-                },
-            }));
-        } catch (err: any) {
-            // Don't leak whether the user exists; treat all auth failures the same
-            if (err.name === "NotAuthorizedException" || err.name === "UserNotFoundException") {
-                return json(event, 401, {
-                    error: "Unauthorized",
-                    message: "Current password is incorrect",
-                });
-            }
-            throw err;
-        }
-
-        // 5. Generate OTP, persist with TTL, then email it
+        // 3. Generate OTP, persist with TTL, then email it
         const otp = generateOtp();
         const now = Math.floor(Date.now() / 1000);
         const expiresAt = now + OTP_TTL_SECONDS;
@@ -109,6 +73,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 otp,
                 expiresAt,                  // DynamoDB TTL
                 attempts: 0,
+                verified: false,
                 used: false,
                 purpose: "password_change",
                 createdAt: new Date().toISOString(),
@@ -150,7 +115,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         console.error("requestPasswordChange failed", err);
         return json(event, 500, {
             error: "Internal Server Error",
-            message: "Failed to start password change",
+            message: "Failed to send verification code",
             details: { reason: err.message },
         });
     }

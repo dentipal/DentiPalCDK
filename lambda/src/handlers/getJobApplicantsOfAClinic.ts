@@ -46,6 +46,11 @@ function decodeNextToken(token?: string | null): Record<string, AttributeValue> 
 // ✅ ADDED: Import auth utility
 import { extractUserFromBearerToken } from "./utils";
 import { corsHeaders } from "./corsHeaders";
+// Additive read-time enrichment — overwrites snapshotted address fields on
+// the `job` object in the response with the live Clinics-table values, so an
+// edited clinic address shows up here without waiting for / depending on the
+// write-time cascade. Never mutates DynamoDB rows; failures are non-fatal.
+import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
 
 async function batchGetAll(request: BatchGetItemCommandInput, maxRetries = 3) {
   let result: any = { Responses: {}, UnprocessedKeys: {} };
@@ -522,6 +527,25 @@ export const handler = async (
         application: row.application,
         negotiation: row.negotiation,
       });
+    }
+
+    // Additive: refresh the address fields on each grouped `job` with the
+    // current Clinics-table values. The job row in DynamoDB is NOT mutated —
+    // only the in-flight response object is rewritten. On any failure we
+    // silently fall through and the existing (possibly stale) snapshot is
+    // returned, so this block can never break the handler.
+    try {
+      const groupedEntries = Object.entries(byJobId);
+      const groupedJobs = groupedEntries.map(([, g]: [string, any]) => g.job);
+      const enrichedJobs = await enrichRecordsWithLiveClinicAddress(groupedJobs);
+      groupedEntries.forEach(([jid], i) => {
+        if (enrichedJobs[i]) byJobId[jid].job = enrichedJobs[i];
+      });
+    } catch (enrichErr) {
+      console.warn(
+        "[getJobApplicantsOfAClinic] live clinic-address enrichment skipped:",
+        (enrichErr as Error)?.message
+      );
     }
 
     // Strip the private `_job` reference so clients see only { application, negotiation, professional }.

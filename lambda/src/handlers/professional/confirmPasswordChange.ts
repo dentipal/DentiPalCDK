@@ -17,8 +17,6 @@ const REGION = process.env.REGION || "us-east-1";
 const cognito = new CognitoIdentityProviderClient({ region: REGION });
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
-const OTP_MAX_ATTEMPTS = 5;
-
 const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
     statusCode,
     headers: corsHeaders(event),
@@ -51,25 +49,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return json(event, 401, { error: "Unauthorized", message: err.message || "Invalid token" });
     }
 
-    // 2. Parse body
+    // 2. Parse body — needs verificationToken (from /verify) + new password + confirm
     if (!event.body) return json(event, 400, { error: "Bad Request", message: "Request body required" });
-    let otpInput: string;
+    let verificationToken: string;
     let newPassword: string;
+    let confirmPassword: string;
     try {
         const body = JSON.parse(event.body);
-        otpInput = String(body.otp || "").trim();
+        verificationToken = String(body.verificationToken || "").trim();
         newPassword = body.newPassword;
+        confirmPassword = body.confirmPassword;
     } catch {
         return json(event, 400, { error: "Bad Request", message: "Invalid JSON body" });
     }
-    if (!otpInput || !/^\d{6}$/.test(otpInput)) {
-        return json(event, 400, { error: "Bad Request", message: "OTP must be 6 digits" });
+    if (!verificationToken) {
+        return json(event, 400, { error: "Bad Request", message: "Verification token is required" });
+    }
+    if (newPassword !== confirmPassword) {
+        return json(event, 400, { error: "Bad Request", message: "Passwords do not match" });
     }
     const pwError = validateNewPassword(newPassword);
     if (pwError) return json(event, 400, { error: "Bad Request", message: pwError });
 
     try {
-        // 3. Fetch OTP record
+        // 3. Fetch OTP record — it must be VERIFIED (from /verify) and not yet USED
         const otpRes = await ddb.send(new GetCommand({
             TableName: process.env.PASSWORD_OTP_TABLE!,
             Key: { userSub },
@@ -77,32 +80,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const record = otpRes.Item;
 
         if (!record || record.purpose !== "password_change") {
-            return json(event, 400, { error: "Bad Request", message: "No active verification code. Request a new one." });
+            return json(event, 400, { error: "Bad Request", message: "No active verification session. Start over." });
+        }
+        if (!record.verified) {
+            return json(event, 400, { error: "Bad Request", message: "Verification code not yet confirmed." });
         }
         if (record.used) {
-            return json(event, 400, { error: "Bad Request", message: "Verification code already used. Request a new one." });
+            return json(event, 400, { error: "Bad Request", message: "Already changed. Start a new flow if needed." });
+        }
+        if (record.verificationToken !== verificationToken) {
+            return json(event, 401, { error: "Unauthorized", message: "Verification token mismatch" });
         }
         const now = Math.floor(Date.now() / 1000);
-        if (typeof record.expiresAt === "number" && record.expiresAt < now) {
-            return json(event, 400, { error: "Bad Request", message: "Verification code expired. Request a new one." });
-        }
-        if ((record.attempts || 0) >= OTP_MAX_ATTEMPTS) {
-            return json(event, 429, { error: "Too Many Requests", message: "Too many invalid attempts. Request a new code." });
+        if (typeof record.verificationExpiresAt === "number" && record.verificationExpiresAt < now) {
+            return json(event, 400, { error: "Bad Request", message: "Verification expired. Request a new code." });
         }
 
-        // 4. Compare OTP
-        if (record.otp !== otpInput) {
-            await ddb.send(new UpdateCommand({
-                TableName: process.env.PASSWORD_OTP_TABLE!,
-                Key: { userSub },
-                UpdateExpression: "SET attempts = if_not_exists(attempts, :zero) + :one",
-                ExpressionAttributeValues: { ":zero": 0, ":one": 1 },
-            }));
-            return json(event, 401, { error: "Unauthorized", message: "Incorrect verification code" });
-        }
-
-        // 5. Mark OTP as used BEFORE changing the password — prevents
-        //    a race where two requests with the same OTP both succeed.
+        // 4. Atomically mark as used — prevents replay if two requests fire at once.
+        //    NOTE: At this point the user has fully consented. If the network
+        //    fails AFTER this update, the password may still get changed by
+        //    the subsequent calls. If everything fails, the previous password
+        //    is preserved (because we haven't called AdminSetUserPassword yet).
         await ddb.send(new UpdateCommand({
             TableName: process.env.PASSWORD_OTP_TABLE!,
             Key: { userSub },
@@ -114,11 +112,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 ":now": new Date().toISOString(),
             },
         })).catch(() => {
-            // ConditionalCheckFailed means another request already used it
-            throw new Error("Verification code already used. Request a new one.");
+            throw new Error("Already changed. Start a new flow if needed.");
         });
 
-        // 6. Resolve the user's email for the Cognito calls below
+        // 5. Resolve email for Cognito calls
         let email = tokenEmail;
         if (!email) {
             const user = await cognito.send(new AdminGetUserCommand({
@@ -128,7 +125,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             email = user.UserAttributes?.find(a => a.Name === "email")?.Value;
         }
 
-        // 7. Set the new password (permanent, not a temporary "force change")
+        // 6. Set the new password (permanent, not a temporary "force change")
         await cognito.send(new AdminSetUserPasswordCommand({
             UserPoolId: process.env.USER_POOL_ID!,
             Username: userSub,
@@ -136,15 +133,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             Permanent: true,
         }));
 
-        // 8. Sign out everywhere (invalidates all refresh tokens on every device)
+        // 7. Sign out everywhere (invalidates all refresh tokens on every device)
         await cognito.send(new AdminUserGlobalSignOutCommand({
             UserPoolId: process.env.USER_POOL_ID!,
             Username: userSub,
         }));
 
-        // 9. Re-issue tokens for the current session (so the user stays
-        //    logged in on the device where they changed the password).
-        //    Frontend swaps these tokens into storage on success.
+        // 8. Re-issue tokens so the current device stays logged in
         let newTokens: any = null;
         if (email) {
             try {
@@ -168,7 +163,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
-        // 10. Clean up the OTP row
+        // 9. Clean up the OTP row
         await ddb.send(new DeleteCommand({
             TableName: process.env.PASSWORD_OTP_TABLE!,
             Key: { userSub },
