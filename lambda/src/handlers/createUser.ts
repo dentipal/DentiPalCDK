@@ -193,7 +193,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (sendWelcomeEmail) {
             console.log(`Attempting to send welcome email to ${email}...`);
 
-            const subject = "Welcome to DentiPal — your account is ready";
+            const subject = "Welcome to DentiPal — your account has been created";
             const clinicsLine = Array.isArray(clinicIds) && clinicIds.length ? clinicIds.join(", ") : "";
             const escapeForHtml = (s: string) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] as string));
             const safeFirstName = escapeForHtml(firstName);
@@ -241,10 +241,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
               <p style="margin:0 0 10px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Account created</p>
               <h1 style="margin:0 0 14px;color:#1d1d1f;font-size:28px;font-weight:700;letter-spacing:-0.025em;line-height:1.15;">Welcome, ${safeFirstName}</h1>
               <p style="margin:0 0 28px;color:#424245;font-size:16px;line-height:1.55;letter-spacing:-0.01em;">
-                Your administrator has set up a DentiPal account for you. Use the credentials below to sign in. For your security, you'll be asked to change your password right after your first sign-in.
+                Your administrator has created a DentiPal account on your behalf. Please use the credentials provided below to sign in. For security reasons, you will be prompted to change your password upon your first sign-in.
               </p>
 
-              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Your sign-in details</p>
+              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Your sign-in credentials</p>
               <table cellpadding="0" cellspacing="0" width="100%" style="background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;margin:0 0 28px;">
                 <tr><td style="padding:6px 22px;">
                   <table width="100%" cellpadding="0" cellspacing="0">
@@ -263,9 +263,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
               </table>
 
               <div style="margin:32px 0 0;padding:18px 20px;background:rgba(245,245,247,0.7);border:1px solid rgba(0,0,0,0.04);border-radius:14px;">
-                <p style="margin:0 0 6px;color:#1d1d1f;font-size:13px;font-weight:600;letter-spacing:-0.005em;">Keep your account secure</p>
+                <p style="margin:0 0 6px;color:#1d1d1f;font-size:13px;font-weight:600;letter-spacing:-0.005em;">Security advisory</p>
                 <p style="margin:0;color:#6e6e73;font-size:13px;line-height:1.55;letter-spacing:-0.005em;">
-                  Change your temporary password immediately after signing in. Never share your password — DentiPal staff will never ask for it.
+                  Please change your temporary password immediately upon signing in. Do not share your password with anyone — DentiPal personnel will never request this information.
                 </p>
               </div>
 
@@ -275,8 +275,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         <tr><td style="padding:24px 24px 8px;text-align:center;">
           <p style="margin:0 0 10px;color:#86868b;font-size:12px;line-height:1.55;letter-spacing:-0.005em;">
-            If you weren't expecting this email, please contact your administrator or
-            <a href="mailto:support@dentipal.com" style="color:#1d1d1f;text-decoration:none;font-weight:500;">support@dentipal.com</a>.
+            If you did not expect to receive this email, please contact your administrator.
           </p>
           <p style="margin:18px 0 0;color:#a1a1a6;font-size:11px;letter-spacing:0.01em;">&copy; ${year} DentiPal</p>
         </td></tr>
@@ -290,15 +289,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const textBody =
                 `DentiPal\n\n` +
                 `Welcome, ${firstName}\n\n` +
-                `Your administrator has set up a DentiPal account for you. Use the credentials below to sign in. For your security, you'll be asked to change your password right after your first sign-in.\n\n` +
-                `Your sign-in details:\n` +
+                `Your administrator has created a DentiPal account on your behalf. Please use the credentials below to sign in. For security reasons, you will be prompted to change your password upon your first sign-in.\n\n` +
+                `Your sign-in credentials:\n` +
                 `  Email:              ${email}\n` +
                 `  Temporary password: ${password}\n` +
                 `  Role:               ${subgroup}\n` +
                 (clinicsLine ? `  Clinics:            ${clinicsLine}\n` : "") +
                 `\nSign in: https://dentipal.com/login\n\n` +
-                `Keep your account secure: change your temporary password immediately after signing in. DentiPal staff will never ask for your password.\n\n` +
-                `If you weren't expecting this email, please contact your administrator or support@dentipal.com.\n`;
+                `Security advisory: please change your temporary password immediately upon signing in. DentiPal personnel will never request your password.\n\n` +
+                `If you did not expect to receive this email, please contact your administrator.\n`;
 
             const emailParams: SendEmailCommandInput = {
                 Source: process.env.SES_FROM_EMAIL || "swarajparamata@gmail.com",

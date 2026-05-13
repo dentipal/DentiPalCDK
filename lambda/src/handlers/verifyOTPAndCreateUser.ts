@@ -72,17 +72,17 @@ function createCongratulationsEmail(fullName: string, userType: string): EmailCo
     const year = new Date().getFullYear();
 
     const features: Array<{ title: string; body: string }> = isProfessional ? [
-        { title: "Complete your profile", body: "Upload your credentials and set your availability so clinics can find you." },
-        { title: "Browse open shifts", body: "See real-time openings near you, with hourly rate and clinic details up front." },
-        { title: "Apply with one tap", body: "Your profile travels with every application — no repeated paperwork." },
-        { title: "Stay in the loop", body: "Get notified the moment clinics post roles that match your skills." },
-        { title: "Refer and earn", body: "Invite friends in the industry. You both earn rewards on their first shift." },
+        { title: "Complete your profile", body: "Upload your credentials and set your availability so clinics can find and evaluate you." },
+        { title: "Browse available shifts", body: "Review real-time openings in your area, with hourly rates and clinic details displayed in advance." },
+        { title: "Apply efficiently", body: "Your profile is submitted with every application, eliminating the need for repetitive paperwork." },
+        { title: "Receive timely notifications", body: "Be informed promptly when clinics post roles that match your qualifications." },
+        { title: "Participate in our referral program", body: "Invite qualified colleagues to the platform. Both parties receive rewards upon the completion of their first shift." },
     ] : [
-        { title: "Set up your clinic profile", body: "Add your location, hours, and team so candidates know what to expect." },
-        { title: "Post your first shift", body: "Describe the role, set the rate, and publish — it takes about a minute." },
-        { title: "Find qualified professionals", body: "Filter by role, certifications, distance, and availability in seconds." },
-        { title: "Save your favorites", body: "Build a shortlist of trusted pros you'd love to book again." },
-        { title: "Manage your hiring", body: "Track applications, approvals, and shift history in one workflow." },
+        { title: "Configure your clinic profile", body: "Add your location, operating hours, and team details to give candidates a clear understanding of your practice." },
+        { title: "Publish your first shift", body: "Specify the role, set the compensation, and publish — the process typically takes under a minute." },
+        { title: "Discover qualified professionals", body: "Filter candidates by role, certifications, location, and availability." },
+        { title: "Build a list of preferred professionals", body: "Maintain a shortlist of trusted professionals you wish to engage again." },
+        { title: "Manage your hiring workflow", body: "Track applications, approvals, and shift history within a single, integrated workflow." },
     ];
 
     const featureRowsHtml = features.map((f, i) => {
@@ -125,10 +125,10 @@ function createCongratulationsEmail(fullName: string, userType: string): EmailCo
               <p style="margin:0 0 10px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Account verified</p>
               <h1 style="margin:0 0 14px;color:#1d1d1f;font-size:28px;font-weight:700;letter-spacing:-0.025em;line-height:1.15;">Welcome to DentiPal, ${safeName}</h1>
               <p style="margin:0 0 28px;color:#424245;font-size:16px;line-height:1.55;letter-spacing:-0.01em;">
-                Your ${accountLabel} account is verified and ready to use. You're now part of the network connecting dental professionals with the clinics that need them.
+                Your ${accountLabel} account has been successfully verified and is now active. You have joined a trusted network that connects dental professionals with the clinics that rely on their expertise.
               </p>
 
-              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">A quick guide to get started</p>
+              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Recommended next steps</p>
               <table cellpadding="0" cellspacing="0" width="100%" style="background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;margin:0 0 28px;">
                 <tr><td style="padding:0 22px;">
                   <table width="100%" cellpadding="0" cellspacing="0">${featureRowsHtml}</table>
@@ -140,13 +140,13 @@ function createCongratulationsEmail(fullName: string, userType: string): EmailCo
                   <a href="https://dentipal.com/login" style="display:inline-block;background:#1d1d1f;color:#ffffff;padding:14px 32px;border-radius:980px;font-size:15px;font-weight:500;text-decoration:none;letter-spacing:-0.01em;line-height:1;">Open DentiPal</a>
                 </td></tr>
                 <tr><td align="center" style="padding-top:14px;">
-                  <p style="margin:0;color:#86868b;font-size:13px;letter-spacing:-0.005em;">Sign in with the email you registered with</p>
+                  <p style="margin:0;color:#86868b;font-size:13px;letter-spacing:-0.005em;">Sign in using the email address provided during registration</p>
                 </td></tr>
               </table>
 
               <div style="margin:32px 0 0;padding:18px 20px;background:rgba(245,245,247,0.7);border:1px solid rgba(0,0,0,0.04);border-radius:14px;">
                 <p style="margin:0;color:#6e6e73;font-size:13px;line-height:1.55;letter-spacing:-0.005em;">
-                  Need a hand getting set up? Reply to this email or reach out to <a href="mailto:support@dentipal.com" style="color:#1d1d1f;font-weight:500;text-decoration:none;">support@dentipal.com</a> — a real person will get back to you.
+                  Require assistance getting started? Simply reply to this email and a member of our team will respond promptly.
                 </p>
               </div>
 
@@ -156,7 +156,7 @@ function createCongratulationsEmail(fullName: string, userType: string): EmailCo
 
         <tr><td style="padding:24px 24px 8px;text-align:center;">
           <p style="margin:0 0 10px;color:#86868b;font-size:12px;line-height:1.55;letter-spacing:-0.005em;">
-            You're receiving this because you just created an account on DentiPal.
+            You are receiving this email because an account was recently created on DentiPal using this email address.
           </p>
           <p style="margin:18px 0 0;color:#a1a1a6;font-size:11px;letter-spacing:0.01em;">&copy; ${year} DentiPal</p>
         </td></tr>
@@ -173,14 +173,14 @@ function createCongratulationsEmail(fullName: string, userType: string): EmailCo
 
 Welcome to DentiPal, ${fullName}
 
-Your ${accountLabel} account is verified and ready to use. You're now part of the network connecting dental professionals with the clinics that need them.
+Your ${accountLabel} account has been successfully verified and is now active. You have joined a trusted network that connects dental professionals with the clinics that rely on their expertise.
 
-A quick guide to get started:
+Recommended next steps:
 ${featureListText}
 
 Open DentiPal: https://dentipal.com/login
 
-Need a hand getting set up? Reply to this email or reach out to support@dentipal.com — a real person will get back to you.
+Require assistance getting started? Simply reply to this email and a member of our team will respond promptly.
 `;
 
     return { subject, htmlBody, textBody };
