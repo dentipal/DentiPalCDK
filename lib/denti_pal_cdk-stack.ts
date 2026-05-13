@@ -1242,6 +1242,19 @@ export class DentiPalCDKStack extends cdk.Stack {
             projectionType: dynamodb.ProjectionType.ALL,
         });
 
+        // 22. DentiPal-PasswordOtp — short-lived OTPs for password-change flows.
+        //     PK = userSub, single row per user; overwrites on resend.
+        //     expiresAt is a UNIX epoch (s) used as DynamoDB TTL — DDB
+        //     auto-deletes expired rows within ~48h, but our handler also
+        //     enforces expiry in code so stale OTPs cannot be used.
+        const passwordOtpTable = new dynamodb.Table(this, 'PasswordOtpTable', {
+            tableName: 'DentiPal-V5-PasswordOtp',
+            partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            timeToLiveAttribute: 'expiresAt',
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+
         // Collect all tables for the main REST handler
         const allTables = [
             clinicProfilesTable, clinicFavoritesTable, clinicsTable, connectionsTable,
@@ -1249,7 +1262,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             jobNegotiationsTable, jobPostingsTable, messagesTable,
             professionalProfilesTable, referralsTable, userAddressesTable,
             userClinicAssignmentsTable, jobPromotionsTable,
-            leadsTable, leadActivityTable, bansTable,
+            leadsTable, leadActivityTable, bansTable, passwordOtpTable,
             notificationPreferencesTable,
             notificationsTable,
         ];
@@ -1396,6 +1409,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 LEADS_TABLE: leadsTable.tableName,
                 LEAD_ACTIVITY_TABLE: leadActivityTable.tableName,
                 BANS_TABLE: bansTable.tableName,
+                PASSWORD_OTP_TABLE: passwordOtpTable.tableName,
 
                 // Stats/Alias mappings for code compatibility
                 CLINIC_JOBS_POSTED_TABLE: jobPostingsTable.tableName,
@@ -1447,7 +1461,8 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'cognito-idp:AdminInitiateAuth',
                 'cognito-idp:AdminRespondToAuthChallenge',
                 'cognito-idp:AdminDisableUser',
-                'cognito-idp:AdminEnableUser'
+                'cognito-idp:AdminEnableUser',
+                'cognito-idp:AdminUserGlobalSignOut'
             ],
             resources: [userPool.userPoolArn],
         }));
@@ -2677,15 +2692,13 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "the first/second/third one", "that job", "the latest" → resolve from the MOST RECENT tool result in your conversation memory. Don\'t ask the user "which one?".',
                 '- "negotiate on my latest" → call get_my_applications first if needed, then use the most recent applicationId + its negotiationId.',
                 '',
-                '═══ NO PROSE AFTER LIST TOOLS ═══',
-                'When a tool returns a LIST (search_jobs_near_me, get_my_invitations, get_my_applications, get_my_negotiations, get_scheduled_shifts, get_completed_shifts, get_my_clinics), produce NO text response. Send an empty assistant turn. The UI renders the cards — adding text duplicates the data and clutters the screen.',
-                'EXCEPTIONS:',
-                '  • If the list is empty, say one short sentence ("No pending invitations.").',
-                '  • If you NEED to ask a follow-up question to proceed, ask it (one sentence).',
-                'NEVER list, number, bullet, or recap the items in your text response. The cards are the response.',
-                '═════════════════════════════════',
+                '═══ AFTER LIST TOOLS — ONE SHORT LINE ONLY ═══',
+                'When a tool returns a LIST (search_jobs_near_me, get_my_invitations, get_my_applications, get_my_negotiations, get_scheduled_shifts, get_completed_shifts, get_my_clinics), respond with EXACTLY ONE short sentence and stop. Examples: "Here you go." / "Found 5." / "No pending invitations." The UI renders the cards — your sentence is just a verbal handoff.',
+                'NEVER list, number, bullet, repeat, or recap the items. NEVER use markdown bold or numbered lists. The cards already show the data.',
+                'NEVER respond with an empty turn — always emit one sentence, even if very short.',
+                '═════════════════════════════════════════════════',
                 '',
-                'For preview cards (confirm_card): same rule — the card has all the info plus the Confirm button. Do not retype the fields in prose.',
+                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields.',
                 '',
                 'When a tool returns a single-shot result (apply_to_job, respond_invitation), one short sentence is fine ("Applied. Status: pending.").',
                 '',
@@ -2775,17 +2788,15 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '',
                 'When a tool returns an error (e.g. validation), THEN and only then ask the user for the specific missing field. Never pre-emptively interrogate.',
                 '',
-                '═══ NO PROSE AFTER LIST TOOLS ═══',
-                'When a tool returns a LIST (get_my_clinics, get_action_needed, list_applicants_for_job, get_open_shifts), produce NO text response. Send an empty assistant turn. The UI renders the cards — adding text duplicates the data and clutters the screen.',
-                'EXCEPTIONS:',
-                '  • If the list is empty, say one short sentence ("No applicants yet.").',
-                '  • If you NEED to ask a follow-up question to proceed, ask it (one sentence). E.g., when posting a job and missing the rate, ask just for the rate.',
-                'NEVER list, number, bullet, or recap the items in your text response. The cards are the response.',
-                '═════════════════════════════════',
+                '═══ AFTER LIST TOOLS — ONE SHORT LINE ONLY ═══',
+                'When a tool returns a LIST (get_my_clinics, get_action_needed, list_applicants_for_job, get_open_shifts), respond with EXACTLY ONE short sentence and stop. Examples: "Here you go." / "Found 3 pending applicants." / "No applicants yet." The UI renders the cards — your sentence is just a verbal handoff.',
+                'NEVER list, number, bullet, repeat, or recap the items. NEVER use markdown bold or numbered lists. The cards already show the data.',
+                'NEVER respond with an empty turn — always emit one sentence, even if very short. If you need to ask a follow-up to proceed (e.g., missing rate when posting), do so in ONE sentence.',
+                '═════════════════════════════════════════════════',
                 '',
-                'For preview cards (confirm_card): same rule — the card has all the info plus the Confirm button. Do not retype the fields in prose.',
+                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields.',
                 '',
-                'When a tool returns a single-shot success (e.g., respond_invitation accepted), one short sentence is fine.',
+                'When a tool returns a single-shot success (e.g., accept_professional confirmed), one short sentence is fine.',
                 '',
                 'NEVER paraphrase or guess numbers, dates, rates, names, or IDs from a tool result — use them verbatim or refer to the card. If the tool returned zero results, say so plainly instead of fabricating.',
             ].join('\n'),
@@ -3222,6 +3233,62 @@ export class DentiPalCDKStack extends cdk.Stack {
         reminderRule.addTarget(new targets.LambdaFunction(sendShiftRemindersHandler));
 
         // ========================================================================
+        // 6b. Professional Backup Resources (delete-account only)
+        //     DynamoDB table (all field data) + S3 bucket (file copies only).
+        //     The delete-account handler runs inside the monolith and writes
+        //     a backup snapshot just-in-time before purging the user's data.
+        //     Encryption: DynamoDB default + S3-managed AES-256. No KMS.
+        // ========================================================================
+
+        // Single backup table: holds every professional's data + nested
+        // related rows (addresses, invitations, referrals) per snapshot.
+        // PK = userSub, SK = snapshotId (e.g. "2026-05-13T03:00:00Z" for
+        // daily backups, "delete-<ts>" for pre-deletion archives).
+        const professionalBackupTable = new dynamodb.Table(this, 'ProfessionalBackupTable', {
+            tableName: 'DentiPal-V5-ProfessionalBackup',
+            partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'snapshotId', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            pointInTimeRecovery: true,
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
+        });
+        // GSI to list all snapshots of a given type (daily / delete)
+        professionalBackupTable.addGlobalSecondaryIndex({
+            indexName: 'snapshotType-snapshotId-index',
+            partitionKey: { name: 'snapshotType', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'snapshotId', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
+        const profBackupsBucket = new s3.Bucket(this, 'ProfBackups', {
+            bucketName: `dentipal-prof-backups-${this.account}`,
+            versioned: true,
+            encryption: s3.BucketEncryption.S3_MANAGED,
+            blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            enforceSSL: true,
+            lifecycleRules: [{
+                id: 'archive-and-expire',
+                transitions: [
+                    { storageClass: s3.StorageClass.INFREQUENT_ACCESS, transitionAfter: cdk.Duration.days(30) },
+                    { storageClass: s3.StorageClass.GLACIER, transitionAfter: cdk.Duration.days(90) },
+                ],
+                expiration: cdk.Duration.days(730),
+                noncurrentVersionExpiration: cdk.Duration.days(90),
+            }],
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
+        });
+
+        // The delete-account handler runs inside the existing monolith Lambda
+        // (wired via index.ts router as DELETE /professionals/me/account).
+        // The monolith already has Cognito AdminDeleteUser, ReadWrite on all
+        // source buckets, and ReadWrite on all live tables. We grant it
+        // write access to the backup bucket + backup table and expose names.
+        profBackupsBucket.grantReadWrite(lambdaFunction);
+        professionalBackupTable.grantReadWriteData(lambdaFunction);
+        lambdaFunction.addEnvironment('BACKUP_BUCKET', profBackupsBucket.bucketName);
+        lambdaFunction.addEnvironment('PROFESSIONAL_BACKUP_TABLE', professionalBackupTable.tableName);
+
+        // ========================================================================
         // 7. Outputs
         // ========================================================================
         new cdk.CfnOutput(this, 'UserPoolId', { value: userPool.userPoolId });
@@ -3235,5 +3302,9 @@ export class DentiPalCDKStack extends cdk.Stack {
         new cdk.CfnOutput(this, 'VideoResumesBucketName', { value: videoResumesBucket.bucketName });
         new cdk.CfnOutput(this, 'DrivingLicensesBucketName', { value: drivingLicensesBucket.bucketName });
         new cdk.CfnOutput(this, 'ProfessionalLicensesBucketName', { value: professionalLicensesBucket.bucketName });
+
+        // Backup-related outputs
+        new cdk.CfnOutput(this, 'ProfBackupsBucketName', { value: profBackupsBucket.bucketName });
+        new cdk.CfnOutput(this, 'ProfessionalBackupTableName', { value: professionalBackupTable.tableName });
     }
 }

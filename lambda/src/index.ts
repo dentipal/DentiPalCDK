@@ -26,6 +26,10 @@ import { handler as createProfessionalProfileHandler } from "./handlers/createPr
 import { handler as getProfessionalProfileHandler } from "./handlers/getProfessionalProfile";
 import { handler as updateProfessionalProfileHandler } from "./handlers/updateProfessionalProfile";
 import { handler as deleteProfessionalProfileHandler } from "./handlers/deleteProfessionalProfile";
+import { handler as deleteProfessionalAccountHandler } from "./handlers/backup/deleteProfessionalAccount";
+import { handler as requestPasswordChangeHandler } from "./handlers/professional/requestPasswordChange";
+import { handler as verifyPasswordOtpHandler } from "./handlers/professional/verifyPasswordOtp";
+import { handler as confirmPasswordChangeHandler } from "./handlers/professional/confirmPasswordChange";
 import { handler as getProfessionalQuestionsHandler } from "./handlers/getProfessionalQuestions";
 import { handler as createClinicProfileHandler } from "./handlers/createClinicProfile";
 import { handler as getClinicProfileHandler } from "./handlers/getClinicProfile";
@@ -191,6 +195,7 @@ import { handler as updateNotificationPreferencesHandler } from "./handlers/upda
 // In-app notification feed (bell icon / notifications page).
 import { handler as listNotificationsHandler } from "./handlers/listNotifications";
 import { handler as markNotificationsReadHandler } from "./handlers/markNotificationsRead";
+import { handler as deleteNotificationsHandler } from "./handlers/deleteNotifications";
 
 import { corsHeaders } from "./handlers/corsHeaders";
 
@@ -264,6 +269,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/profiles": getProfessionalProfileHandler,
         "PUT:/profiles": updateProfessionalProfileHandler,
         "DELETE:/profiles": deleteProfessionalProfileHandler,
+        "DELETE:/professionals/me/account": deleteProfessionalAccountHandler,
+        "POST:/professionals/me/password/request": requestPasswordChangeHandler,
+        "POST:/professionals/me/password/verify": verifyPasswordOtpHandler,
+        "POST:/professionals/me/password/confirm": confirmPasswordChangeHandler,
         "GET:/profiles/questions": getProfessionalQuestionsHandler,
         "GET:/profiles/{userSub}": getPublicProfessionalProfileHandler,
 
@@ -482,6 +491,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         // In-app notification feed
         "GET:/notifications": listNotificationsHandler,
         "POST:/notifications/read": markNotificationsReadHandler,
+        "POST:/notifications/delete": deleteNotificationsHandler,
 
     };
 
