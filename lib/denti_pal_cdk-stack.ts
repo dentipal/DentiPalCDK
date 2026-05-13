@@ -2803,6 +2803,70 @@ export class DentiPalCDKStack extends cdk.Stack {
             description: 'Production alias for the clinic agent.',
         });
 
+        // --- 6a.3d Public CfnAgent — unauthenticated visitor-facing assistant ---
+        //
+        // Serves anonymous visitors on marketing pages. No action groups (no
+        // tools) — product Q&A only. Reuses the shared guardrail. The system
+        // prompt below is the single source of truth for what the public bot
+        // is allowed to say; product facts are pulled verbatim from the
+        // landing-page copy + README so the model can't hallucinate features.
+        const publicAgent = new bedrock.CfnAgent(this, 'DentiPalPublicAgentV2', {
+            agentName: 'DentiPal-Public-Agent',
+            description: 'Unauthenticated visitor-facing assistant — answers DentiPal product questions only. No tools.',
+            agentResourceRoleArn: bedrockAgentServiceRole.roleArn,
+            foundationModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+            autoPrepare: true,
+            idleSessionTtlInSeconds: 900,
+            instruction: [
+                '═══ ROLE ═══',
+                'You are the DentiPal public assistant. The user is an UNAUTHENTICATED VISITOR exploring the platform.',
+                'You answer DentiPal product questions ONLY. You have NO tools — you cannot apply to jobs, post shifts, sign anyone up, or see private data.',
+                '═══════════',
+                '',
+                '═══ PRODUCT FACTS (use these verbatim — do not invent details) ═══',
+                'DentiPal is a two-sided healthcare staffing marketplace for the US dental industry. It connects dental clinics with dental professionals — dentists, hygienists, dental assistants, front-office, billing, and compliance staff.',
+                '',
+                'Three job types:',
+                '  • Temporary — same-day or short-notice shifts.',
+                '  • Multi-day consulting — fractional engagements (CFO, compliance, hygiene-program consultants).',
+                '  • Permanent — full-time placements.',
+                '',
+                'Professional sign-up flow (free): create a DentiPal account → upload credentials and work preferences → browse shifts in your area → apply and receive instant clinic confirmations → complete the shift → automatic payment through the platform.',
+                '',
+                'Clinic sign-up flow (free): create a clinic account with practice details → post a shift with the role, requirements, and credentials needed → review applications with ratings, credentials, and work history → automatic payment processing after shift completion.',
+                '',
+                'Fees: Transparent and flat. No hidden fees. We do NOT publish specific dollar amounts in this assistant — for current pricing details by role and location, direct the user to the website\'s support form.',
+                '═══════════════════════════════════════════════════════════════════',
+                '',
+                '═══ STYLE ═══',
+                'Keep answers to 1–3 short sentences. No bullet lists, no markdown bold, no numbered steps unless the user explicitly asked "how do I…" in which case a short numbered list is fine.',
+                'ALWAYS emit at least one short sentence — never an empty response.',
+                '═══════════',
+                '',
+                '═══ OUT-OF-SCOPE POLICY ═══',
+                'For anything that is NOT a DentiPal product question — current events, medical or dental advice, opinions, code help, weather, math, general chitchat, anything else — respond with this template (vary the prefix to sound natural):',
+                '  "I\'m focused on DentiPal — questions about how the platform works, sign-up, or job types. For <their topic>, you\'ll want to look elsewhere."',
+                '',
+                'For questions that need user-specific data ("what jobs are near me?", "my applications", "my clinic", "show my shifts"), respond:',
+                '  "You\'ll need to sign in to see personal data like that. Once you\'re signed in as a professional or clinic, the assistant can pull it up for you."',
+                '',
+                'NEVER attempt to access user data, NEVER claim to take an action, NEVER promise to follow up. You only describe the platform.',
+                '═══════════════════════════',
+            ].join('\n'),
+            guardrailConfiguration: {
+                guardrailIdentifier: chatGuardrail.attrGuardrailId,
+                guardrailVersion: 'DRAFT',
+            },
+            // No actionGroups intentionally — public agent is system-prompt-only.
+        });
+        publicAgent.addDependency(chatGuardrail);
+
+        const publicAgentAlias = new bedrock.CfnAgentAlias(this, 'DentiPalPublicAgentAliasV2', {
+            agentAliasName: 'live',
+            agentId: publicAgent.attrAgentId,
+            description: 'Production alias for the public agent.',
+        });
+
         // --- 6a.3c Alias bumper — keeps `live` tracking the latest DRAFT ---
         //
         // Bedrock aliases are pinned to a single numbered version (1, 2, 3…).
@@ -2845,8 +2909,10 @@ export class DentiPalCDKStack extends cdk.Stack {
             resources: [
                 `arn:aws:bedrock:${this.region}:${this.account}:agent/${professionalAgent.attrAgentId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent/${clinicAgent.attrAgentId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent/${publicAgent.attrAgentId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${professionalAgent.attrAgentId}/*`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${clinicAgent.attrAgentId}/*`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${publicAgent.attrAgentId}/*`,
             ],
         }));
 
@@ -2881,6 +2947,17 @@ export class DentiPalCDKStack extends cdk.Stack {
         });
         clinicAliasBumper.node.addDependency(clinicAgentAlias);
 
+        const publicAliasBumper = new cdk.CustomResource(this, 'PublicAliasBumper', {
+            serviceToken: aliasBumperProvider.serviceToken,
+            properties: {
+                agentId: publicAgent.attrAgentId,
+                aliasId: publicAgentAlias.attrAgentAliasId,
+                aliasName: 'live',
+                deployTimestamp: bumperTimestamp,
+            },
+        });
+        publicAliasBumper.node.addDependency(publicAgentAlias);
+
         // --- 6a.4 chatMessage Lambda — handles the new WebSocket route ---
         const chatMessageHandler = new lambda.Function(this, 'ChatMessageHandler', {
             functionName: 'DentiPal-Chat-Message',
@@ -2893,11 +2970,13 @@ export class DentiPalCDKStack extends cdk.Stack {
                 // ChatConnections (new) + Connections (existing, for bootstrap read)
                 CHAT_CONNECTIONS_TABLE: chatConnectionsTable.tableName,
                 CONNS_TABLE: connectionsTable.tableName,
-                // Bedrock agent + alias IDs (Phase 2: pro + clinic; public follows in Phase 3)
+                // Bedrock agent + alias IDs — pro, clinic, public.
                 BEDROCK_PROFESSIONAL_AGENT_ID: professionalAgent.attrAgentId,
                 BEDROCK_PROFESSIONAL_AGENT_ALIAS_ID: professionalAgentAlias.attrAgentAliasId,
                 BEDROCK_CLINIC_AGENT_ID: clinicAgent.attrAgentId,
                 BEDROCK_CLINIC_AGENT_ALIAS_ID: clinicAgentAlias.attrAgentAliasId,
+                BEDROCK_PUBLIC_AGENT_ID: publicAgent.attrAgentId,
+                BEDROCK_PUBLIC_AGENT_ALIAS_ID: publicAgentAlias.attrAgentAliasId,
                 // Tables read/written by the refactored run* functions called from toolExecutor
                 JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
                 APPLICATIONS_TABLE: jobApplicationsTable.tableName,
@@ -2984,6 +3063,8 @@ export class DentiPalCDKStack extends cdk.Stack {
                 `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${professionalAgent.attrAgentId}/${professionalAgentAlias.attrAgentAliasId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent/${clinicAgent.attrAgentId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${clinicAgent.attrAgentId}/${clinicAgentAlias.attrAgentAliasId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent/${publicAgent.attrAgentId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${publicAgent.attrAgentId}/${publicAgentAlias.attrAgentAliasId}`,
                 // Guardrail (any version)
                 `arn:aws:bedrock:${this.region}:${this.account}:guardrail/${chatGuardrail.attrGuardrailId}`,
                 // Foundation model + inference profile — some accounts require
@@ -3029,6 +3110,8 @@ export class DentiPalCDKStack extends cdk.Stack {
         new cdk.CfnOutput(this, 'BedrockProfessionalAgentAliasId', { value: professionalAgentAlias.attrAgentAliasId });
         new cdk.CfnOutput(this, 'BedrockClinicAgentId', { value: clinicAgent.attrAgentId });
         new cdk.CfnOutput(this, 'BedrockClinicAgentAliasId', { value: clinicAgentAlias.attrAgentAliasId });
+        new cdk.CfnOutput(this, 'BedrockPublicAgentId', { value: publicAgent.attrAgentId });
+        new cdk.CfnOutput(this, 'BedrockPublicAgentAliasId', { value: publicAgentAlias.attrAgentAliasId });
 
         // 6c. Public agent — REMOVED (was Phase 3 OpenSearch Serverless + KB).
         //     To re-add: restore S3 bucket + OpenSearch collection + KB + Public CfnAgent.

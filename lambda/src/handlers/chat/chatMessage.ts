@@ -114,7 +114,11 @@ async function bootstrapSessionFromExistingConnection(
   requestedAgent: AgentType,
 ): Promise<ChatSession | { error: string; status: number }> {
   if (requestedAgent === "public") {
-    const anonSub = `anon-${connectionId.slice(0, 12)}`;
+    // Must match the anon sub written by websocketHandler.onConnect's public
+    // branch (anon-<connectionId>, no truncation) so downstream lookups by
+    // sub line up. Don't read the Connections row here — the public path has
+    // no useful claims to extract beyond the sub, which we already know.
+    const anonSub = `anon-${connectionId}`;
     return await createSessionForConnection(anonSub, connectionId, "public");
   }
 
@@ -337,12 +341,36 @@ async function handlerBody(
       return { statusCode: bootstrap.status, body: bootstrap.error };
     }
     session = bootstrap;
+    // Bootstrap is turn 1 — the new row has no messageCount yet. Treat it
+    // as 1 for the cap math below.
+    session.messageCount = 1;
   } else {
     try {
-      await refreshSession(session.userSub, connectionId);
+      const newCount = await refreshSession(session.userSub, connectionId);
+      if (typeof newCount === "number") session.messageCount = newCount;
     } catch (err) {
       console.warn("chatMessage: refreshSession failed (session may have just expired):", err);
     }
+  }
+
+  // ---- 2a. Public-session message cap ----
+  // Unauthenticated public sessions are capped at 20 user turns to bound
+  // Bedrock cost from drive-by abuse. Authenticated agents skip this — they
+  // already cleared Cognito auth and are inherently rate-limited by humans.
+  // confirmAction frames don't burn Bedrock credits (they bypass the LLM),
+  // so they're allowed past the cap.
+  const PUBLIC_MESSAGE_CAP = 20;
+  if (
+    session.agentType === "public" &&
+    frame.action === "chatMessage" &&
+    (session.messageCount ?? 1) > PUBLIC_MESSAGE_CAP
+  ) {
+    await postFrame(api, connectionId, {
+      type: "error",
+      reason: "rate_limited",
+      detail: `Public chat limit reached (${PUBLIC_MESSAGE_CAP} messages per session). Sign in for unlimited access, or refresh the page to start a new session.`,
+    });
+    return { statusCode: 429, body: "rate_limited" };
   }
 
   // ---- 2b. confirmAction shortcut: bypass the LLM, run the confirm_* tool directly ----

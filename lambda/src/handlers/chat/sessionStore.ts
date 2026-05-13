@@ -44,6 +44,11 @@ export interface ChatSession {
    *  Source of truth for agent-type derivation and downstream RBAC checks
    *  (canWriteClinic etc.). Replaces the empty array we used to pass. */
   userGroups?: string[];
+  /** Number of inbound user turns processed on this session. Incremented
+   *  atomically by `refreshSession`. Public sessions are capped at 20 to
+   *  bound Bedrock spend from drive-by abuse; authenticated sessions ignore
+   *  it. Optional because pre-existing rows won't have the field. */
+  messageCount?: number;
 }
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
@@ -115,18 +120,36 @@ export async function getSessionByConnectionId(connectionId: string): Promise<Ch
   return session;
 }
 
-/** Refresh the 15-min TTL on each turn so the session stays alive while active. */
-export async function refreshSession(userSub: string, connectionId: string): Promise<void> {
+/**
+ * Refresh the 15-min TTL on each turn so the session stays alive while
+ * active. Also atomically increments `messageCount` and returns the new
+ * value — public sessions read this to enforce a per-session cap (see
+ * chatMessage.ts). For authenticated sessions the counter still increments
+ * but the caller is free to ignore the return value.
+ *
+ * Returns `null` if the row was already expired (Conditional check failed)
+ * — caller should re-bootstrap.
+ */
+export async function refreshSession(userSub: string, connectionId: string): Promise<number | null> {
   const now = nowSec();
-  await ddb.send(new UpdateCommand({
-    TableName: CHAT_CONNECTIONS_TABLE,
-    Key: { userSub, connectionId },
-    UpdateExpression: "SET lastActivityAt = :now, #ttl = :ttl",
-    ExpressionAttributeNames: { "#ttl": "ttl" },
-    ExpressionAttributeValues: { ":now": now, ":ttl": now + SESSION_TTL_SECONDS },
-    // Don't refresh expired rows — let DDB GC them.
-    ConditionExpression: "attribute_not_exists(#ttl) OR #ttl > :now",
-  }));
+  try {
+    const res = await ddb.send(new UpdateCommand({
+      TableName: CHAT_CONNECTIONS_TABLE,
+      Key: { userSub, connectionId },
+      UpdateExpression: "SET lastActivityAt = :now, #ttl = :ttl ADD messageCount :one",
+      ExpressionAttributeNames: { "#ttl": "ttl" },
+      ExpressionAttributeValues: { ":now": now, ":ttl": now + SESSION_TTL_SECONDS, ":one": 1 },
+      // Don't refresh expired rows — let DDB GC them.
+      ConditionExpression: "attribute_not_exists(#ttl) OR #ttl > :now",
+      ReturnValues: "UPDATED_NEW",
+    }));
+    const newCount = res.Attributes?.messageCount;
+    return typeof newCount === "number" ? newCount : null;
+  } catch (e: any) {
+    // ConditionalCheckFailedException — row expired or doesn't exist.
+    if (e?.name === "ConditionalCheckFailedException") return null;
+    throw e;
+  }
 }
 
 /** Called from $disconnect. Idempotent — DDB TTL will clean it up anyway within 15 min. */
