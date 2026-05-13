@@ -1781,33 +1781,104 @@ export class DentiPalCDKStack extends cdk.Stack {
         // raised via AWS support, we ship a curated v1 slice of the catalog.
         // After the quota raises, drop the .filter(...) at the action-group
         // assignment sites and the full toolset returns automatically.
+        // Pro agent tool list. Bedrock's "APIs per Agent" quota is 50 (raised
+        // from the default 11). We're at 25/50 — leaves room for further
+        // additions without hitting the cap. Excludes the legacy two-step
+        // preview/confirm_apply_to_job and preview/confirm_respond_invitation
+        // pairs that have been replaced by single-shot apply_to_job and
+        // respond_invitation respectively.
         const PRO_V1_FUNCTIONS = [
+            // search / info
             'search_jobs_near_me',
+            'get_job_details',
             'get_my_invitations',
             'get_my_applications',
             'get_my_negotiations',
             'get_scheduled_shifts',
             'get_completed_shifts',
-            // Single-shot writes (no preview/confirm pair). Match REST API
-            // contracts exactly — apply takes only jobId; respond_invitation
-            // takes invitationId + response.
+            // Single-shot writes (no preview/confirm pair).
             'apply_to_job',
             'respond_invitation',
-            // Counter-offer preview/confirm pair kept because rates need review.
+            // Counter-offer preview/confirm pair — rates need a review step.
             'preview_negotiate',
             'confirm_negotiate',
+            // Withdraw an application.
+            'preview_withdraw_application',
+            'confirm_withdraw_application',
+            // Post-shift attestation (triggers payment processing).
+            'preview_attest_completed_shift',
+            'confirm_attest_completed_shift',
+            // Self-service profile / address / preferences edits.
+            'preview_update_my_profile',
+            'confirm_update_my_profile',
+            'preview_update_home_address',
+            'confirm_update_home_address',
+            'preview_update_notification_preferences',
+            'confirm_update_notification_preferences',
+            // Feedback + referrals.
+            'preview_submit_feedback',
+            'confirm_submit_feedback',
+            'preview_send_referral',
+            'confirm_send_referral',
         ];
+        // Clinic agent tool list. All available clinic functions are enabled
+        // (47/50 under the APIs-per-Agent quota).
         const CLINIC_V1_FUNCTIONS = [
+            // info / lookups
             'get_my_clinics',
             'get_action_needed',
             'list_applicants_for_job',
             'get_professional_info',
+            'get_open_shifts',
+            'get_scheduled_shifts',
+            'get_completed_shifts',
+            'get_job_details',
+            'get_clinic_favorites',
+            'search_professionals',
+            // post temporary / consulting / permanent jobs
             'preview_post_temporary_job',
             'confirm_post_temporary_job',
+            'preview_post_consulting_job',
+            'confirm_post_consulting_job',
+            'preview_post_permanent_job',
+            'confirm_post_permanent_job',
+            // accept / reject / negotiate / report-no-show on applicants
             'preview_accept_professional',
             'confirm_accept_professional',
             'preview_reject_professional',
             'confirm_reject_professional',
+            'preview_negotiate',
+            'confirm_negotiate',
+            'preview_mark_shift_completed',
+            'confirm_mark_shift_completed',
+            'preview_report_no_show',
+            'confirm_report_no_show',
+            // edit / cancel posted jobs
+            'preview_edit_job',
+            'confirm_edit_job',
+            'preview_cancel_job',
+            'confirm_cancel_job',
+            // invitations to specific pros
+            'preview_send_invitations',
+            'confirm_send_invitations',
+            // favorites + team management
+            'preview_add_clinic_favorite',
+            'confirm_add_clinic_favorite',
+            'preview_remove_clinic_favorite',
+            'confirm_remove_clinic_favorite',
+            'preview_invite_team_member',
+            'confirm_invite_team_member',
+            'preview_update_team_member',
+            'confirm_update_team_member',
+            'preview_remove_team_member',
+            'confirm_remove_team_member',
+            // clinic-profile / notifications / feedback
+            'preview_update_clinic_profile',
+            'confirm_update_clinic_profile',
+            'preview_update_notification_preferences',
+            'confirm_update_notification_preferences',
+            'preview_submit_feedback',
+            'confirm_submit_feedback',
         ];
 
         const ACTION_GROUP_CHUNK_SIZE = 10;
@@ -2680,6 +2751,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '',
                 'Intent → tool map (call IMMEDIATELY, no questions):',
                 '- "search jobs" / "find work" / "show shifts" / "what\'s available" → search_jobs_near_me with NO parameters. The server already knows the user\'s 50-mile radius from their home address.',
+                '- "tell me about job X" / "details on job X" / "more about that one" → get_job_details({jobId}).',
                 '- "apply to N" / "apply to that one" / "apply to the third one" / "I\'ll take that one" → apply_to_job({jobId}) IMMEDIATELY. See ABSOLUTE RULE above. No questions.',
                 '- "my invites" / "who invited me" → get_my_invitations.',
                 '- "accept invite N" / "decline invite N" → respond_invitation with {invitationId, response: "accepted"|"declined"}. No follow-up questions.',
@@ -2687,6 +2759,13 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "scheduled shifts" / "upcoming work" → get_scheduled_shifts.',
                 '- "completed shifts" / "what have I done" → get_completed_shifts.',
                 '- "negotiate $X on application Y" / "counter at $X" → preview_negotiate with the rate. The system renders a confirm card; the user clicks Confirm; you don\'t need to call confirm_negotiate yourself (a UI confirmAction handles it).',
+                '- "withdraw" / "cancel my application" → preview_withdraw_application({applicationId}). Resolve applicationId from prior get_my_applications or positional reference.',
+                '- "mark shift done" / "I worked that shift" / "attest" / "sign off on that shift" → preview_attest_completed_shift({jobId, attestedHours, signedAt: <ISO now>}). Ask only for the hours worked if the user didn\'t already say.',
+                '- "update my profile" / "change my role" / "edit my specialties" / "update bio" → preview_update_my_profile with only the fields the user mentioned. Don\'t enumerate fields; let them say what they want changed.',
+                '- "change my address" / "update home address" / "I moved" → preview_update_home_address. If user gave the full address in one sentence, parse line1/city/state/pincode out of it; otherwise ask for the line they\'re missing in ONE short sentence.',
+                '- "notification settings" / "stop emailing me" / "turn off SMS" / "notification preferences" → preview_update_notification_preferences with only the toggles the user named (emailEnabled / smsEnabled / pushEnabled / jobInvitations / applicationUpdates).',
+                '- "send feedback" / "report a bug" / "I want to tell you something" → preview_submit_feedback({type: "general", feedback: "<user\'s message>"}).',
+                '- "refer a friend" / "invite someone" → preview_send_referral with the friend\'s email or phone.',
                 '',
                 'Reference resolution (no questions):',
                 '- "the first/second/third one", "that job", "the latest" → resolve from the MOST RECENT tool result in your conversation memory. Don\'t ask the user "which one?".',
@@ -2777,9 +2856,31 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "what needs my attention" / "action items" / "what\'s pending" / "recent applicants" / "pending applicants" / "applicants" (with no specific job named) → get_action_needed. This returns all pending applicants + negotiations across the clinic\'s jobs in one call. If multiple clinics exist and user didn\'t name one, silently pick the first from get_my_clinics — don\'t ask.',
                 '- "who applied to job X" / "applicants for <job>" (a specific job is named) → list_applicants_for_job with that jobId.',
                 '- "show me <name>\'s profile" / "tell me about that pro" → get_professional_info.',
+                '- "open shifts" / "active jobs" / "jobs I have posted" → get_open_shifts.',
+                '- "scheduled shifts" / "upcoming work for my clinic" → get_scheduled_shifts.',
+                '- "completed shifts" / "past shifts" / "what\'s been done" → get_completed_shifts.',
+                '- "details on job X" / "show job X" → get_job_details({jobId}).',
+                '- "favorites" / "starred pros" / "my saved professionals" → get_clinic_favorites.',
+                '- "find a hygienist" / "search pros" / "look up a dentist" → search_professionals with the role/specialty/area the user mentioned.',
                 '- "post a temp shift" / "post a job" → If you have ALL required fields (clinic, role, date, start_time, end_time, rate, shift_speciality), call preview_post_temporary_job IMMEDIATELY. If anything is missing, ask for the missing pieces in ONE short conversational sentence with an inline example — NEVER as a numbered checklist, never with bold markdown, never asking 8 questions at once. Example response when ALL fields are missing: "Sure — clinic, role, date, time window, and rate? e.g., \'Qwerty Clinic, Dental Assistant, May 21 9am–2pm, $50/hr\'". When only the rate is missing: "What rate? e.g., $40/hr".',
                 '- "accept <pro>" / "hire <pro> for job X" → preview_accept_professional → wait for confirm.',
                 '- "reject <pro>" / "decline <pro>" → preview_reject_professional → wait for confirm.',
+                '- "post a permanent job" / "post a full-time position" → preview_post_permanent_job (then wait for confirm).',
+                '- "post a consulting gig" / "multi-day consulting" → preview_post_consulting_job (then wait for confirm).',
+                '- "negotiate $X on application Y" / "counter their offer" → preview_negotiate with the rate. The system renders a confirm card.',
+                '- "mark shift complete" / "shift was worked" / "sign off the shift" → preview_mark_shift_completed.',
+                '- "no-show" / "<pro> didn\'t show up" → preview_report_no_show.',
+                '- "edit job X" / "change the rate on job X" → preview_edit_job with the fields the user mentioned.',
+                '- "cancel job X" / "take down that posting" → preview_cancel_job.',
+                '- "invite <pro> to job X" / "directly invite" → preview_send_invitations with userSubs and jobId.',
+                '- "favorite this pro" / "save <name>" → preview_add_clinic_favorite.',
+                '- "remove favorite" / "unfavorite" → preview_remove_clinic_favorite.',
+                '- "add team member" / "invite admin" → preview_invite_team_member.',
+                '- "update team member" / "change <name>\'s role" → preview_update_team_member.',
+                '- "remove team member" / "kick <name>" → preview_remove_team_member.',
+                '- "update clinic profile" / "change clinic name" / "edit clinic details" → preview_update_clinic_profile with only the fields the user mentioned.',
+                '- "notification settings" / "stop emailing" / "turn off SMS" → preview_update_notification_preferences with only the toggles named.',
+                '- "send feedback" / "report a bug" → preview_submit_feedback.',
                 '',
                 'Resolution rules (no questions):',
                 '- If user manages exactly ONE clinic, auto-pass that clinicId for every tool that needs one. Don\'t ask "which clinic?".',

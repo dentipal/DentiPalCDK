@@ -234,71 +234,49 @@ export const handler = async (
     console.log(`6. Processing Logic Branch: ${responseData.response}`);
 
     if (responseData.response === "accepted") {
-      // A. Accepted Logic
-      applicationId = uuidv4();
+      // A. Accepted Logic — produce a pending application; clinic still confirms via /jobs/{jobId}/hire.
 
-      console.log(`   Action: Creating Application (Accepted). ID: ${applicationId}`);
-
-      // Create Application Item
-      await dynamodb.send(
-        new PutItemCommand({
+      // Dedup: if the pro previously cold-applied (or was invited and accepted) for this job,
+      // reuse the existing application instead of overwriting it. A "rejected" record does not block.
+      const existingApps = await dynamodb.send(
+        new QueryCommand({
           TableName: JOB_APPLICATIONS_TABLE,
-          Item: {
-            applicationId: { S: applicationId },
-            jobId: { S: jobId },
-            professionalUserSub: { S: userSub },
-            clinicUserSub: { S: clinicUserSub },
-            clinicId: { S: clinicId },
-            applicationStatus: { S: "accepted" },
-            appliedAt: { S: timestamp },
-            updatedAt: { S: timestamp },
-            applicationMessage: {
-              S: responseData.message || "Application submitted via invitation"
-            },
-            fromInvitation: { BOOL: true },
-            invitationResponseDate: { S: timestamp },
+          KeyConditionExpression: "jobId = :jobId AND professionalUserSub = :userSub",
+          ExpressionAttributeValues: {
+            ":jobId": { S: jobId },
+            ":userSub": { S: userSub },
           },
         })
       );
-      console.log("   -> Application Created.");
 
-      // Check Job Status for Update
-      const jobStatus = job.status?.S;
-      console.log(`   Job Status Check: Current status is '${jobStatus}'`);
+      const existingApp = existingApps.Items?.find(
+        (item) => (item.applicationStatus?.S || "").toLowerCase() !== "rejected"
+      );
 
-      if (jobStatus === "open" || jobStatus === "active") {
-        try {
-          const jobClinicId = job.clinicId?.S || clinicId;
-          const jobJobId = job.jobId?.S || jobId;
+      if (existingApp) {
+        applicationId = existingApp.applicationId?.S || null;
+        console.log(`   Existing application found, reusing ID: ${applicationId}`);
+      } else {
+        applicationId = uuidv4();
+        console.log(`   Action: Creating Application (Pending). ID: ${applicationId}`);
 
-          console.log("   Action: Updating Job Status to 'scheduled'");
-          console.log("   -> Using Keys for Update:", { clinicId: jobClinicId, jobId: jobJobId });
-
-          await dynamodb.send(
-            new UpdateItemCommand({
-              TableName: JOB_POSTINGS_TABLE,
-              Key: {
-                clinicId: { S: jobClinicId },
-                jobId: { S: jobJobId },
-              },
-              UpdateExpression:
-                "SET #status = :status, #acceptedProfessional = :professional, #updatedAt = :updatedAt",
-              ExpressionAttributeNames: {
-                "#status": "status",
-                "#acceptedProfessional": "acceptedProfessionalUserSub",
-                "#updatedAt": "updatedAt",
-              },
-              ExpressionAttributeValues: {
-                ":status": { S: "scheduled" },
-                ":professional": { S: userSub },
-                ":updatedAt": { S: timestamp },
-              },
-            })
-          );
-          console.log("   -> Job Updated Successfully.");
-        } catch (updateError: any) {
-          console.error("   -> FAILED to update job posting status:", updateError);
-        }
+        await dynamodb.send(
+          new PutItemCommand({
+            TableName: JOB_APPLICATIONS_TABLE,
+            Item: {
+              applicationId: { S: applicationId },
+              jobId: { S: jobId },
+              professionalUserSub: { S: userSub },
+              clinicUserSub: { S: clinicUserSub },
+              clinicId: { S: clinicId },
+              applicationStatus: { S: "pending" },
+              appliedAt: { S: timestamp },
+              updatedAt: { S: timestamp },
+              applicationMessage: { S: responseData.message || "" },
+            },
+          })
+        );
+        console.log("   -> Application Created.");
       }
 
       // --- Publish EventBridge event to trigger inbox conversation ---
@@ -482,7 +460,7 @@ export const handler = async (
         jobType: jobType,
         nextSteps:
           responseData.response === "accepted"
-            ? "Job has been scheduled. Wait for clinic confirmation."
+            ? "Application submitted. Waiting for clinic to confirm."
             : responseData.response === "negotiating"
             ? "Negotiation started. Clinic will review your proposal."
             : "Invitation declined. Thank you for your response.",
