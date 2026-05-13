@@ -1255,6 +1255,20 @@ export class DentiPalCDKStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
         });
 
+        // 23. DentiPal-SessionInvalidations — instant-kick denylist.
+        //     When a user changes their password (or we otherwise need to
+        //     kick all sessions), we write { userSub, invalidatedBefore }.
+        //     The auth middleware compares each token's `iat` against
+        //     `invalidatedBefore`; tokens issued earlier are rejected.
+        //     ttl auto-cleans rows older than the refresh-token lifetime.
+        const sessionInvalidationsTable = new dynamodb.Table(this, 'SessionInvalidationsTable', {
+            tableName: 'DentiPal-V5-SessionInvalidations',
+            partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            timeToLiveAttribute: 'ttl',
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+
         // Collect all tables for the main REST handler
         const allTables = [
             clinicProfilesTable, clinicFavoritesTable, clinicsTable, connectionsTable,
@@ -1262,7 +1276,8 @@ export class DentiPalCDKStack extends cdk.Stack {
             jobNegotiationsTable, jobPostingsTable, messagesTable,
             professionalProfilesTable, referralsTable, userAddressesTable,
             userClinicAssignmentsTable, jobPromotionsTable,
-            leadsTable, leadActivityTable, bansTable, passwordOtpTable,
+            leadsTable, leadActivityTable, bansTable,
+            passwordOtpTable, sessionInvalidationsTable,
             notificationPreferencesTable,
             notificationsTable,
         ];
@@ -1410,6 +1425,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 LEAD_ACTIVITY_TABLE: leadActivityTable.tableName,
                 BANS_TABLE: bansTable.tableName,
                 PASSWORD_OTP_TABLE: passwordOtpTable.tableName,
+                SESSION_INVALIDATIONS_TABLE: sessionInvalidationsTable.tableName,
 
                 // Stats/Alias mappings for code compatibility
                 CLINIC_JOBS_POSTED_TABLE: jobPostingsTable.tableName,
