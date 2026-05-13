@@ -453,8 +453,14 @@ async function handlerBody(
               returnControlInvocationResults,
             }
           : undefined,
-        enableTrace: false,
+        // Trace enabled: surfaces guardrail decisions, model rationale, and
+        // any safety-decline cause in the event stream. Required to diagnose
+        // canned "Sorry, I am unable to assist..." responses — without trace
+        // we only see the user-facing text and have no idea why.
+        enableTrace: true,
       });
+
+      console.log(`[chatMessage] InvokeAgent loop=${loop} sessionId=${session.bedrockSessionId} hasReturnControl=${!!returnControlInvocationResults} inputText="${(inputText || "").slice(0, 120)}"`);
 
       const response = await bedrock.send(command);
       if (!response.completion) {
@@ -464,10 +470,12 @@ async function handlerBody(
 
       let pendingToolCalls: ToolCall[] = [];
       let pendingInvocationId: string | undefined;
+      let assistantTextThisTurn = "";
 
       for await (const event of response.completion) {
         if (event.chunk?.bytes) {
           const delta = decoder.decode(event.chunk.bytes);
+          assistantTextThisTurn += delta;
           await postFrame(api, connectionId, { type: "token", delta });
           continue;
         }
@@ -492,7 +500,29 @@ async function handlerBody(
             }
           }
         }
+
+        // Trace events — log a compact view so we can see what Bedrock was
+        // actually doing on every turn. The trace object is deep; stringify
+        // and truncate to keep the log bytes reasonable.
+        if (event.trace) {
+          try {
+            const t = event.trace;
+            const truncated = JSON.stringify(t).slice(0, 1800);
+            console.log(`[chatMessage] trace loop=${loop}: ${truncated}`);
+          } catch {
+            console.log(`[chatMessage] trace loop=${loop}: <unserializable>`);
+          }
+        }
+
+        // Catch any other unhandled event keys.
+        const knownKeys = new Set(["chunk", "returnControl", "trace"]);
+        const unknown = Object.keys(event).filter((k) => !knownKeys.has(k));
+        if (unknown.length > 0) {
+          console.log(`[chatMessage] unknown event keys loop=${loop}: ${unknown.join(",")} payload=${JSON.stringify(event).slice(0, 800)}`);
+        }
       }
+
+      console.log(`[chatMessage] turn complete loop=${loop} pendingToolCalls=${pendingToolCalls.length} assistantTextLen=${assistantTextThisTurn.length} text="${assistantTextThisTurn.slice(0, 200)}"`);
 
       // No tool calls => assistant turn is complete.
       if (pendingToolCalls.length === 0) {

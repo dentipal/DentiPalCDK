@@ -108,6 +108,37 @@ function errOrOk(toolName: string, r: { status: number; body: any }): ToolResult
   return ok(toolName, r.body);
 }
 
+/**
+ * Filter the `applications` array inside a getJobApplications response down
+ * to a status whitelist. The handler ignores `?status=` so we filter on the
+ * way out here — keeps the chat's Scheduled / Completed views aligned with
+ * the dashboard's tab filters. Returns a new `{status, body}` whose body
+ * mirrors the handler's `{status, statusCode, message, data: {applications, totalCount, ...}, timestamp}`
+ * envelope but with the trimmed array.
+ */
+function filterApplicationsByStatusInResult(
+  r: { status: number; body: any },
+  allowed: string[],
+): { status: number; body: any } {
+  if (r.status >= 400 || !r.body || typeof r.body !== "object") return r;
+  const allowedSet = new Set(allowed.map((s) => s.toLowerCase()));
+  const apps: any[] | undefined =
+    r.body?.data?.applications ?? r.body?.applications;
+  if (!Array.isArray(apps)) return r;
+  const kept = apps.filter((a) => {
+    const s = String(a?.applicationStatus || a?.status || "").toLowerCase();
+    return allowedSet.has(s);
+  });
+  const nextBody = { ...r.body };
+  if (r.body?.data?.applications) {
+    nextBody.data = { ...r.body.data, applications: kept, totalCount: kept.length };
+  } else {
+    nextBody.applications = kept;
+    if ("totalCount" in nextBody) nextBody.totalCount = kept.length;
+  }
+  return { status: r.status, body: nextBody };
+}
+
 function clampLimit(n: any): number {
   const v = typeof n === "number" ? n : parseInt(n);
   if (!Number.isFinite(v) || v <= 0) return 20;
@@ -385,16 +416,14 @@ export async function executeTool(
         return errOrOk(call.toolName, r);
       }
       case "get_scheduled_shifts": {
-        // Pros: ?status=scheduled passed to getJobApplications (matches the
-        // dashboard's "Scheduled" tab). Clinics: clinic-side handler.
+        // Pros: getJobApplications IGNORES ?status=, so we filter applications
+        // in-place to match the dashboard's "Scheduled" tab — anything where
+        // applicationStatus is scheduled / accepted / hired / confirmed.
+        // Clinics: dedicated clinic-side handler returns already-filtered.
         const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
         if (isPro || !call.input.clinicId) {
-          const r = await callHandlerInProcess(getJobApplicationsHandler, {
-            method: "GET",
-            queryStringParameters: { status: "scheduled" },
-            auth,
-          });
-          return errOrOk(call.toolName, r);
+          const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
+          return errOrOk(call.toolName, filterApplicationsByStatusInResult(r, ["scheduled", "accepted", "hired", "confirmed"]));
         }
         const r = await callHandlerInProcess(getScheduledShiftsHandler, {
           method: "GET",
@@ -406,12 +435,8 @@ export async function executeTool(
       case "get_completed_shifts": {
         const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
         if (isPro || !call.input.clinicId) {
-          const r = await callHandlerInProcess(getJobApplicationsHandler, {
-            method: "GET",
-            queryStringParameters: { status: "completed" },
-            auth,
-          });
-          return errOrOk(call.toolName, r);
+          const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
+          return errOrOk(call.toolName, filterApplicationsByStatusInResult(r, ["completed"]));
         }
         const r = await callHandlerInProcess(getCompletedShiftsHandler, {
           method: "GET",
