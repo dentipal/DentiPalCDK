@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
-    DynamoDBDocumentClient, GetCommand, UpdateCommand, DeleteCommand,
+    DynamoDBDocumentClient, GetCommand, UpdateCommand, DeleteCommand, PutCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { corsHeaders } from "../corsHeaders";
 import { extractUserFromBearerToken } from "../utils";
@@ -139,7 +139,38 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             Username: userSub,
         }));
 
-        // 8. Re-issue tokens so the current device stays logged in
+        // 7b. Write to the session-invalidation denylist so existing ACCESS
+        //     tokens (which Cognito does NOT revoke) are rejected by the
+        //     router on their next request. invalidatedBefore is "now"; any
+        //     token issued before this moment is dead on its next API call.
+        //     We use a 31-day ttl so rows auto-clean after refresh tokens
+        //     would have expired anyway.
+        // Use "now - 1s" so a token issued in the same second as this write
+        // still passes (`iat < invalidatedBefore` is the check). Eliminates
+        // a 1-in-1 chance of locking out the current device.
+        const invalidatedBefore = Math.floor(Date.now() / 1000) - 1;
+        if (process.env.SESSION_INVALIDATIONS_TABLE) {
+            try {
+                await ddb.send(new PutCommand({
+                    TableName: process.env.SESSION_INVALIDATIONS_TABLE,
+                    Item: {
+                        userSub,
+                        invalidatedBefore,
+                        reason: "password_change",
+                        invalidatedAt: new Date().toISOString(),
+                        ttl: invalidatedBefore + 31 * 24 * 60 * 60,   // 31 days
+                    },
+                }));
+            } catch (e) {
+                console.error("Failed to write session invalidation", e);
+                // Not fatal — refresh-token invalidation still works.
+            }
+        }
+
+        // 8. Re-issue tokens so the current device stays logged in.
+        //    NOTE: This MUST come after step 7b so the new token's `iat`
+        //    is >= invalidatedBefore, otherwise the router would reject
+        //    the current device's very next request.
         let newTokens: any = null;
         if (email) {
             try {
