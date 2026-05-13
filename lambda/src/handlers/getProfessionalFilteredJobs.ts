@@ -15,6 +15,7 @@ const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostin
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-V5-JobApplications";
 const USER_ADDRESSES_TABLE = process.env.USER_ADDRESSES_TABLE || "DentiPal-V5-UserAddresses";
 const JOB_PROMOTIONS_TABLE = process.env.JOB_PROMOTIONS_TABLE || "DentiPal-V5-JobPromotions";
+const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-ClinicProfiles";
 
 const ddb = new DynamoDBClient({ region: REGION });
 
@@ -783,6 +784,45 @@ export const handler = async (
       }
       return obj;
     });
+
+    // 6b) Enrich with clinic display name from CLINIC_PROFILES_TABLE so the
+    //     professional UI can show "<role> at <clinic name>" without a second
+    //     round-trip from the client. Keyed by clinicUserSub (the owning user)
+    //     since that's the PK of the clinic-profiles table.
+    const clinicUserSubs = Array.from(
+      new Set(jobs.map((j: any) => j.clinicUserSub).filter((s: any): s is string => typeof s === "string" && s.length > 0))
+    );
+    if (clinicUserSubs.length > 0) {
+      try {
+        const clinicNameByUserSub = new Map<string, string>();
+        // BatchGetItem caps at 100 keys per call — chunk to stay safe.
+        for (let i = 0; i < clinicUserSubs.length; i += 100) {
+          const chunk = clinicUserSubs.slice(i, i + 100);
+          const resp = await ddb.send(new BatchGetItemCommand({
+            RequestItems: {
+              [CLINIC_PROFILES_TABLE]: {
+                Keys: chunk.map((sub) => ({ userSub: { S: sub } })),
+                ProjectionExpression: "userSub, clinic_name",
+              },
+            },
+          }));
+          for (const row of resp.Responses?.[CLINIC_PROFILES_TABLE] || []) {
+            const sub = str(row.userSub);
+            const name = str(row.clinic_name);
+            if (sub && name) clinicNameByUserSub.set(sub, name);
+          }
+        }
+        for (const j of jobs as any[]) {
+          const name = clinicNameByUserSub.get(j.clinicUserSub);
+          if (name) {
+            j.clinicName = name;
+            j.clinic = { ...(j.clinic || {}), name };
+          }
+        }
+      } catch (e) {
+        console.warn("[getProfessionalFilteredJobs] clinic-name enrichment failed:", e);
+      }
+    }
 
     for (const j of jobs) {
       if (j.isPromoted && j.jobId && j.promotionId) {
