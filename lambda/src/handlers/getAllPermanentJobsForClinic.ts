@@ -9,6 +9,9 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { corsHeaders } from "./corsHeaders";
 // ✅ UPDATE: Changed import to use the new token utility
 import { extractUserFromBearerToken } from "./utils";
+// Additive: read-time enrichment with live Clinics-table address. Never
+// mutates DynamoDB; on failure the response carries the original snapshot.
+import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -258,10 +261,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         console.log("✅ All permanent jobs formatted successfully");
 
+        // Additive: refresh address fields on each formatted job with the
+        // current Clinics-table row. DB rows are NOT mutated; on failure we
+        // log and return the original snapshot.
+        let jobsForResponse: any[] = formattedJobs as any[];
+        try {
+            jobsForResponse = (await enrichRecordsWithLiveClinicAddress(formattedJobs as any[])) as any[];
+        } catch (enrichErr) {
+            console.warn(
+                "[getAllPermanentJobsForClinic] live clinic-address enrichment skipped:",
+                (enrichErr as Error)?.message
+            );
+        }
+
         // 6. Success Response
         return json(event, 200, {
-            message: `Retrieved ${formattedJobs.length} permanent job(s) for clinicId: ${clinicId}`,
-            jobs: formattedJobs
+            message: `Retrieved ${jobsForResponse.length} permanent job(s) for clinicId: ${clinicId}`,
+            jobs: jobsForResponse
         });
 
     } catch (error: any) {

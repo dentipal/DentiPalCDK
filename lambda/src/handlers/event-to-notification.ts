@@ -53,8 +53,11 @@ interface NotificationDraft {
 }
 
 const PROFESSIONAL_DASHBOARD = "/professional-dashboard";
+const PROFESSIONAL_DASHBOARD_PENDING = "/professional-dashboard?tab=pending";
+const PROFESSIONAL_DASHBOARD_SCHEDULED = "/professional-dashboard?tab=scheduled";
+const PROFESSIONAL_DASHBOARD_COMPLETED = "/professional-dashboard?tab=completed";
+const PROFESSIONAL_DASHBOARD_INVITES = "/professional-dashboard?tab=invites";
 const PROFESSIONAL_JOBS = "/jobs";
-const PROFESSIONAL_NEGOTIATIONS = "/negotiations";
 const PROFESSIONAL_PROFILE = "/professional-profile";
 const PROFESSIONAL_INBOX = "/professional-inbox";
 
@@ -82,7 +85,7 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `${clinicName} scheduled you for a shift`,
                 body: shiftLine || undefined,
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_DASHBOARD,
+                deepLink: PROFESSIONAL_DASHBOARD_SCHEDULED,
                 subjectType: "job",
                 subjectId: detail.jobId,
             };
@@ -95,7 +98,7 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `${clinicName} cancelled your scheduled shift`,
                 body: shiftLine || undefined,
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_DASHBOARD,
+                deepLink: PROFESSIONAL_DASHBOARD_PENDING,
                 subjectType: "job",
                 subjectId: detail.jobId,
             };
@@ -108,7 +111,7 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `${clinicName} updated your shift details`,
                 body: shiftLine || undefined,
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_DASHBOARD,
+                deepLink: PROFESSIONAL_DASHBOARD_SCHEDULED,
                 subjectType: "job",
                 subjectId: detail.jobId,
             };
@@ -121,7 +124,7 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `Your shift at ${clinicName} is marked complete`,
                 body: shiftLine || undefined,
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_DASHBOARD,
+                deepLink: PROFESSIONAL_DASHBOARD_COMPLETED,
                 subjectType: "job",
                 subjectId: detail.jobId,
             };
@@ -134,7 +137,7 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `${clinicName} reported a no-show`,
                 body: "Please review and respond — action may be required.",
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_DASHBOARD,
+                deepLink: PROFESSIONAL_DASHBOARD_PENDING,
                 subjectType: "job",
                 subjectId: detail.jobId,
             };
@@ -147,7 +150,7 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `Reminder: your shift at ${clinicName} starts in 24 hours`,
                 body: shiftLine || undefined,
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_DASHBOARD,
+                deepLink: PROFESSIONAL_DASHBOARD_SCHEDULED,
                 subjectType: "job",
                 subjectId: detail.jobId,
             };
@@ -160,7 +163,7 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `Heads up: your shift at ${clinicName} starts in 1 hour`,
                 body: shiftLine || undefined,
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_DASHBOARD,
+                deepLink: PROFESSIONAL_DASHBOARD_SCHEDULED,
                 subjectType: "job",
                 subjectId: detail.jobId,
             };
@@ -173,7 +176,7 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `Your application for ${clinicName} was declined`,
                 body: "The clinic chose another candidate this time.",
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_JOBS,
+                deepLink: PROFESSIONAL_DASHBOARD_PENDING,
                 subjectType: "application",
                 subjectId: detail.applicationId,
             };
@@ -186,7 +189,7 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `${clinicName} invited you to apply`,
                 body: shiftLine || undefined,
                 actorName: clinicName,
-                deepLink: detail.jobId ? `${PROFESSIONAL_JOBS}/${detail.jobId}` : PROFESSIONAL_JOBS,
+                deepLink: PROFESSIONAL_DASHBOARD_INVITES,
                 subjectType: "job",
                 subjectId: detail.jobId,
             };
@@ -199,7 +202,9 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `${clinicName} sent you a counter offer`,
                 body: shift.rate ? `Counter rate: $${shift.rate}/hr` : undefined,
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_NEGOTIATIONS,
+                // Counter offers surface in the professional's Pending tab,
+                // where they can view the rate and accept / decline / re-counter.
+                deepLink: PROFESSIONAL_DASHBOARD_PENDING,
                 subjectType: "negotiation",
                 subjectId: detail.negotiationId,
             };
@@ -212,7 +217,8 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `${clinicName} accepted your counter offer`,
                 body: shift.rate ? `Confirmed at $${shift.rate}/hr` : undefined,
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_NEGOTIATIONS,
+                // Acceptance immediately becomes a scheduled shift.
+                deepLink: PROFESSIONAL_DASHBOARD_PENDING,
                 subjectType: "negotiation",
                 subjectId: detail.negotiationId,
             };
@@ -225,7 +231,8 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 title: `${clinicName} declined your counter offer`,
                 body: "They've moved on to other candidates.",
                 actorName: clinicName,
-                deepLink: PROFESSIONAL_NEGOTIATIONS,
+                // Declined offers stay visible in Pending until the user dismisses them.
+                deepLink: PROFESSIONAL_DASHBOARD_PENDING,
                 subjectType: "negotiation",
                 subjectId: detail.negotiationId,
             };

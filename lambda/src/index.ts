@@ -191,6 +191,7 @@ import { handler as updateNotificationPreferencesHandler } from "./handlers/upda
 // In-app notification feed (bell icon / notifications page).
 import { handler as listNotificationsHandler } from "./handlers/listNotifications";
 import { handler as markNotificationsReadHandler } from "./handlers/markNotificationsRead";
+import { handler as deleteNotificationsHandler } from "./handlers/deleteNotifications";
 
 import { corsHeaders } from "./handlers/corsHeaders";
 
@@ -482,6 +483,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         // In-app notification feed
         "GET:/notifications": listNotificationsHandler,
         "POST:/notifications/read": markNotificationsReadHandler,
+        "POST:/notifications/delete": deleteNotificationsHandler,
 
     };
 

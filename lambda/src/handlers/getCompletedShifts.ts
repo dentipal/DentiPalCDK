@@ -13,6 +13,9 @@ import {
 
 import { extractUserFromBearerToken } from "./utils.js";
 import { corsHeaders } from "./corsHeaders";
+// Additive: read-time enrichment with live Clinics-table address. Never
+// mutates DynamoDB; on failure the response carries the original snapshot.
+import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -140,11 +143,24 @@ export const handler = async (
       return String(aKey).localeCompare(String(bKey));
     });
 
+    // Additive: refresh address fields on each completed job with the live
+    // Clinics-table values. DB rows are NOT mutated; on failure we log and
+    // continue with the original snapshot.
+    let jobsForResponse: any[] = jobs;
+    try {
+      jobsForResponse = (await enrichRecordsWithLiveClinicAddress(jobs)) as any[];
+    } catch (enrichErr) {
+      console.warn(
+        "[getCompletedShifts] live clinic-address enrichment skipped:",
+        (enrichErr as Error)?.message
+      );
+    }
+
     return json(event, 200, {
       message: "Completed shifts retrieved successfully",
       clinicUserSub: userSub,
-      count: jobs.length,
-      jobs,
+      count: jobsForResponse.length,
+      jobs: jobsForResponse,
     });
     
   } catch (err: any) {

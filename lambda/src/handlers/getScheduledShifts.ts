@@ -9,6 +9,9 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 import { corsHeaders } from "./corsHeaders";
+// Additive: read-time enrichment with live Clinics-table address. Never
+// mutates DynamoDB; on failure the response carries the original snapshot.
+import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE;
@@ -205,12 +208,25 @@ export const handler = async (
       };
     });
 
+    // Additive: refresh address fields on each scheduled job with the live
+    // Clinics-table values. DB rows are NOT mutated; on failure we log and
+    // continue with the original snapshot.
+    let jobsForResponse: any[] = scheduledJobs as any[];
+    try {
+      jobsForResponse = (await enrichRecordsWithLiveClinicAddress(scheduledJobs as any[])) as any[];
+    } catch (enrichErr) {
+      console.warn(
+        "[getScheduledShifts] live clinic-address enrichment skipped:",
+        (enrichErr as Error)?.message
+      );
+    }
+
     return {
       statusCode: 200,
       headers: corsHeaders(event),
       body: JSON.stringify({
         message: "Scheduled jobs retrieved successfully",
-        jobs: scheduledJobs,
+        jobs: jobsForResponse,
       }),
     };
   } catch (error: any) {

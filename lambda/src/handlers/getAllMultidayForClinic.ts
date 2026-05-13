@@ -10,9 +10,12 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Changed import to use the new token utility
-import { extractUserFromBearerToken } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { corsHeaders } from "./corsHeaders";
+// Additive: read-time enrichment with live Clinics-table address. Never
+// mutates DynamoDB; on failure the response carries the original snapshot.
+import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
 
 // Initialize the DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -281,11 +284,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         });
 
+        // Additive: refresh address fields on each job with the current
+        // Clinics-table values. DB rows are NOT mutated; on failure we log
+        // and continue with the original snapshot.
+        let jobsForResponse: any[] = jobs as any[];
+        try {
+            jobsForResponse = (await enrichRecordsWithLiveClinicAddress(jobs as any[])) as any[];
+        } catch (enrichErr) {
+            console.warn(
+                "[getAllMultidayForClinic] live clinic-address enrichment skipped:",
+                (enrichErr as Error)?.message
+            );
+        }
+
         // 5. Success Response
         return json(event, 200, {
             message: "Multi-day consulting jobs retrieved successfully",
             excludedCount: appliedJobIds.size,
-            jobs
+            jobs: jobsForResponse
         });
 
     } catch (error: any) {

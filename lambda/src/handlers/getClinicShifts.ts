@@ -12,6 +12,9 @@ import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/cli
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, canAccessClinic } from "./utils";
 import { corsHeaders } from "./corsHeaders";
+// Additive: read-time enrichment with live Clinics-table address. Never
+// mutates DynamoDB; on failure the response carries the original snapshot.
+import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
@@ -464,9 +467,25 @@ export const handler = async (
       }
     }
 
+    // Additive: refresh address fields on each shift row with the live
+    // Clinics-table values. DB rows are NOT mutated; on failure we log and
+    // continue with the original snapshot.
+    let dataForResponse: any[] = Array.isArray(responseData) ? (responseData as any[]) : [];
+    try {
+      if (Array.isArray(responseData)) {
+        dataForResponse = (await enrichRecordsWithLiveClinicAddress(responseData as any[])) as any[];
+      }
+    } catch (enrichErr) {
+      console.warn(
+        "[getClinicShifts] live clinic-address enrichment skipped:",
+        (enrichErr as Error)?.message
+      );
+      dataForResponse = responseData as any[];
+    }
+
     return json(event, 200, {
       message: "Clinic shifts retrieved successfully.",
-      data: responseData,
+      data: dataForResponse,
     });
   } catch (error: any) {
     console.error("Error retrieving clinic specific shifts:", error);
