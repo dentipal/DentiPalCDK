@@ -28,6 +28,7 @@ import { handler as updateProfessionalProfileHandler } from "./handlers/updatePr
 import { handler as deleteProfessionalProfileHandler } from "./handlers/deleteProfessionalProfile";
 import { handler as deleteProfessionalAccountHandler } from "./handlers/backup/deleteProfessionalAccount";
 import { handler as requestPasswordChangeHandler } from "./handlers/professional/requestPasswordChange";
+import { handler as verifyPasswordOtpHandler } from "./handlers/professional/verifyPasswordOtp";
 import { handler as confirmPasswordChangeHandler } from "./handlers/professional/confirmPasswordChange";
 import { handler as getProfessionalQuestionsHandler } from "./handlers/getProfessionalQuestions";
 import { handler as createClinicProfileHandler } from "./handlers/createClinicProfile";
@@ -269,6 +270,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "DELETE:/profiles": deleteProfessionalProfileHandler,
         "DELETE:/professionals/me/account": deleteProfessionalAccountHandler,
         "POST:/professionals/me/password/request": requestPasswordChangeHandler,
+        "POST:/professionals/me/password/verify": verifyPasswordOtpHandler,
         "POST:/professionals/me/password/confirm": confirmPasswordChangeHandler,
         "GET:/profiles/questions": getProfessionalQuestionsHandler,
         "GET:/profiles/{userSub}": getPublicProfessionalProfileHandler,
