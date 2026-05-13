@@ -433,16 +433,23 @@ export const extractUserInfoFromClaims = (claims: Record<string, any>): UserInfo
     console.log('>>> extractUserInfoFromClaims - Final groups array:', JSON.stringify(groups));
     console.log('>>> extractUserInfoFromClaims - Final groups count:', groups.length);
     
+    // Brand-new signups have an access token that lacks `cognito:groups`,
+    // `custom:user_type`, and sometimes `address` (Cognito hasn't yet
+    // propagated group membership to the access token). Throwing here
+    // breaks every authenticated request for new users until they're
+    // added to a group. Instead, leave userType empty when it can't be
+    // derived — handlers that actually need it can decide what to do
+    // (most professional-side endpoints work fine without it because they
+    // filter by `userSub` directly).
     const userType: string = claims['custom:user_type']
         || parseUserTypeFromAddress(claims.address)
-        || deriveUserTypeFromGroups(groups);
+        || deriveUserTypeFromGroups(groups)
+        || '';
 
     if (!userType) {
-        console.log('>>> extractUserInfoFromClaims - ERROR: userType could not be derived');
-        throw new Error(
-            `userType could not be derived for sub=${claims.sub}: ` +
-            `custom:user_type missing, address has no userType marker, and no clinic-role groups present. ` +
-            `Run the Cognito user_type backfill.`
+        console.log(
+            `>>> extractUserInfoFromClaims - userType empty for sub=${claims.sub}; ` +
+            `passing through with empty userType (likely brand-new signup).`
         );
     }
 
