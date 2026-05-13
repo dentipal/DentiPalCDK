@@ -264,6 +264,33 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
 
   const api = buildApiGwClient(event);
 
+  // Outer guard: catch ANY uncaught exception from the body below so the
+  // client never sees API Gateway's default malformed error frame (which
+  // the widget renders as `Error (undefined)`). Always 200 to API Gateway —
+  // the user-visible failure is the error frame we send ourselves.
+  try {
+    return await handlerBody(connectionId, api, event);
+  } catch (outerErr: any) {
+    console.error("[chatMessage] outermost unhandled exception", outerErr);
+    try {
+      await postFrame(api, connectionId, {
+        type: "error",
+        reason: "internal_error",
+        detail: outerErr?.message || String(outerErr) || "Uncaught exception",
+      });
+    } catch (postErr) {
+      console.error("[chatMessage] error frame post itself failed", postErr);
+    }
+    return { statusCode: 200, body: "ok" };
+  }
+};
+
+async function handlerBody(
+  connectionId: string,
+  api: ApiGatewayManagementApiClient,
+  event: any,
+): Promise<APIGatewayProxyResult> {
+
   // ---- 1. Parse frame ----
   let frame: InboundFrame;
   try {
@@ -272,6 +299,7 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
     await postFrame(api, connectionId, { type: "error", reason: "invalid_json" });
     return { statusCode: 400, body: "Invalid JSON" };
   }
+  console.log(`[chatMessage] inbound frame: action=${(frame as any)?.action} toolName=${(frame as any)?.toolName ?? "(n/a)"} connectionId=${connectionId}`);
   if (frame.action !== "chatMessage" && frame.action !== "confirmAction") {
     await postFrame(api, connectionId, { type: "error", reason: "invalid_frame" });
     return { statusCode: 400, body: "Invalid frame" };
@@ -319,6 +347,7 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
 
   // ---- 2b. confirmAction shortcut: bypass the LLM, run the confirm_* tool directly ----
   if (frame.action === "confirmAction") {
+    console.log(`[chatMessage] confirmAction enter — toolName=${frame.toolName} payloadKeys=${Object.keys(frame.payload || {}).join(",")} userSub=${session.userSub}`);
     try {
       const auth: AuthContext = {
         userSub: session.userSub,
@@ -331,6 +360,7 @@ export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
         connectionId,
         session.userContext as any,
       );
+      console.log(`[chatMessage] confirmAction result — tool=${frame.toolName} ok=${result.ok} error=${result.ok ? "(none)" : result.error}`);
       await postFrame(api, connectionId, {
         type: "toolResult",
         tool: frame.toolName,

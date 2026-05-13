@@ -96,10 +96,45 @@ function safeBodyToString(status: number, body: any): string {
   }
 }
 
+/**
+ * Standard "translate adapter result into ToolResult" helper. Use this
+ * everywhere instead of inlining `r.status >= 400 ? err(..., JSON.stringify(r.body)) : ok(...)`
+ * — `JSON.stringify(undefined)` yields the JS value `undefined`, which
+ * surfaces in the widget as `Error (undefined)`. `safeBodyToString` guards
+ * against that.
+ */
+function errOrOk(toolName: string, r: { status: number; body: any }): ToolResult {
+  if (r.status >= 400) return err(toolName, r.status, safeBodyToString(r.status, r.body));
+  return ok(toolName, r.body);
+}
+
 function clampLimit(n: any): number {
   const v = typeof n === "number" ? n : parseInt(n);
   if (!Number.isFinite(v) || v <= 0) return 20;
   return Math.min(v, 50);
+}
+
+/**
+ * Mutates `input` in place: turns whatever shape the agent put in
+ * `professional_role` / `professional_roles` into the canonical snake_case
+ * dbValue(s) the backend handlers accept. Drops fields that can't be
+ * resolved so the handler returns a clear "missing role" error rather
+ * than "Invalid professional role".
+ */
+function normalizeProfessionalRoleInPlace(input: any): void {
+  if (input == null) return;
+  if (typeof input.professional_role === "string") {
+    const v = normalizeRoleToDbValue(input.professional_role);
+    if (v) input.professional_role = v;
+    else delete input.professional_role;
+  }
+  if (Array.isArray(input.professional_roles)) {
+    const cleaned = (input.professional_roles as any[])
+      .map((r) => (typeof r === "string" ? normalizeRoleToDbValue(r) : undefined))
+      .filter((r): r is string => !!r);
+    if (cleaned.length > 0) input.professional_roles = cleaned;
+    else delete input.professional_roles;
+  }
 }
 
 /**
@@ -130,6 +165,12 @@ function normalizeRoleToDbValue(input: string): string | undefined {
  * proper `clinicIds: string[]` of UUIDs on the input object. Tolerates:
  *   - `clinicId` singular → wrap to array
  *   - comma-separated string → split
+ *   - bracketed string Bedrock-style — `"[uuid]"` or `"[\"uuid\"]"`
+ *     (the agent declares array-typed params but Bedrock often emits them
+ *     as stringified array literals; without quotes around the UUIDs,
+ *     `JSON.parse` upstream fails and we end up with literal brackets in
+ *     the value). The fix: strip surrounding `[ ]` and any per-element
+ *     quotes before splitting.
  *   - clinic NAMES → resolve via `userContext.clinics` cache
  *   - already-canonical UUID arrays → leave alone
  * Idempotent. Mutates `input.clinicIds`. Deletes `input.clinicId`.
@@ -142,10 +183,32 @@ function normalizeClinicIdsInPlace(input: any, userContext: SessionContextSnapsh
     const hit = ctxClinics.find(c => (c.name || "").toLowerCase() === lower);
     return hit?.clinicId || null;
   };
+
+  // Strip per-element wrappers: `[uuid]` → `uuid`, `"uuid"` → `uuid`, `'uuid'` → `uuid`.
+  const cleanOne = (s: string): string => s.trim().replace(/^[\[\]"']+|[\[\]"']+$/g, "").trim();
+
   const raw = input.clinicIds ?? input.clinicId;
   let arr: string[] | undefined;
-  if (Array.isArray(raw)) arr = raw as string[];
-  else if (typeof raw === "string") arr = raw.split(",").map((s: string) => s.trim()).filter(Boolean);
+
+  if (Array.isArray(raw)) {
+    arr = (raw as any[]).map((v) => (typeof v === "string" ? cleanOne(v) : String(v)));
+  } else if (typeof raw === "string") {
+    // First attempt: strict JSON parse (handles `["uuid"]` form).
+    let parsed: any = null;
+    try { parsed = JSON.parse(raw); } catch { /* fall through */ }
+    if (Array.isArray(parsed)) {
+      arr = parsed.map((v) => (typeof v === "string" ? cleanOne(v) : String(v)));
+    } else {
+      // Strip surrounding brackets, then split by comma. Tolerates Bedrock's
+      // `[uuid]` / `[uuid1, uuid2]` shape where the UUIDs are unquoted.
+      let trimmed = raw.trim();
+      if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+        trimmed = trimmed.slice(1, -1);
+      }
+      arr = trimmed.split(",").map(cleanOne).filter(Boolean);
+    }
+  }
+
   if (arr && arr.length > 0) {
     arr = arr.map((s: string) => (UUID_RE.test(s) ? s : (resolveByName(s) || s)));
     input.clinicIds = arr;
@@ -272,7 +335,7 @@ export async function executeTool(
             assistedHygiene: call.input.assistedHygiene,
             limit: Math.min(requestedLimit * 4, 200),
           }, auth);
-          if (fallback.status >= 400) return err(call.toolName, fallback.status, JSON.stringify(fallback.body));
+          if (fallback.status >= 400) return err(call.toolName, fallback.status, safeBodyToString(fallback.status, fallback.body));
           body = fallback.body;
         }
 
@@ -307,19 +370,19 @@ export async function executeTool(
         const r = await callHandlerInProcess(getJobPostingHandler, {
           method: "GET", pathParameters: { jobId: call.input.jobId }, auth,
         });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
       case "get_my_applications": {
         const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
       case "get_my_invitations": {
         const r = await runGetJobInvitations(auth);
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
       case "get_my_negotiations": {
         const r = await callHandlerInProcess(getAllNegotiationsProfHandler, { method: "GET", auth });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
       case "get_scheduled_shifts": {
         // Pros: ?status=scheduled passed to getJobApplications (matches the
@@ -331,14 +394,14 @@ export async function executeTool(
             queryStringParameters: { status: "scheduled" },
             auth,
           });
-          return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+          return errOrOk(call.toolName, r);
         }
         const r = await callHandlerInProcess(getScheduledShiftsHandler, {
           method: "GET",
           pathParameters: { clinicId: call.input.clinicId },
           auth,
         });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
       case "get_completed_shifts": {
         const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
@@ -348,14 +411,14 @@ export async function executeTool(
             queryStringParameters: { status: "completed" },
             auth,
           });
-          return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+          return errOrOk(call.toolName, r);
         }
         const r = await callHandlerInProcess(getCompletedShiftsHandler, {
           method: "GET",
           pathParameters: { clinicId: call.input.clinicId },
           auth,
         });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
 
       // ------------------- PROFESSIONAL: single-shot writes (v1) -------------------
@@ -376,7 +439,7 @@ export async function executeTool(
           body,
           auth,
         });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
 
       case "respond_invitation": {
@@ -390,24 +453,24 @@ export async function executeTool(
           body: { response: call.input.response, message: call.input.message },
           auth,
         });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
 
       // ------------------- PROFESSIONAL: legacy preview/confirm pairs (kept for back-compat) -------------------
+      // Stale alias versions of the agent may still emit `preview_apply_to_job`.
+      // The legacy schema demanded proposedRate / availability / message, which
+      // caused the agent to interrogate the user before applying. Drop those
+      // requirements — only jobId is needed. The 2-step preview/confirm flow
+      // is preserved so the UI's confirm card still renders.
       case "preview_apply_to_job":
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) => {
           if (!i.jobId || typeof i.jobId !== "string") return "jobId is required";
-          if (!i.message) return "message is required";
-          if (typeof i.proposedRate !== "number" || i.proposedRate <= 0) return "proposedRate must be a positive number";
-          if (!i.availability) return "availability is required";
           return null;
         });
       case "confirm_apply_to_job":
-        // Legacy path that may still be in flight from stale agent versions.
-        // Route through the SAME REST handler the new single-shot apply_to_job
-        // uses (createJobApplication.ts) and IGNORE the proposedRate/availability
-        // fields the legacy preview collected — pure apply doesn't need them.
-        // This makes the deploy-staleness scenario a no-op for the user.
+        // If a stale agent reaches the confirm step before the redeploy
+        // catches up, route it through the same single-shot path. Ignore
+        // proposedRate / availability — pure apply must stay pending.
         return genericConfirm(call.toolName, auth, connectionId, call.input, async (p) => {
           const r = await callHandlerInProcess(createJobApplicationHandler, {
             method: "POST",
@@ -415,7 +478,6 @@ export async function executeTool(
             body: { jobId: p.jobId, message: p.message, startDate: p.startDate, notes: p.notes },
             auth,
           });
-          // Normalize {status, body} into the same shape genericConfirm expects.
           return { status: r.status, body: r.body };
         });
 
@@ -451,19 +513,19 @@ export async function executeTool(
       // ------------------- CLINIC: info -------------------
       case "get_my_clinics": {
         const r = await callHandlerInProcess(getUsersClinicsHandler, { method: "GET", auth });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
       case "get_action_needed": {
         const r = await callHandlerInProcess(getActionNeededHandler, {
           method: "GET", pathParameters: { clinicId: call.input.clinicId }, auth,
         });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
       case "get_open_shifts": {
         const r = await callHandlerInProcess(getClinicShiftsHandler, {
           method: "GET", pathParameters: { clinicId: call.input.clinicId }, auth,
         });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
       case "list_applicants_for_job": {
         const r = await callHandlerInProcess(getJobApplicantsOfAClinicHandler, {
@@ -472,22 +534,23 @@ export async function executeTool(
           queryStringParameters: call.input.jobId ? { jobId: call.input.jobId } : undefined,
           auth,
         });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
       case "get_professional_info": {
         const r = await callHandlerInProcess(getPublicProfessionalProfileHandler, {
           method: "GET", pathParameters: { userSub: call.input.userSub }, auth,
         });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
       case "get_clinic_favorites": {
         const r = await callHandlerInProcess(getClinicFavoritesHandler, { method: "GET", auth });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
 
       // ------------------- CLINIC: response (preview/confirm) -------------------
       case "preview_post_temporary_job":
         normalizeClinicIdsInPlace(call.input, userContext);
+        normalizeProfessionalRoleInPlace(call.input);
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) => {
           if (!Array.isArray(i.clinicIds) || i.clinicIds.length === 0) return "clinicIds required (array of clinic UUIDs)";
           if (!i.professional_role) return "professional_role required";
@@ -499,12 +562,22 @@ export async function executeTool(
           return null;
         });
       case "confirm_post_temporary_job":
-        return genericConfirm(call.toolName, auth, connectionId, call.input, (p) =>
-          callHandlerInProcess(createTemporaryJobHandler, { method: "POST", body: p, auth }),
-        );
+        // Defensive: re-normalize on confirm even though preview also
+        // normalizes. The widget echoes whatever was in the preview-card
+        // payload, so if a prior preview stored a Bedrock-malformed value
+        // (bracketed clinicId string, display-name role) we'd still see
+        // it here. Normalizing twice is harmless.
+        normalizeClinicIdsInPlace(call.input, userContext);
+        normalizeProfessionalRoleInPlace(call.input);
+        return genericConfirm(call.toolName, auth, connectionId, call.input, (p) => {
+          normalizeClinicIdsInPlace(p, userContext);
+          normalizeProfessionalRoleInPlace(p);
+          return callHandlerInProcess(createTemporaryJobHandler, { method: "POST", body: p, auth });
+        });
 
       case "preview_post_consulting_job":
         normalizeClinicIdsInPlace(call.input, userContext);
+        normalizeProfessionalRoleInPlace(call.input);
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) => {
           if (!Array.isArray(i.clinicIds) || i.clinicIds.length === 0) return "clinicIds required (array of UUIDs)";
           if (!Array.isArray(i.dates) || i.dates.length === 0) return "dates required";
@@ -513,12 +586,17 @@ export async function executeTool(
           return null;
         });
       case "confirm_post_consulting_job":
-        return genericConfirm(call.toolName, auth, connectionId, call.input, (p) =>
-          callHandlerInProcess(createMultiDayConsultingHandler, { method: "POST", body: p, auth }),
-        );
+        normalizeClinicIdsInPlace(call.input, userContext);
+        normalizeProfessionalRoleInPlace(call.input);
+        return genericConfirm(call.toolName, auth, connectionId, call.input, (p) => {
+          normalizeClinicIdsInPlace(p, userContext);
+          normalizeProfessionalRoleInPlace(p);
+          return callHandlerInProcess(createMultiDayConsultingHandler, { method: "POST", body: p, auth });
+        });
 
       case "preview_post_permanent_job":
         normalizeClinicIdsInPlace(call.input, userContext);
+        normalizeProfessionalRoleInPlace(call.input);
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) => {
           if (!Array.isArray(i.clinicIds) || i.clinicIds.length === 0) return "clinicIds required (array of UUIDs)";
           if (!i.employment_type) return "employment_type required";
@@ -529,9 +607,13 @@ export async function executeTool(
           return null;
         });
       case "confirm_post_permanent_job":
-        return genericConfirm(call.toolName, auth, connectionId, call.input, (p) =>
-          callHandlerInProcess(createPermanentJobHandler, { method: "POST", body: p, auth }),
-        );
+        normalizeClinicIdsInPlace(call.input, userContext);
+        normalizeProfessionalRoleInPlace(call.input);
+        return genericConfirm(call.toolName, auth, connectionId, call.input, (p) => {
+          normalizeClinicIdsInPlace(p, userContext);
+          normalizeProfessionalRoleInPlace(p);
+          return callHandlerInProcess(createPermanentJobHandler, { method: "POST", body: p, auth });
+        });
 
       case "preview_accept_professional":
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) =>
@@ -773,7 +855,7 @@ export async function executeTool(
           },
           auth,
         });
-        return r.status >= 400 ? err(call.toolName, r.status, JSON.stringify(r.body)) : ok(call.toolName, r.body);
+        return errOrOk(call.toolName, r);
       }
 
       case "preview_invite_team_member":
