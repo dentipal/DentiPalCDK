@@ -214,65 +214,102 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const subject: string = `[DentiPal Feedback] (${userType}) ${ft} — from ${reporterDisplay}`;
 
-    const feedbackTypeColor = ft.toLowerCase() === "bug" ? "#DC3545"
-      : ft.toLowerCase() === "suggestion" ? "#2563eb"
-      : "#f59e0b";
+    const ftLower = ft.toLowerCase();
+    const badgeBg = ftLower === "bug" ? "#1d1d1f"
+      : ftLower === "suggestion" ? "#1d1d1f"
+      : "#1d1d1f";
+    const badgeAccent = ftLower === "bug" ? "#ff453a"
+      : ftLower === "suggestion" ? "#0a84ff"
+      : "#ff9f0a";
 
-    const htmlBody: string = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"/></head>
-<body style="margin:0;padding:0;background-color:#fff0f5;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#fff0f5;padding:32px 16px;">
-    <tr><td align="center">
-      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+    const fontStack = "-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+    const monoStack = "'SF Mono','Menlo','Consolas','Courier New',monospace";
+    const year = new Date().getFullYear();
 
-        <!-- Header -->
-        <tr><td style="background:linear-gradient(135deg,#f8ccc1 0%,#ffb3a7 100%);padding:32px 40px;text-align:center;">
-          <h1 style="margin:0;font-size:28px;color:#532b21;letter-spacing:0.5px;">DentiPal</h1>
-          <p style="margin:8px 0 0;color:#7a4a3a;font-size:14px;">Feedback Report</p>
+    const metaRow = (label: string, value: string, isLast: boolean = false) => {
+      const border = isLast ? "" : "border-bottom:1px solid #e8e8ed;";
+      return `<tr>
+        <td style="padding:14px 0;color:#6e6e73;font-size:14px;font-weight:400;letter-spacing:-0.01em;${border}">${label}</td>
+        <td style="padding:14px 0;color:#1d1d1f;font-size:14px;font-weight:500;letter-spacing:-0.01em;text-align:right;${border}">${value}</td>
+      </tr>`;
+    };
+
+    const htmlBody: string = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="color-scheme" content="light"/>
+<meta name="supported-color-schemes" content="light"/>
+<title>DentiPal feedback — ${escapeHtml(ft)}</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f7;font-family:${fontStack};-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">${escapeHtml(ft)} feedback from ${escapeHtml(reporterDisplay)}</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f5f5f7;">
+    <tr><td align="center" style="padding:48px 16px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;">
+
+        <tr><td style="padding:0 8px 18px;text-align:center;">
+          <span style="display:inline-block;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-0.02em;">DentiPal</span>
+          <span style="display:inline-block;font-size:13px;font-weight:500;color:#86868b;letter-spacing:-0.01em;margin-left:8px;">&nbsp;·&nbsp; Internal feedback report</span>
         </td></tr>
 
-        <!-- Badge -->
-        <tr><td style="padding:24px 40px 0;text-align:center;">
-          <span style="display:inline-block;background:${feedbackTypeColor};color:#fff;padding:6px 20px;border-radius:20px;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">${escapeHtml(ft)}</span>
-        </td></tr>
+        <tr><td style="background:#ffffff;border-radius:22px;box-shadow:0 1px 2px rgba(0,0,0,0.04),0 12px 40px rgba(0,0,0,0.06);overflow:hidden;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr><td style="padding:40px 40px 28px;">
 
-        <!-- Reporter Info -->
-        <tr><td style="padding:24px 40px;">
-          <table width="100%" style="background:#fef7f5;border-radius:12px;padding:20px;" cellpadding="0" cellspacing="0">
-            <tr><td style="padding:20px;">
-              <p style="margin:0 0 8px;font-size:13px;color:#999;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Reported By</p>
-              <p style="margin:0 0 16px;font-size:18px;font-weight:700;color:#333;">${escapeHtml(reporterDisplay)}</p>
-              <table cellpadding="0" cellspacing="0" style="font-size:14px;color:#555;">
-                <tr><td style="padding:4px 16px 4px 0;color:#999;">User Type</td><td style="padding:4px 0;font-weight:600;">${escapeHtml(userType)}</td></tr>
-                <tr><td style="padding:4px 16px 4px 0;color:#999;">Email</td><td style="padding:4px 0;font-weight:600;">${escapeHtml(effectiveEmail || "Not provided")}</td></tr>
-                <tr><td style="padding:4px 16px 4px 0;color:#999;">Contact</td><td style="padding:4px 0;font-weight:600;">${contact ? "Yes, wants a reply" : "No"}</td></tr>
+              <table cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding:0 10px 0 0;vertical-align:middle;">
+                    <span style="display:inline-block;width:8px;height:8px;background:${badgeAccent};border-radius:50%;"></span>
+                  </td>
+                  <td style="vertical-align:middle;">
+                    <span style="display:inline-block;background:${badgeBg};color:#ffffff;padding:5px 12px;border-radius:980px;font-size:12px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;">${escapeHtml(ft)}</span>
+                  </td>
+                </tr>
               </table>
+
+              <h1 style="margin:18px 0 8px;color:#1d1d1f;font-size:24px;font-weight:700;letter-spacing:-0.025em;line-height:1.2;">New feedback received</h1>
+              <p style="margin:0 0 28px;color:#6e6e73;font-size:14px;letter-spacing:-0.005em;">${escapeHtml(sentAtIST)}</p>
+
+              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Reporter</p>
+              <table cellpadding="0" cellspacing="0" width="100%" style="background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;margin:0 0 24px;">
+                <tr><td style="padding:8px 22px 16px;">
+                  <p style="margin:14px 0 4px;color:#1d1d1f;font-size:17px;font-weight:600;letter-spacing:-0.015em;">${escapeHtml(reporterDisplay)}</p>
+                  <p style="margin:0 0 8px;color:#6e6e73;font-size:13px;letter-spacing:-0.005em;">${escapeHtml(userType)} account</p>
+                  <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">
+                    ${metaRow("Email", escapeHtml(effectiveEmail || "Not provided"))}
+                    ${metaRow("Wants a reply", contact ? "Yes" : "No", true)}
+                  </table>
+                </td></tr>
+              </table>
+
+              <p style="margin:0 0 12px;color:#86868b;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Message</p>
+              <div style="background:#ffffff;background-image:linear-gradient(180deg,rgba(255,255,255,0.9) 0%,rgba(245,245,247,0.6) 100%);border:1px solid rgba(0,0,0,0.06);border-radius:16px;padding:20px 24px;margin:0 0 24px;">
+                <p style="margin:0;color:#1d1d1f;font-size:15px;line-height:1.65;letter-spacing:-0.005em;white-space:pre-wrap;">${escapeHtmlMultiline(msg)}</p>
+              </div>
+
+              <div style="margin:0;padding:16px 20px;background:rgba(245,245,247,0.7);border:1px solid rgba(0,0,0,0.04);border-radius:14px;">
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="color:#86868b;font-size:12px;letter-spacing:-0.005em;">User ID</td>
+                    <td style="color:#1d1d1f;font-size:12px;font-family:${monoStack};text-align:right;letter-spacing:0;">${escapeHtml(userSub || "anonymous")}</td>
+                  </tr>
+                </table>
+              </div>
+
             </td></tr>
           </table>
         </td></tr>
 
-        <!-- Message -->
-        <tr><td style="padding:0 40px 24px;">
-          <p style="margin:0 0 8px;font-size:13px;color:#999;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Message</p>
-          <div style="background:#f9fafb;border-left:4px solid #f8ccc1;padding:16px 20px;border-radius:0 8px 8px 0;font-size:15px;line-height:1.7;color:#333;">
-            ${escapeHtmlMultiline(msg)}
-          </div>
-        </td></tr>
-
-        <!-- Footer -->
-        <tr><td style="background:#fef7f5;padding:20px 40px;border-top:1px solid #fde8e4;">
-          <table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px;color:#999;">
-            <tr>
-              <td>${escapeHtml(sentAtIST)}</td>
-              <td style="text-align:right;">ID: ${escapeHtml(userSub || "anonymous")}</td>
-            </tr>
-          </table>
+        <tr><td style="padding:24px 24px 8px;text-align:center;">
+          <p style="margin:0;color:#86868b;font-size:12px;line-height:1.55;letter-spacing:-0.005em;">
+            Internal report. Reply to this email to respond directly to the reporter${contact ? " (they've requested a reply)" : ""}.
+          </p>
+          <p style="margin:18px 0 0;color:#a1a1a6;font-size:11px;letter-spacing:0.01em;">&copy; ${year} DentiPal</p>
         </td></tr>
 
       </table>
-      <p style="text-align:center;font-size:12px;color:#ccc;margin-top:16px;">DentiPal - Connecting Dental Professionals</p>
     </td></tr>
   </table>
 </body>
