@@ -816,52 +816,55 @@ export const handler = async (
 
     // 6b) Enrich with clinic display name from CLINIC_PROFILES_TABLE so the
     //     professional UI can show "<role> at <clinic name>" without a second
-    //     round-trip from the client. Keyed by clinicUserSub (the owning user)
-    //     since that's the PK of the clinic-profiles table.
-    //     Batched across both organic + promoted to avoid a second round-trip.
-    const clinicUserSubs = Array.from(
-      new Set(
-        [...jobs, ...promotedJobs]
-          .map((j: any) => j.clinicUserSub)
-          .filter((s: any): s is string => typeof s === "string" && s.length > 0),
-      ),
-    );
-    console.log(`[CLINIC_ENRICH_MARKER_v1] unique clinicUserSubs to look up: ${clinicUserSubs.length}, table=${CLINIC_PROFILES_TABLE}`);
-    if (clinicUserSubs.length > 0) {
+    //     round-trip from the client.
+    //     CLINIC_PROFILES_TABLE has a COMPOSITE PK (clinicId, userSub) — both
+    //     are required for BatchGetItem; passing userSub alone raises a silent
+    //     ValidationException and the page goes out with no clinic names.
+    const allPageJobs = [...jobs, ...promotedJobs] as any[];
+    const seenPairs = new Set<string>();
+    const keyPairs: { clinicId: string; clinicUserSub: string }[] = [];
+    for (const j of allPageJobs) {
+      const clinicId = typeof j.clinicId === "string" ? j.clinicId : "";
+      const clinicUserSub = typeof j.clinicUserSub === "string" ? j.clinicUserSub : "";
+      if (!clinicId || !clinicUserSub) continue;
+      const k = `${clinicId}#${clinicUserSub}`;
+      if (seenPairs.has(k)) continue;
+      seenPairs.add(k);
+      keyPairs.push({ clinicId, clinicUserSub });
+    }
+    if (keyPairs.length > 0) {
       try {
-        const clinicNameByUserSub = new Map<string, string>();
+        const clinicNameByPair = new Map<string, string>();
         // BatchGetItem caps at 100 keys per call — chunk to stay safe.
-        for (let i = 0; i < clinicUserSubs.length; i += 100) {
-          const chunk = clinicUserSubs.slice(i, i + 100);
+        for (let i = 0; i < keyPairs.length; i += 100) {
+          const chunk = keyPairs.slice(i, i + 100);
           const resp = await ddb.send(new BatchGetItemCommand({
             RequestItems: {
               [CLINIC_PROFILES_TABLE]: {
-                Keys: chunk.map((sub) => ({ userSub: { S: sub } })),
-                ProjectionExpression: "userSub, clinic_name",
+                Keys: chunk.map(({ clinicId, clinicUserSub }) => ({
+                  clinicId: { S: clinicId },
+                  userSub: { S: clinicUserSub },
+                })),
+                ProjectionExpression: "clinicId, userSub, clinic_name",
               },
             },
           }));
-          const rowCount = (resp.Responses?.[CLINIC_PROFILES_TABLE] || []).length;
-          console.log(`[CLINIC_ENRICH_MARKER_v1] BatchGetItem chunk ${i / 100}: requested ${chunk.length} keys, got ${rowCount} rows back`);
           for (const row of resp.Responses?.[CLINIC_PROFILES_TABLE] || []) {
+            const cid = str(row.clinicId);
             const sub = str(row.userSub);
             const name = str(row.clinic_name);
-            if (sub && name) clinicNameByUserSub.set(sub, name);
+            if (cid && sub && name) clinicNameByPair.set(`${cid}#${sub}`, name);
           }
         }
-        let enrichedCount = 0;
-        const allJobs = [...jobs, ...promotedJobs] as any[];
-        for (const j of allJobs) {
-          const name = clinicNameByUserSub.get(j.clinicUserSub);
+        for (const j of allPageJobs) {
+          const name = clinicNameByPair.get(`${j.clinicId}#${j.clinicUserSub}`);
           if (name) {
             j.clinicName = name;
             j.clinic = { ...(j.clinic || {}), name };
-            enrichedCount++;
           }
         }
-        console.log(`[CLINIC_ENRICH_MARKER_v1] enriched ${enrichedCount}/${allJobs.length} jobs with clinic names; resolved ${clinicNameByUserSub.size} unique clinic names`);
       } catch (e) {
-        console.warn("[CLINIC_ENRICH_MARKER_v1] enrichment failed:", e);
+        console.warn("[clinic name enrichment] failed:", e);
       }
     }
 
