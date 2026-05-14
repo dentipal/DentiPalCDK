@@ -44,7 +44,16 @@ export const handler = async (
             };
         }
 
-        const clinicId = event.pathParameters?.clinicId;
+        // API Gateway uses a {proxy+} catch-all integration, so the named
+        // {clinicId} placeholder is not populated on pathParameters. Fall back
+        // to slicing the proxy path — matches the pattern in getClinicShifts.ts.
+        const proxy = event.pathParameters?.proxy || "";
+        const pathParts = proxy.split("/");
+        let clinicId = event.pathParameters?.clinicId || "";
+        if (!clinicId && pathParts.length >= 2) {
+            clinicId = pathParts[1];
+        }
+
         if (!clinicId) {
             return {
                 statusCode: 400,
