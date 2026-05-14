@@ -185,6 +185,12 @@ import { handler as listAdminClinicsHandler } from "./handlers/admin/listAdminCl
 import { handler as banSubjectHandler } from "./handlers/admin/banSubject";
 import { handler as unbanSubjectHandler } from "./handlers/admin/unbanSubject";
 
+// Internal admin portal — onboarding (admin-driven Professional/Clinic registration).
+// Mirrors the AdminCreateUser pattern used by inviteTeamMember, but for external
+// customers (professionals + clinics) rather than internal team members.
+import { handler as onboardProfessionalHandler } from "./handlers/admin/onboarding/onboardProfessional";
+import { handler as onboardClinicHandler } from "./handlers/admin/onboarding/onboardClinic";
+
 // Shared auth — completes the NEW_PASSWORD_REQUIRED challenge that loginUser
 // forwards on first login for invited users (clinic team + internal team).
 import { handler as respondToNewPasswordHandler } from "./handlers/respondToNewPassword";
@@ -475,6 +481,13 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/admin/clinics": listAdminClinicsHandler,
         "POST:/admin/bans": banSubjectHandler,
         "DELETE:/admin/bans/{subjectType}/{subjectId}": unbanSubjectHandler,
+
+        // Admin-driven onboarding — DentiPal team registers a Professional or
+        // Clinic. Cognito emails a temp password; new user hits
+        // NEW_PASSWORD_REQUIRED on first login and is forced to set a permanent
+        // one (handled by respondToNewPasswordHandler above).
+        "POST:/admin/onboarding/professionals": onboardProfessionalHandler,
+        "POST:/admin/onboarding/clinics": onboardClinicHandler,
 
         // Job Promotions
         "GET:/promotions/plans": getPromotionPlansHandler,
