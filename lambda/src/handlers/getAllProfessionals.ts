@@ -8,9 +8,10 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // ✅ UPDATE: Changed import to use the new token utility
-import { extractUserFromBearerToken } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils";
 
 import { corsHeaders } from "./corsHeaders";
+import { readAvailabilityFromProfileItem } from "./professionalAvailability";
 
 // Initialize DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -93,8 +94,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const result: ScanCommandOutput = await dynamodb.send(scanCommand);
         const rawProfiles: DynamoDBProfileItem[] = (result.Items as DynamoDBProfileItem[] || []);
 
+        // Hide pros who toggled themselves OFF in their Availability section
+        // from the clinic-side discovery list. Legacy rows (no attribute) stay
+        // visible by virtue of readAvailabilityFromProfileItem's default.
+        const visibleProfiles = rawProfiles.filter((item) => {
+            const { isAvailableForJobs } = readAvailabilityFromProfileItem(
+                item as unknown as Record<string, AttributeValue>,
+            );
+            return isAvailableForJobs;
+        });
+
         // 3. Process the result and fetch addresses concurrently
-        const profiles: ProfileResponseItem[] = await Promise.all(rawProfiles.map(async (item) => {
+        const profiles: ProfileResponseItem[] = await Promise.all(visibleProfiles.map(async (item) => {
             const currentSub = item.userSub?.S || '';
 
             // Fetch user address details (city, state, pincode) from USER_ADDRESSES_TABLE
