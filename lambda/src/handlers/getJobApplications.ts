@@ -15,29 +15,58 @@ export const dynamodb = new DynamoDBClient({
 });
 
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-ClinicProfiles";
+const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-V5-Clinics";
 
-/** Per-invocation cache of clinicUserSub → clinic_name. Multiple applications
- *  often share a clinic, so this avoids redundant GetItem calls. */
+/** Per-invocation cache. Keys: clinicUserSub for profile-table hits,
+ *  "cid:<clinicId>" for clinics-table hits. Avoids redundant GetItems
+ *  when multiple applications share a clinic. */
 async function fetchClinicName(
   clinicUserSub: string,
+  clinicId: string,
   cache: Map<string, string>
 ): Promise<string | undefined> {
-  if (!clinicUserSub) return undefined;
-  if (cache.has(clinicUserSub)) return cache.get(clinicUserSub);
-  try {
-    const resp = await dynamodb.send(new GetItemCommand({
-      TableName: CLINIC_PROFILES_TABLE,
-      Key: { userSub: { S: clinicUserSub } },
-      ProjectionExpression: "clinic_name",
-    }));
-    const name = resp.Item?.clinic_name?.S || "";
-    if (name) {
-      cache.set(clinicUserSub, name);
-      return name;
+  // 1) Preferred: ClinicProfiles keyed by userSub.
+  if (clinicUserSub) {
+    if (cache.has(clinicUserSub)) return cache.get(clinicUserSub);
+    try {
+      const resp = await dynamodb.send(new GetItemCommand({
+        TableName: CLINIC_PROFILES_TABLE,
+        Key: { userSub: { S: clinicUserSub } },
+        ProjectionExpression: "clinic_name",
+      }));
+      const name = resp.Item?.clinic_name?.S || "";
+      if (name) {
+        cache.set(clinicUserSub, name);
+        if (clinicId) cache.set(`cid:${clinicId}`, name);
+        return name;
+      }
+    } catch (e) {
+      console.warn(`[getJobApplications] profile lookup failed for sub=${clinicUserSub}:`, e);
     }
-  } catch (e) {
-    console.warn(`[getJobApplications] clinic-name lookup failed for ${clinicUserSub}:`, e);
   }
+
+  // 2) Fallback: Clinics table keyed by clinicId. Covers legacy/test rows
+  //    where clinicUserSub is empty on both the application and job rows.
+  if (clinicId) {
+    const cidKey = `cid:${clinicId}`;
+    if (cache.has(cidKey)) return cache.get(cidKey);
+    try {
+      const resp = await dynamodb.send(new GetItemCommand({
+        TableName: CLINICS_TABLE,
+        Key: { clinicId: { S: clinicId } },
+        ProjectionExpression: "#n",
+        ExpressionAttributeNames: { "#n": "name" },
+      }));
+      const name = resp.Item?.name?.S || "";
+      if (name) {
+        cache.set(cidKey, name);
+        return name;
+      }
+    } catch (e) {
+      console.warn(`[getJobApplications] clinics lookup failed for clinicId=${clinicId}:`, e);
+    }
+  }
+
   return undefined;
 }
 
@@ -258,12 +287,15 @@ export const handler = async (event: any) => {
             application.createdAt = strOr(job.created_at, job.createdAt);
             application.updatedAt = strOr(job.updated_at, job.updatedAt);
 
-            // Resolve the clinic display name from CLINIC_PROFILES_TABLE.
-            // Application rows often store an empty string for clinicUserSub —
-            // fall back to the job row's clinicUserSub which is denormalized at
-            // post time and reliably populated.
+            // Resolve clinic display name with a three-step fallback chain so
+            // every row gets populated:
+            //   1. ClinicProfiles by application.clinicUserSub (preferred)
+            //   2. ClinicProfiles by job row's clinicUserSub (denormalized at post time)
+            //   3. Clinics table by clinicId (handles legacy/test rows where both
+            //      subs are empty — clinicId is always set on the application row).
             const clinicUserSubForLookup = application.clinicUserSub || str(job.clinicUserSub);
-            const clinicName = await fetchClinicName(clinicUserSubForLookup, clinicNameCache);
+            const clinicIdForLookup = application.clinicId || str(job.clinicId);
+            const clinicName = await fetchClinicName(clinicUserSubForLookup, clinicIdForLookup, clinicNameCache);
             if (clinicName) {
               application.clinicName = clinicName;
               application.clinic = { ...(application.clinic || {}), name: clinicName };

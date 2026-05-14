@@ -11,30 +11,57 @@ import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-ClinicProfiles";
+const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-V5-Clinics";
 
-/** Per-invocation cache of clinicUserSub → clinic_name. Avoids re-fetching when
- *  multiple invitations belong to the same clinic. Cleared between Lambda
- *  invocations because the module reload boundary handles it. */
+/** Per-invocation cache. Keys: clinicUserSub for profile-table hits,
+ *  "cid:<clinicId>" for clinics-table hits. */
 async function fetchClinicName(
   clinicUserSub: string,
+  clinicId: string,
   cache: Map<string, string>
 ): Promise<string | undefined> {
-  if (!clinicUserSub) return undefined;
-  if (cache.has(clinicUserSub)) return cache.get(clinicUserSub);
-  try {
-    const resp = await dynamodb.send(new GetItemCommand({
-      TableName: CLINIC_PROFILES_TABLE,
-      Key: { userSub: { S: clinicUserSub } },
-      ProjectionExpression: "clinic_name",
-    }));
-    const name = resp.Item?.clinic_name?.S || "";
-    if (name) {
-      cache.set(clinicUserSub, name);
-      return name;
+  // 1) Preferred: ClinicProfiles keyed by userSub.
+  if (clinicUserSub) {
+    if (cache.has(clinicUserSub)) return cache.get(clinicUserSub);
+    try {
+      const resp = await dynamodb.send(new GetItemCommand({
+        TableName: CLINIC_PROFILES_TABLE,
+        Key: { userSub: { S: clinicUserSub } },
+        ProjectionExpression: "clinic_name",
+      }));
+      const name = resp.Item?.clinic_name?.S || "";
+      if (name) {
+        cache.set(clinicUserSub, name);
+        if (clinicId) cache.set(`cid:${clinicId}`, name);
+        return name;
+      }
+    } catch (e) {
+      console.warn(`[getJobInvitations] profile lookup failed for sub=${clinicUserSub}:`, e);
     }
-  } catch (e) {
-    console.warn(`[getJobInvitations] clinic-name lookup failed for ${clinicUserSub}:`, e);
   }
+
+  // 2) Fallback: Clinics table keyed by clinicId. Covers legacy/test rows
+  //    where clinicUserSub is empty.
+  if (clinicId) {
+    const cidKey = `cid:${clinicId}`;
+    if (cache.has(cidKey)) return cache.get(cidKey);
+    try {
+      const resp = await dynamodb.send(new GetItemCommand({
+        TableName: CLINICS_TABLE,
+        Key: { clinicId: { S: clinicId } },
+        ProjectionExpression: "#n",
+        ExpressionAttributeNames: { "#n": "name" },
+      }));
+      const name = resp.Item?.name?.S || "";
+      if (name) {
+        cache.set(cidKey, name);
+        return name;
+      }
+    } catch (e) {
+      console.warn(`[getJobInvitations] clinics lookup failed for clinicId=${clinicId}:`, e);
+    }
+  }
+
   return undefined;
 }
 
@@ -199,11 +226,12 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
         invitation.clinicSoftware = toStrArr(job.clinicSoftware);
         invitation.jobDescription = job.job_description?.S || invitation.jobDescription;
 
-        // Resolve the clinic display name from CLINIC_PROFILES_TABLE so the
-        // professional UI can show "<role> at <clinic name>" without an
-        // additional client round-trip.
+        // Resolve clinic display name with a fallback chain:
+        //   1. ClinicProfiles by job.clinicUserSub (preferred)
+        //   2. Clinics table by clinicId (handles rows with empty userSub).
         const clinicUserSub = job.clinicUserSub?.S || "";
-        const clinicName = await fetchClinicName(clinicUserSub, clinicNameCache);
+        const clinicIdForLookup = invitation.clinicId || job.clinicId?.S || "";
+        const clinicName = await fetchClinicName(clinicUserSub, clinicIdForLookup, clinicNameCache);
         if (clinicName) {
           invitation.clinicName = clinicName;
           invitation.clinic = { ...(invitation.clinic || {}), name: clinicName };
