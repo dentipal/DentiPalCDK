@@ -105,6 +105,7 @@ import { handler as deleteUserAddressHandler } from "./handlers/deleteUserAddres
 import { handler as addClinicFavoriteHandler } from "./handlers/addClinicFavorite";
 import { handler as getClinicFavoritesHandler } from "./handlers/getClinicFavorites";
 import { handler as removeClinicFavoriteHandler } from "./handlers/removeClinicFavorite";
+import { handler as getWorkedProfessionalsHandler } from "./handlers/getWorkedProfessionals";
 
 import { handler as initiateUserRegistrationHandler } from "./handlers/initiateUserRegistration";
 import { handler as verifyOTPAndCreateUserHandler } from "./handlers/verifyOTPAndCreateUser";
@@ -303,6 +304,7 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/clinics/{clinicId}/scheduled-shifts": getClinicShiftsHandler,
         "GET:/clinics/{clinicId}/completed-shifts": getClinicShiftsHandler,
         "GET:/clinics/{clinicId}/invites-shifts": getClinicShiftsHandler,
+        "GET:/clinics/{clinicId}/worked-professionals": getWorkedProfessionalsHandler,
 
 
         // Get all professionals
