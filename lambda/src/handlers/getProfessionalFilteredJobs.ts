@@ -791,9 +791,11 @@ export const handler = async (
     //     professional UI can show "<role> at <clinic name>" without a second
     //     round-trip from the client. Keyed by clinicUserSub (the owning user)
     //     since that's the PK of the clinic-profiles table.
+    console.log(`[CLINIC_ENRICH_MARKER_v1] starting clinic-name enrichment for ${jobs.length} jobs`);
     const clinicUserSubs = Array.from(
       new Set(jobs.map((j: any) => j.clinicUserSub).filter((s: any): s is string => typeof s === "string" && s.length > 0))
     );
+    console.log(`[CLINIC_ENRICH_MARKER_v1] unique clinicUserSubs to look up: ${clinicUserSubs.length}, table=${CLINIC_PROFILES_TABLE}`);
     if (clinicUserSubs.length > 0) {
       try {
         const clinicNameByUserSub = new Map<string, string>();
@@ -808,21 +810,26 @@ export const handler = async (
               },
             },
           }));
+          const rowCount = (resp.Responses?.[CLINIC_PROFILES_TABLE] || []).length;
+          console.log(`[CLINIC_ENRICH_MARKER_v1] BatchGetItem chunk ${i / 100}: requested ${chunk.length} keys, got ${rowCount} rows back`);
           for (const row of resp.Responses?.[CLINIC_PROFILES_TABLE] || []) {
             const sub = str(row.userSub);
             const name = str(row.clinic_name);
             if (sub && name) clinicNameByUserSub.set(sub, name);
           }
         }
+        let enrichedCount = 0;
         for (const j of jobs as any[]) {
           const name = clinicNameByUserSub.get(j.clinicUserSub);
           if (name) {
             j.clinicName = name;
             j.clinic = { ...(j.clinic || {}), name };
+            enrichedCount++;
           }
         }
+        console.log(`[CLINIC_ENRICH_MARKER_v1] enriched ${enrichedCount}/${jobs.length} jobs with clinic names; resolved ${clinicNameByUserSub.size} unique clinic names`);
       } catch (e) {
-        console.warn("[getProfessionalFilteredJobs] clinic-name enrichment failed:", e);
+        console.warn("[CLINIC_ENRICH_MARKER_v1] enrichment failed:", e);
       }
     }
 
