@@ -191,6 +191,7 @@ import { handler as unbanSubjectHandler } from "./handlers/admin/unbanSubject";
 // customers (professionals + clinics) rather than internal team members.
 import { handler as onboardProfessionalHandler } from "./handlers/admin/onboarding/onboardProfessional";
 import { handler as onboardClinicHandler } from "./handlers/admin/onboarding/onboardClinic";
+import { handler as addClinicForOwnerHandler } from "./handlers/admin/onboarding/addClinicForOwner";
 
 // Shared auth — completes the NEW_PASSWORD_REQUIRED challenge that loginUser
 // forwards on first login for invited users (clinic team + internal team).
@@ -490,6 +491,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         // one (handled by respondToNewPasswordHandler above).
         "POST:/admin/onboarding/professionals": onboardProfessionalHandler,
         "POST:/admin/onboarding/clinics": onboardClinicHandler,
+        // Add another clinic for an already-onboarded clinic owner (Root group).
+        // Skips Cognito user creation — just writes Clinics + optional
+        // Clinic-Profiles rows tied to the existing ownerSub.
+        "POST:/admin/onboarding/clinics/{ownerSub}/additional": addClinicForOwnerHandler,
 
         // Job Promotions
         "GET:/promotions/plans": getPromotionPlansHandler,

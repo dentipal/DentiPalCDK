@@ -467,7 +467,10 @@ export const handler = async (
     // scan cap — paid placement must always reach the pro.
     // Only include promoted jobs on the first page; cursor-paged requests are
     // organic-only so the same boosts don't follow the pro as they scroll.
-    const needStoredCoords = radiusMiles && !liveUserCoords;
+    // Coords are resolved whenever the pro hasn't supplied a live override,
+    // because the promoted-job 50-mile relevance gate needs them even when the
+    // pro hasn't opted into an organic radius filter.
+    const needStoredCoords = !liveUserCoords;
     const isFirstPage = !cursor;
     const [appliedInfo, storedCoords, promotedItems] = await Promise.all([
       getAppliedJobInfo(userSub),
@@ -624,12 +627,18 @@ export const handler = async (
       if (totalScanned >= MAX_SCAN) break;
     }
 
-    // 2b) Score promoted jobs through the same filter/radius pipeline and merge.
+    // 2b) Score promoted jobs through the same filter pipeline + a 50-mile
+    //     relevance gate so paid placement doesn't follow a pro across the
+    //     country. Promoted matches stay in their own bucket — they no longer
+    //     mix into matchedJobs — so the response can deliver two distinct
+    //     surfaces (Promoted section vs. organic feed) to the UI.
     //     Promoted entries take priority over organic ones on jobId collision
     //     (the organic scan may surface the same job independently).
+    const PROMOTED_RADIUS_MI = 50;
+    const promotedMatched: { item: Record<string, AttributeValue>; score: number; distanceMi?: number | null }[] = [];
     if (promotedItems.length > 0) {
-      const organicIds = new Set(matchedJobs.map((m) => str(m.item.jobId)));
-      const promotedMatched: { item: Record<string, AttributeValue>; score: number; distanceMi?: number | null }[] = [];
+      let droppedOutsideRadius = 0;
+      let droppedMissingCoords = 0;
 
       for (const item of promotedItems) {
         const jobId = str(item.jobId);
@@ -643,19 +652,25 @@ export const handler = async (
         // that's already happened helps nobody and would distort counts.
         if (isJobFullyPast(item)) continue;
 
+        // Hard 50-mile relevance gate, independent of any user-set radius
+        // filter. A premium boost in Houston is not relevant to a Dallas pro;
+        // we drop those promotions silently rather than spending the slot.
+        // No coords on either side → drop (can't qualify the placement).
+        if (!profCoords) { droppedMissingCoords++; continue; }
+        const jobCoords = getJobCoords(item);
+        if (!jobCoords) { droppedMissingCoords++; continue; }
+        const distanceMi = haversineDistance(
+          profCoords.lat, profCoords.lng,
+          jobCoords.lat, jobCoords.lng,
+        );
+        if (distanceMi > PROMOTED_RADIUS_MI) { droppedOutsideRadius++; continue; }
+
         // Two-phase: gate by non-jobType filters first, bucket, then jobType.
         if (!matchesFilters(item, filtersSansJobType)) continue;
 
-        let distanceMi: number | null = null;
-        if (radiusMiles && profCoords) {
-          const jobCoords = getJobCoords(item);
-          if (jobCoords) {
-            distanceMi = haversineDistance(profCoords.lat, profCoords.lng, jobCoords.lat, jobCoords.lng);
-            if (distanceMi > radiusMiles) continue;
-          } else {
-            continue;
-          }
-        }
+        // Also honour the user-set radius filter when one is active and is
+        // tighter than the promoted gate (e.g. pro restricted feed to 10 mi).
+        if (radiusMiles && distanceMi > radiusMiles) continue;
 
         const jt = (str(item.job_type) || str(item.jobType)).toLowerCase();
         if (computeCounts) {
@@ -666,42 +681,37 @@ export const handler = async (
 
         if (!itemMatchesSelectedType(jt)) continue;
 
-        const score = sort === "trending"
-          ? computeRelevanceScore(item, {
-              role: filters.role,
-              location: filters.location,
-              distanceMi,
-              radiusMiles,
-              appliedClinicIds,
-            })
-          : 0;
+        // Always compute relevance for promoted jobs (every sort mode) — the
+        // promoted section ranks by tier × score regardless of which mode the
+        // pro picked for the organic feed.
+        const score = computeRelevanceScore(item, {
+          role: filters.role,
+          location: filters.location,
+          distanceMi,
+          radiusMiles,
+          appliedClinicIds,
+        });
         promotedMatched.push({ item, score, distanceMi });
       }
 
-      // Prepend promoted matches and drop organic duplicates — the sort will re-order,
-      // but the dedupe prevents the same job from appearing twice in matchedJobs.
+      // Dedupe: if the organic scan surfaced any of the promoted jobs, drop
+      // them from the organic bucket so they only appear in the Promoted
+      // section. They are no longer merged into matchedJobs.
       if (promotedMatched.length > 0) {
         const promotedIds = new Set(promotedMatched.map((m) => str(m.item.jobId)));
         matchedJobs = matchedJobs.filter((m) => !promotedIds.has(str(m.item.jobId)));
-        matchedJobs.unshift(...promotedMatched);
-
-        console.log(`[Promotions] Surfaced ${promotedMatched.length} boosted jobs (organic had ${organicIds.size} candidates).`);
       }
+
+      console.log(`[Promotions] ${promotedMatched.length} promoted jobs surfaced; dropped ${droppedOutsideRadius} outside ${PROMOTED_RADIUS_MI}mi, ${droppedMissingCoords} missing coords.`);
     }
 
-    // 3) Sort jobs based on the requested mode.
-    //    "trending"  → promotion tier → relevance score → newest (legacy default)
+    // 3) Sort organic jobs by the requested mode. Promoted jobs are sorted
+    //    separately below — they no longer mix into matchedJobs, so the per-
+    //    mode logic here is pure organic ranking with no tier tiebreaker.
+    //    "trending"  → relevance score → newest
     //    "newest"    → newest first
     //    "highestPay"→ highest rate first (cursor-paged within current page only)
-    //    "priority"  → promoted first (by tier weight) → newest
-    //    Expired promotions get weight 0 so they mix back into organic results.
-    const activeTierWeight = (item: Record<string, AttributeValue>): number => {
-      if (!item.isPromoted?.BOOL) return 0;
-      const expiresAt = str(item.promotionExpiresAt);
-      if (!expiresAt || new Date(expiresAt) <= new Date()) return 0;
-      return PROMOTION_TIER_WEIGHT[str(item.promotionPlanId)] || 0;
-    };
-
+    //    "priority"  → newest (legacy alias for now)
     const createdAtMs = (item: Record<string, AttributeValue>): number =>
       new Date(str(item.createdAt) || "0").getTime();
 
@@ -720,22 +730,33 @@ export const handler = async (
           return createdAtMs(b.item) - createdAtMs(a.item);
         }
 
-        case "priority": {
-          const wa = activeTierWeight(a.item);
-          const wb = activeTierWeight(b.item);
-          if (wa !== wb) return wb - wa;
+        case "priority":
           return createdAtMs(b.item) - createdAtMs(a.item);
-        }
 
         case "trending":
         default: {
-          const wa = activeTierWeight(a.item);
-          const wb = activeTierWeight(b.item);
-          if (wa !== wb) return wb - wa;
           if (b.score !== a.score) return b.score - a.score;
           return createdAtMs(b.item) - createdAtMs(a.item);
         }
       }
+    });
+
+    // 3b) Sort promoted jobs by the hybrid (tier × relevance) score so that
+    //     a low-tier highly-relevant job can outrank a high-tier irrelevant
+    //     one — paid placement still wins surface, but only when the match is
+    //     actually useful to the pro. Tiebreak by newest so equal-score
+    //     promotions don't shuffle between requests.
+    const tierWeightOf = (item: Record<string, AttributeValue>): number => {
+      const planId = str(item.promotionPlanId);
+      return PROMOTION_TIER_WEIGHT[planId] || 1;
+    };
+    const hybridScore = (m: { item: Record<string, AttributeValue>; score: number }): number =>
+      tierWeightOf(m.item) * m.score;
+
+    promotedMatched.sort((a, b) => {
+      const diff = hybridScore(b) - hybridScore(a);
+      if (diff !== 0) return diff;
+      return createdAtMs(b.item) - createdAtMs(a.item);
     });
 
     // 4) Slice to requested page size, honoring any in-memory offset from an
@@ -769,7 +790,7 @@ export const handler = async (
 
     // 6) Convert to plain objects and attach relevance score + distance.
     //    Mask expired promotions at read time so clients never see stale boosts.
-    const jobs = pageJobs.map(({ item, score, distanceMi }) => {
+    const toJobObject = ({ item, score, distanceMi }: { item: Record<string, AttributeValue>; score: number; distanceMi?: number | null }) => {
       const obj: any = {
         ...itemToObject(item),
         _relevanceScore: score,
@@ -785,14 +806,25 @@ export const handler = async (
         }
       }
       return obj;
-    });
+    };
+
+    const jobs = pageJobs.map(toJobObject);
+    // Promoted jobs are page-1-only (gated by isFirstPage above) and capped by
+    // the 50-mile relevance radius — the geographic gate replaces a numeric
+    // count cap, so we surface every promoted job that qualifies.
+    const promotedJobs = promotedMatched.map(toJobObject);
 
     // 6b) Enrich with clinic display name from CLINIC_PROFILES_TABLE so the
     //     professional UI can show "<role> at <clinic name>" without a second
     //     round-trip from the client. Keyed by clinicUserSub (the owning user)
     //     since that's the PK of the clinic-profiles table.
+    //     Batched across both organic + promoted to avoid a second round-trip.
     const clinicUserSubs = Array.from(
-      new Set(jobs.map((j: any) => j.clinicUserSub).filter((s: any): s is string => typeof s === "string" && s.length > 0))
+      new Set(
+        [...jobs, ...promotedJobs]
+          .map((j: any) => j.clinicUserSub)
+          .filter((s: any): s is string => typeof s === "string" && s.length > 0),
+      ),
     );
     if (clinicUserSubs.length > 0) {
       try {
@@ -814,7 +846,7 @@ export const handler = async (
             if (sub && name) clinicNameByUserSub.set(sub, name);
           }
         }
-        for (const j of jobs as any[]) {
+        for (const j of [...jobs, ...promotedJobs] as any[]) {
           const name = clinicNameByUserSub.get(j.clinicUserSub);
           if (name) {
             j.clinicName = name;
@@ -826,7 +858,10 @@ export const handler = async (
       }
     }
 
-    for (const j of jobs) {
+    // Tick impressions for every promoted job we actually surfaced. Organic
+    // matches no longer carry an isPromoted flag (the dedupe in step 2b pulled
+    // them out of the organic bucket), so this loop is exhaustive.
+    for (const j of promotedJobs) {
       if (j.isPromoted && j.jobId && j.promotionId) {
         fireAndForgetIncrement(j.jobId, j.promotionId, "impressions");
       }
@@ -838,6 +873,10 @@ export const handler = async (
       hasMore,
       nextCursor,
       jobs,
+      // Promoted jobs live in their own bucket so the UI can render them as a
+      // distinct "Promoted" section. Only populated on first-page requests
+      // (cursor-paged loads return an empty array).
+      promotedJobs,
       // Per-type counts of the full filter-matched pool (non-jobType filters
       // only). Populated on fresh scans; omitted on DDB-cursor resumes since
       // those only see a suffix of the pool.

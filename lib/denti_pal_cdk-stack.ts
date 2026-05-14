@@ -1842,7 +1842,14 @@ export class DentiPalCDKStack extends cdk.Stack {
         const CLINIC_V1_FUNCTIONS = [
             // info / lookups
             'get_my_clinics',
-            'get_action_needed',
+            // get_action_needed intentionally REMOVED — it returned a flat
+            // applications array with no profile join and no byJobId grouping,
+            // which the agent kept preferring (via the legacy "what needs my
+            // attention" intent), causing the chat widget to fall back to the
+            // unenriched flat renderer (no name, no Accept / Decline buttons).
+            // list_applicants_for_job (without a jobId) covers the same intent
+            // with profile enrichment + the byJobId shape the widget needs.
+            // 'get_action_needed',
             'list_applicants_for_job',
             'get_professional_info',
             'get_open_shifts',
@@ -2237,7 +2244,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             { name: 'get_open_shifts', description: 'List upcoming unfilled shifts for a clinic.', parameters: { clinicId: STR('Clinic UUID', true) } },
             { name: 'get_scheduled_shifts', description: 'List accepted, future shifts for a clinic.', parameters: { clinicId: STR('Optional clinic filter') } },
             { name: 'get_completed_shifts', description: 'List completed shifts for a clinic.', parameters: { clinicId: STR('Optional clinic filter') } },
-            { name: 'list_applicants_for_job', description: 'List applicants for a specific job.', parameters: { clinicId: STR('Clinic UUID', true), jobId: STR('Optional jobId') } },
+            { name: 'list_applicants_for_job', description: 'List actionable (pending/negotiating) applicants. Omit BOTH clinicId and jobId to aggregate across every clinic the user manages (preferred for "pending applicants" / "what needs my attention"). Pass clinicId alone to scope to one clinic. Pass clinicId + jobId for a single job.', parameters: { clinicId: STR('Optional clinic UUID. Omit to aggregate across all of the user\'s clinics.'), jobId: STR('Optional jobId. Pass clinicId alongside it.') } },
             { name: 'get_professional_info', description: 'Get a professional\'s public profile.', parameters: { userSub: STR('Pro userSub', true) } },
             { name: 'get_clinic_favorites', description: 'List the clinic\'s favorite pros.', parameters: {} },
             { name: 'get_job_details', description: 'Get full details for a job by jobId.', parameters: { jobId: STR('Job UUID', true) } },
@@ -2869,8 +2876,9 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '',
                 'Intent → tool map (call IMMEDIATELY):',
                 '- "my clinics" / "which clinics do I manage" → get_my_clinics.',
-                '- "what needs my attention" / "action items" / "what\'s pending" / "recent applicants" / "pending applicants" / "applicants" (with no specific job named) → get_action_needed. This returns all pending applicants + negotiations across the clinic\'s jobs in one call. If multiple clinics exist and user didn\'t name one, silently pick the first from get_my_clinics — don\'t ask.',
-                '- "who applied to job X" / "applicants for <job>" (a specific job is named) → list_applicants_for_job with that jobId.',
+                '- For ANY applicant-related question — "what needs my attention" / "action items" / "what\'s pending" / "recent applicants" / "pending applicants" / "applicants" / "who applied" — call list_applicants_for_job WITH NO PARAMETERS. The tool aggregates across every clinic the user manages and returns only pending/negotiating rows. This is the ONLY applicants tool.',
+                '- If the user names a specific clinic ("applicants for greenville"), pass that clinicId. If they name a specific job ("applicants for job X"), pass clinicId AND jobId.',
+                '- DO NOT auto-pick a single clinicId for the broad "pending applicants" intent — omit clinicId so the tool fans out across all clinics. Auto-pick is only for tools that REQUIRE a clinicId (e.g., post_*_job).',
                 '- "show me <name>\'s profile" / "tell me about that pro" → get_professional_info.',
                 '- "open shifts" / "active jobs" / "jobs I have posted" → get_open_shifts.',
                 '- "scheduled shifts" / "upcoming work for my clinic" → get_scheduled_shifts.',
@@ -2881,6 +2889,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "post a temp shift" / "post a job" → If you have ALL required fields (clinic, role, date, start_time, end_time, rate, shift_speciality), call preview_post_temporary_job IMMEDIATELY. If anything is missing, ask for the missing pieces in ONE short conversational sentence with an inline example — NEVER as a numbered checklist, never with bold markdown, never asking 8 questions at once. Example response when ALL fields are missing: "Sure — clinic, role, date, time window, and rate? e.g., \'Qwerty Clinic, Dental Assistant, May 21 9am–2pm, $50/hr\'". When only the rate is missing: "What rate? e.g., $40/hr".',
                 '- "accept <pro>" / "hire <pro> for job X" → preview_accept_professional → wait for confirm.',
                 '- "reject <pro>" / "decline <pro>" → preview_reject_professional → wait for confirm.',
+                '- When the user message contains explicit "jobId=<UUID>" and "professionalUserSub=<UUID>" tokens (the applicants list buttons inject these), parse them verbatim and call the tool directly — do NOT ask for confirmation of the IDs.',
                 '- "post a permanent job" / "post a full-time position" → preview_post_permanent_job (then wait for confirm).',
                 '- "post a consulting gig" / "multi-day consulting" → preview_post_consulting_job (then wait for confirm).',
                 '- "negotiate $X on application Y" / "counter their offer" → preview_negotiate with the rate. The system renders a confirm card.',

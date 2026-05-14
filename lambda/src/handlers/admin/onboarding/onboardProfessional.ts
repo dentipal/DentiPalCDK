@@ -20,6 +20,10 @@ import {
     VALID_ROLE_VALUES,
     getRoleByDbValue,
 } from "../../professionalRoles";
+import {
+    generateTempPassword,
+    sendProfessionalInviteEmail,
+} from "./inviteEmail";
 
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
@@ -62,8 +66,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     try {
         const caller = extractUserFromBearerToken(event.headers?.Authorization || event.headers?.authorization);
-        if (!requireInternalGroup(caller.groups, ["Admin"])) {
-            return json(event, 403, { error: "Forbidden", message: "Admin role required." });
+        if (!requireInternalGroup(caller.groups, ["Admin", "HR"])) {
+            return json(event, 403, { error: "Forbidden", message: "Admin or HR role required." });
         }
 
         if (!event.body) {
@@ -116,6 +120,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             { Name: "address", Value: `userType:professional|role:${role}` },
         ];
 
+        // Generate the temp password ourselves so we can suppress Cognito's
+        // plain default email and send our branded SES one. Cognito will still
+        // require this exact password on first sign-in.
+        const tempPassword = generateTempPassword();
+
         let createdUsername: string | undefined;
         let newUserSub = "";
         try {
@@ -123,7 +132,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 UserPoolId: process.env.USER_POOL_ID!,
                 Username: email,
                 UserAttributes: userAttributes,
-                DesiredDeliveryMediums: ["EMAIL"],
+                TemporaryPassword: tempPassword,
+                MessageAction: "SUPPRESS",
             }));
             createdUsername = createResp.User?.Username || email;
             newUserSub = createResp.User?.Attributes?.find(a => a.Name === "sub")?.Value || "";
@@ -153,6 +163,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 Username: email,
             }));
             newUserSub = fresh.UserAttributes?.find(a => a.Name === "sub")?.Value || "";
+        }
+
+        // Send the branded invite email. SES failures are non-fatal — the user
+        // already exists in Cognito and the admin can re-trigger via
+        // AdminResetUserPassword if delivery breaks.
+        try {
+            await sendProfessionalInviteEmail({
+                firstName,
+                email,
+                tempPassword,
+                roleDisplayName: roleConfig.name,
+            });
+        } catch (mailErr) {
+            console.error("[onboardProfessional] invite email send failed (Cognito user kept):", mailErr);
         }
 
         let profileCreated = false;
