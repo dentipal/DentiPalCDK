@@ -129,12 +129,6 @@ export const handler = async (
     if (registrationData.phoneNumber) {
       userAttributes.push({ Name: "phone_number", Value: registrationData.phoneNumber });
     }
-    if (registrationData.referrerUserSub) {
-      userAttributes.push({
-        Name: "custom:referredByUserSub",
-        Value: registrationData.referrerUserSub,
-      });
-    }
 
     const signUpCommand = new SignUpCommand({
       ClientId: process.env.CLIENT_ID,
