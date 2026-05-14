@@ -732,6 +732,30 @@ async function onConnect(event: WebSocketAPIGatewayEventV2): Promise<APIGatewayP
     const connectionId = event.requestContext.connectionId;
     console.log("[ws] $connect START", { connectionId });
 
+    // Public chatbot bypass — anonymous visitors connecting with `?agent=public`
+    // skip JWT verification entirely. We still write a Connections row so the
+    // existing chatMessage bootstrap can look up the anon session by
+    // connectionId, and so $disconnect cleans up uniformly. The userType="public"
+    // marker on the row stops any clinic/pro fan-out logic from picking it up.
+    const requestedAgent = (event.queryStringParameters?.agent || "").toLowerCase();
+    if (requestedAgent === "public") {
+        const anonSub = `anon-${connectionId}`;
+        await putConnection(
+            `anon#${connectionId}`,
+            connectionId,
+            "public",
+            "Anonymous visitor",
+            anonSub,
+            "",
+        );
+        console.log("[ws] $connect OK (public)", {
+            connectionId,
+            anonSub,
+            elapsedMs: Date.now() - started,
+        });
+        return { statusCode: 200, body: "Connected (public)" };
+    }
+
     const claims = await validateToken(event);
     const userKey = userKeyFromClaims(claims);
 

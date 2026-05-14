@@ -139,6 +139,64 @@ function filterApplicationsByStatusInResult(
   return { status: r.status, body: nextBody };
 }
 
+/**
+ * Mirror the dashboard's "Action Needed" filter on the chat side.
+ *
+ * `getJobApplicantsOfAClinic` (the Lambda behind `list_applicants_for_job`)
+ * uses a permissive blacklist — it returns ANYTHING that isn't already
+ * accepted/rejected/scheduled/completed/hired/declined/confirmed. That lets
+ * `no_show`, `cancelled`, and other terminal-but-not-decided states leak
+ * into the chat UI, where they show up as bare info rows without buttons.
+ *
+ * The dashboard's Action Needed view (`getActionNeeded`) uses a STRICT
+ * whitelist: `pending` + `negotiate(ing)` only. Match that here so the chat
+ * surfaces exactly the same set of "needs my attention" applicants the
+ * dashboard does — no surprises like the no-show that triggered this fix.
+ *
+ * Walks both the flat `applications` array and the `byJobId` map; drops
+ * jobs whose applicant list becomes empty after filtering and updates
+ * `totalApplications` / per-job applicant counts accordingly.
+ */
+const ACTIONABLE_STATUSES = new Set(["pending", "negotiating", "negotiate"]);
+function filterApplicantsToActionableInResult(
+  r: { status: number; body: any },
+): { status: number; body: any } {
+  if (r.status >= 400 || !r.body || typeof r.body !== "object") return r;
+  const data = r.body?.data;
+  if (!data || typeof data !== "object") return r;
+
+  const isActionable = (a: any): boolean => {
+    const s = String(a?.application?.applicationStatus || a?.application?.status ||
+      a?.applicationStatus || a?.status || "").toLowerCase();
+    return ACTIONABLE_STATUSES.has(s);
+  };
+
+  // Flat list (applicationsFlat in the handler).
+  const flat: any[] = Array.isArray(data.applications) ? data.applications.filter(isActionable) : [];
+
+  // byJobId map — keep jobs only if they retain at least one applicant.
+  const byJobId: Record<string, { job: any; applicants: any[] }> = {};
+  if (data.byJobId && typeof data.byJobId === "object") {
+    for (const [jobId, group] of Object.entries(data.byJobId as Record<string, any>)) {
+      const kept = Array.isArray(group?.applicants) ? group.applicants.filter(isActionable) : [];
+      if (kept.length > 0) byJobId[jobId] = { job: group.job, applicants: kept };
+    }
+  }
+
+  return {
+    status: r.status,
+    body: {
+      ...r.body,
+      data: {
+        ...data,
+        applications: flat,
+        byJobId,
+        totalApplications: flat.length,
+      },
+    },
+  };
+}
+
 function clampLimit(n: any): number {
   const v = typeof n === "number" ? n : parseInt(n);
   if (!Number.isFinite(v) || v <= 0) return 20;
@@ -311,6 +369,10 @@ export async function executeTool(
 ): Promise<ToolResult> {
   const def = getToolDefinition(call.toolName);
   if (!def) return err(call.toolName, 400, `Unknown tool: ${call.toolName}`);
+
+  // One-line dispatch trace so CloudWatch can answer "did the agent call X or Y?"
+  // without needing to enable Bedrock model-invocation logs.
+  console.log(`[toolDispatch] tool=${call.toolName} input=${JSON.stringify(call.input || {})}`);
 
   try {
     switch (call.toolName) {
@@ -553,13 +615,94 @@ export async function executeTool(
         return errOrOk(call.toolName, r);
       }
       case "list_applicants_for_job": {
-        const r = await callHandlerInProcess(getJobApplicantsOfAClinicHandler, {
-          method: "GET",
-          pathParameters: { clinicId: call.input.clinicId },
-          queryStringParameters: call.input.jobId ? { jobId: call.input.jobId } : undefined,
-          auth,
-        });
-        return errOrOk(call.toolName, r);
+        // Three modes:
+        //   1. jobId given      → single-job view
+        //   2. clinicId given   → all of one clinic's actionable applicants
+        //   3. neither given    → fan out across EVERY clinic the user manages
+        //                        and merge — mirrors the dashboard's
+        //                        /dashboard/all/action-needed aggregate path.
+        const qs: Record<string, string> = { limit: "200" };
+        if (call.input.jobId) qs.jobId = call.input.jobId;
+
+        const callOne = async (cid: string) => {
+          const single = await callHandlerInProcess(getJobApplicantsOfAClinicHandler, {
+            method: "GET",
+            pathParameters: { clinicId: cid },
+            queryStringParameters: qs,
+            auth,
+          });
+          // Annotate the job rows with the clinic name from session context so
+          // the merged response can label each card with its owning clinic.
+          if (single.status < 400 && single.body?.data) {
+            const cmeta = (userContext?.clinics || []).find((c: any) => c.clinicId === cid);
+            const cname = cmeta?.name;
+            const data = single.body.data;
+            if (cname && data.byJobId && typeof data.byJobId === "object") {
+              for (const g of Object.values<any>(data.byJobId)) {
+                if (g?.job && !g.job.clinicName) g.job.clinicName = cname;
+                if (g?.job && !g.job.clinic) g.job.clinic = cname;
+              }
+            }
+          }
+          return single;
+        };
+
+        let r: { status: number; body: any };
+        const clinicIdGiven = call.input.clinicId && typeof call.input.clinicId === "string";
+        const userClinics = (userContext?.clinics || [])
+          .map((c: any) => c.clinicId)
+          .filter(Boolean);
+
+        if (clinicIdGiven || userClinics.length <= 1) {
+          // Single-clinic path. Explicit param wins; otherwise fall back to
+          // the user's sole clinic. Handler will 400 if neither resolves.
+          const cid = clinicIdGiven ? call.input.clinicId : userClinics[0];
+          r = await callOne(cid);
+        } else {
+          // Multi-clinic fan-out. Run in parallel; surface 200 even if some
+          // clinics fail — chat is best-effort visible, not all-or-nothing.
+          console.log(`[list_applicants_for_job] aggregating across ${userClinics.length} clinics`);
+          const results = await Promise.all(
+            userClinics.map((cid) =>
+              callOne(cid).catch((e) => {
+                console.warn(`[list_applicants_for_job] clinic=${cid} failed:`, e?.message || e);
+                return { status: 500, body: null } as { status: number; body: any };
+              }),
+            ),
+          );
+          const mergedByJobId: Record<string, any> = {};
+          const mergedApps: any[] = [];
+          let total = 0;
+          for (const single of results) {
+            if (single.status >= 400 || !single.body?.data) continue;
+            const data = single.body.data;
+            if (Array.isArray(data.applications)) mergedApps.push(...data.applications);
+            if (data.byJobId && typeof data.byJobId === "object") {
+              for (const [jid, group] of Object.entries(data.byJobId as Record<string, any>)) {
+                mergedByJobId[jid] = group;
+              }
+            }
+            total += data.totalApplications || 0;
+          }
+          r = {
+            status: 200,
+            body: {
+              status: "success",
+              statusCode: 200,
+              data: {
+                aggregated: true,
+                clinicCount: userClinics.length,
+                totalApplications: total,
+                applications: mergedApps,
+                byJobId: mergedByJobId,
+              },
+            },
+          };
+        }
+
+        // Strict whitelist: pending + negotiating only — same as the dashboard
+        // Action Needed view. Drops empty jobs from byJobId after filtering.
+        return errOrOk(call.toolName, filterApplicantsToActionableInResult(r));
       }
       case "get_professional_info": {
         const r = await callHandlerInProcess(getPublicProfessionalProfileHandler, {

@@ -1797,33 +1797,111 @@ export class DentiPalCDKStack extends cdk.Stack {
         // raised via AWS support, we ship a curated v1 slice of the catalog.
         // After the quota raises, drop the .filter(...) at the action-group
         // assignment sites and the full toolset returns automatically.
+        // Pro agent tool list. Bedrock's "APIs per Agent" quota is 50 (raised
+        // from the default 11). We're at 25/50 — leaves room for further
+        // additions without hitting the cap. Excludes the legacy two-step
+        // preview/confirm_apply_to_job and preview/confirm_respond_invitation
+        // pairs that have been replaced by single-shot apply_to_job and
+        // respond_invitation respectively.
         const PRO_V1_FUNCTIONS = [
+            // search / info
             'search_jobs_near_me',
+            'get_job_details',
             'get_my_invitations',
             'get_my_applications',
             'get_my_negotiations',
             'get_scheduled_shifts',
             'get_completed_shifts',
-            // Single-shot writes (no preview/confirm pair). Match REST API
-            // contracts exactly — apply takes only jobId; respond_invitation
-            // takes invitationId + response.
+            // Single-shot writes (no preview/confirm pair).
             'apply_to_job',
             'respond_invitation',
-            // Counter-offer preview/confirm pair kept because rates need review.
+            // Counter-offer preview/confirm pair — rates need a review step.
             'preview_negotiate',
             'confirm_negotiate',
+            // Withdraw an application.
+            'preview_withdraw_application',
+            'confirm_withdraw_application',
+            // Post-shift attestation (triggers payment processing).
+            'preview_attest_completed_shift',
+            'confirm_attest_completed_shift',
+            // Self-service profile / address / preferences edits.
+            'preview_update_my_profile',
+            'confirm_update_my_profile',
+            'preview_update_home_address',
+            'confirm_update_home_address',
+            'preview_update_notification_preferences',
+            'confirm_update_notification_preferences',
+            // Feedback + referrals.
+            'preview_submit_feedback',
+            'confirm_submit_feedback',
+            'preview_send_referral',
+            'confirm_send_referral',
         ];
+        // Clinic agent tool list. All available clinic functions are enabled
+        // (47/50 under the APIs-per-Agent quota).
         const CLINIC_V1_FUNCTIONS = [
+            // info / lookups
             'get_my_clinics',
-            'get_action_needed',
+            // get_action_needed intentionally REMOVED — it returned a flat
+            // applications array with no profile join and no byJobId grouping,
+            // which the agent kept preferring (via the legacy "what needs my
+            // attention" intent), causing the chat widget to fall back to the
+            // unenriched flat renderer (no name, no Accept / Decline buttons).
+            // list_applicants_for_job (without a jobId) covers the same intent
+            // with profile enrichment + the byJobId shape the widget needs.
+            // 'get_action_needed',
             'list_applicants_for_job',
             'get_professional_info',
+            'get_open_shifts',
+            'get_scheduled_shifts',
+            'get_completed_shifts',
+            'get_job_details',
+            'get_clinic_favorites',
+            'search_professionals',
+            // post temporary / consulting / permanent jobs
             'preview_post_temporary_job',
             'confirm_post_temporary_job',
+            'preview_post_consulting_job',
+            'confirm_post_consulting_job',
+            'preview_post_permanent_job',
+            'confirm_post_permanent_job',
+            // accept / reject / negotiate / report-no-show on applicants
             'preview_accept_professional',
             'confirm_accept_professional',
             'preview_reject_professional',
             'confirm_reject_professional',
+            'preview_negotiate',
+            'confirm_negotiate',
+            'preview_mark_shift_completed',
+            'confirm_mark_shift_completed',
+            'preview_report_no_show',
+            'confirm_report_no_show',
+            // edit / cancel posted jobs
+            'preview_edit_job',
+            'confirm_edit_job',
+            'preview_cancel_job',
+            'confirm_cancel_job',
+            // invitations to specific pros
+            'preview_send_invitations',
+            'confirm_send_invitations',
+            // favorites + team management
+            'preview_add_clinic_favorite',
+            'confirm_add_clinic_favorite',
+            'preview_remove_clinic_favorite',
+            'confirm_remove_clinic_favorite',
+            'preview_invite_team_member',
+            'confirm_invite_team_member',
+            'preview_update_team_member',
+            'confirm_update_team_member',
+            'preview_remove_team_member',
+            'confirm_remove_team_member',
+            // clinic-profile / notifications / feedback
+            'preview_update_clinic_profile',
+            'confirm_update_clinic_profile',
+            'preview_update_notification_preferences',
+            'confirm_update_notification_preferences',
+            'preview_submit_feedback',
+            'confirm_submit_feedback',
         ];
 
         const ACTION_GROUP_CHUNK_SIZE = 10;
@@ -2166,7 +2244,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             { name: 'get_open_shifts', description: 'List upcoming unfilled shifts for a clinic.', parameters: { clinicId: STR('Clinic UUID', true) } },
             { name: 'get_scheduled_shifts', description: 'List accepted, future shifts for a clinic.', parameters: { clinicId: STR('Optional clinic filter') } },
             { name: 'get_completed_shifts', description: 'List completed shifts for a clinic.', parameters: { clinicId: STR('Optional clinic filter') } },
-            { name: 'list_applicants_for_job', description: 'List applicants for a specific job.', parameters: { clinicId: STR('Clinic UUID', true), jobId: STR('Optional jobId') } },
+            { name: 'list_applicants_for_job', description: 'List actionable (pending/negotiating) applicants. Omit BOTH clinicId and jobId to aggregate across every clinic the user manages (preferred for "pending applicants" / "what needs my attention"). Pass clinicId alone to scope to one clinic. Pass clinicId + jobId for a single job.', parameters: { clinicId: STR('Optional clinic UUID. Omit to aggregate across all of the user\'s clinics.'), jobId: STR('Optional jobId. Pass clinicId alongside it.') } },
             { name: 'get_professional_info', description: 'Get a professional\'s public profile.', parameters: { userSub: STR('Pro userSub', true) } },
             { name: 'get_clinic_favorites', description: 'List the clinic\'s favorite pros.', parameters: {} },
             { name: 'get_job_details', description: 'Get full details for a job by jobId.', parameters: { jobId: STR('Job UUID', true) } },
@@ -2696,6 +2774,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '',
                 'Intent → tool map (call IMMEDIATELY, no questions):',
                 '- "search jobs" / "find work" / "show shifts" / "what\'s available" → search_jobs_near_me with NO parameters. The server already knows the user\'s 50-mile radius from their home address.',
+                '- "tell me about job X" / "details on job X" / "more about that one" → get_job_details({jobId}).',
                 '- "apply to N" / "apply to that one" / "apply to the third one" / "I\'ll take that one" → apply_to_job({jobId}) IMMEDIATELY. See ABSOLUTE RULE above. No questions.',
                 '- "my invites" / "who invited me" → get_my_invitations.',
                 '- "accept invite N" / "decline invite N" → respond_invitation with {invitationId, response: "accepted"|"declined"}. No follow-up questions.',
@@ -2703,6 +2782,13 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "scheduled shifts" / "upcoming work" → get_scheduled_shifts.',
                 '- "completed shifts" / "what have I done" → get_completed_shifts.',
                 '- "negotiate $X on application Y" / "counter at $X" → preview_negotiate with the rate. The system renders a confirm card; the user clicks Confirm; you don\'t need to call confirm_negotiate yourself (a UI confirmAction handles it).',
+                '- "withdraw" / "cancel my application" → preview_withdraw_application({applicationId}). Resolve applicationId from prior get_my_applications or positional reference.',
+                '- "mark shift done" / "I worked that shift" / "attest" / "sign off on that shift" → preview_attest_completed_shift({jobId, attestedHours, signedAt: <ISO now>}). Ask only for the hours worked if the user didn\'t already say.',
+                '- "update my profile" / "change my role" / "edit my specialties" / "update bio" → preview_update_my_profile with only the fields the user mentioned. Don\'t enumerate fields; let them say what they want changed.',
+                '- "change my address" / "update home address" / "I moved" → preview_update_home_address. If user gave the full address in one sentence, parse line1/city/state/pincode out of it; otherwise ask for the line they\'re missing in ONE short sentence.',
+                '- "notification settings" / "stop emailing me" / "turn off SMS" / "notification preferences" → preview_update_notification_preferences with only the toggles the user named (emailEnabled / smsEnabled / pushEnabled / jobInvitations / applicationUpdates).',
+                '- "send feedback" / "report a bug" / "I want to tell you something" → preview_submit_feedback({type: "general", feedback: "<user\'s message>"}).',
+                '- "refer a friend" / "invite someone" → preview_send_referral with the friend\'s email or phone.',
                 '',
                 'Reference resolution (no questions):',
                 '- "the first/second/third one", "that job", "the latest" → resolve from the MOST RECENT tool result in your conversation memory. Don\'t ask the user "which one?".',
@@ -2790,12 +2876,36 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '',
                 'Intent → tool map (call IMMEDIATELY):',
                 '- "my clinics" / "which clinics do I manage" → get_my_clinics.',
-                '- "what needs my attention" / "action items" / "what\'s pending" / "recent applicants" / "pending applicants" / "applicants" (with no specific job named) → get_action_needed. This returns all pending applicants + negotiations across the clinic\'s jobs in one call. If multiple clinics exist and user didn\'t name one, silently pick the first from get_my_clinics — don\'t ask.',
-                '- "who applied to job X" / "applicants for <job>" (a specific job is named) → list_applicants_for_job with that jobId.',
+                '- For ANY applicant-related question — "what needs my attention" / "action items" / "what\'s pending" / "recent applicants" / "pending applicants" / "applicants" / "who applied" — call list_applicants_for_job WITH NO PARAMETERS. The tool aggregates across every clinic the user manages and returns only pending/negotiating rows. This is the ONLY applicants tool.',
+                '- If the user names a specific clinic ("applicants for greenville"), pass that clinicId. If they name a specific job ("applicants for job X"), pass clinicId AND jobId.',
+                '- DO NOT auto-pick a single clinicId for the broad "pending applicants" intent — omit clinicId so the tool fans out across all clinics. Auto-pick is only for tools that REQUIRE a clinicId (e.g., post_*_job).',
                 '- "show me <name>\'s profile" / "tell me about that pro" → get_professional_info.',
+                '- "open shifts" / "active jobs" / "jobs I have posted" → get_open_shifts.',
+                '- "scheduled shifts" / "upcoming work for my clinic" → get_scheduled_shifts.',
+                '- "completed shifts" / "past shifts" / "what\'s been done" → get_completed_shifts.',
+                '- "details on job X" / "show job X" → get_job_details({jobId}).',
+                '- "favorites" / "starred pros" / "my saved professionals" → get_clinic_favorites.',
+                '- "find a hygienist" / "search pros" / "look up a dentist" → search_professionals with the role/specialty/area the user mentioned.',
                 '- "post a temp shift" / "post a job" → If you have ALL required fields (clinic, role, date, start_time, end_time, rate, shift_speciality), call preview_post_temporary_job IMMEDIATELY. If anything is missing, ask for the missing pieces in ONE short conversational sentence with an inline example — NEVER as a numbered checklist, never with bold markdown, never asking 8 questions at once. Example response when ALL fields are missing: "Sure — clinic, role, date, time window, and rate? e.g., \'Qwerty Clinic, Dental Assistant, May 21 9am–2pm, $50/hr\'". When only the rate is missing: "What rate? e.g., $40/hr".',
                 '- "accept <pro>" / "hire <pro> for job X" → preview_accept_professional → wait for confirm.',
                 '- "reject <pro>" / "decline <pro>" → preview_reject_professional → wait for confirm.',
+                '- When the user message contains explicit "jobId=<UUID>" and "professionalUserSub=<UUID>" tokens (the applicants list buttons inject these), parse them verbatim and call the tool directly — do NOT ask for confirmation of the IDs.',
+                '- "post a permanent job" / "post a full-time position" → preview_post_permanent_job (then wait for confirm).',
+                '- "post a consulting gig" / "multi-day consulting" → preview_post_consulting_job (then wait for confirm).',
+                '- "negotiate $X on application Y" / "counter their offer" → preview_negotiate with the rate. The system renders a confirm card.',
+                '- "mark shift complete" / "shift was worked" / "sign off the shift" → preview_mark_shift_completed.',
+                '- "no-show" / "<pro> didn\'t show up" → preview_report_no_show.',
+                '- "edit job X" / "change the rate on job X" → preview_edit_job with the fields the user mentioned.',
+                '- "cancel job X" / "take down that posting" → preview_cancel_job.',
+                '- "invite <pro> to job X" / "directly invite" → preview_send_invitations with userSubs and jobId.',
+                '- "favorite this pro" / "save <name>" → preview_add_clinic_favorite.',
+                '- "remove favorite" / "unfavorite" → preview_remove_clinic_favorite.',
+                '- "add team member" / "invite admin" → preview_invite_team_member.',
+                '- "update team member" / "change <name>\'s role" → preview_update_team_member.',
+                '- "remove team member" / "kick <name>" → preview_remove_team_member.',
+                '- "update clinic profile" / "change clinic name" / "edit clinic details" → preview_update_clinic_profile with only the fields the user mentioned.',
+                '- "notification settings" / "stop emailing" / "turn off SMS" → preview_update_notification_preferences with only the toggles named.',
+                '- "send feedback" / "report a bug" → preview_submit_feedback.',
                 '',
                 'Resolution rules (no questions):',
                 '- If user manages exactly ONE clinic, auto-pass that clinicId for every tool that needs one. Don\'t ask "which clinic?".',
@@ -2832,6 +2942,70 @@ export class DentiPalCDKStack extends cdk.Stack {
             agentAliasName: 'live',
             agentId: clinicAgent.attrAgentId,
             description: 'Production alias for the clinic agent.',
+        });
+
+        // --- 6a.3d Public CfnAgent — unauthenticated visitor-facing assistant ---
+        //
+        // Serves anonymous visitors on marketing pages. No action groups (no
+        // tools) — product Q&A only. Reuses the shared guardrail. The system
+        // prompt below is the single source of truth for what the public bot
+        // is allowed to say; product facts are pulled verbatim from the
+        // landing-page copy + README so the model can't hallucinate features.
+        const publicAgent = new bedrock.CfnAgent(this, 'DentiPalPublicAgentV2', {
+            agentName: 'DentiPal-Public-Agent',
+            description: 'Unauthenticated visitor-facing assistant — answers DentiPal product questions only. No tools.',
+            agentResourceRoleArn: bedrockAgentServiceRole.roleArn,
+            foundationModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+            autoPrepare: true,
+            idleSessionTtlInSeconds: 900,
+            instruction: [
+                '═══ ROLE ═══',
+                'You are the DentiPal public assistant. The user is an UNAUTHENTICATED VISITOR exploring the platform.',
+                'You answer DentiPal product questions ONLY. You have NO tools — you cannot apply to jobs, post shifts, sign anyone up, or see private data.',
+                '═══════════',
+                '',
+                '═══ PRODUCT FACTS (use these verbatim — do not invent details) ═══',
+                'DentiPal is a two-sided healthcare staffing marketplace for the US dental industry. It connects dental clinics with dental professionals — dentists, hygienists, dental assistants, front-office, billing, and compliance staff.',
+                '',
+                'Three job types:',
+                '  • Temporary — same-day or short-notice shifts.',
+                '  • Multi-day consulting — fractional engagements (CFO, compliance, hygiene-program consultants).',
+                '  • Permanent — full-time placements.',
+                '',
+                'Professional sign-up flow (free): create a DentiPal account → upload credentials and work preferences → browse shifts in your area → apply and receive instant clinic confirmations → complete the shift → automatic payment through the platform.',
+                '',
+                'Clinic sign-up flow (free): create a clinic account with practice details → post a shift with the role, requirements, and credentials needed → review applications with ratings, credentials, and work history → automatic payment processing after shift completion.',
+                '',
+                'Fees: Transparent and flat. No hidden fees. We do NOT publish specific dollar amounts in this assistant — for current pricing details by role and location, direct the user to the website\'s support form.',
+                '═══════════════════════════════════════════════════════════════════',
+                '',
+                '═══ STYLE ═══',
+                'Keep answers to 1–3 short sentences. No bullet lists, no markdown bold, no numbered steps unless the user explicitly asked "how do I…" in which case a short numbered list is fine.',
+                'ALWAYS emit at least one short sentence — never an empty response.',
+                '═══════════',
+                '',
+                '═══ OUT-OF-SCOPE POLICY ═══',
+                'For anything that is NOT a DentiPal product question — current events, medical or dental advice, opinions, code help, weather, math, general chitchat, anything else — respond with this template (vary the prefix to sound natural):',
+                '  "I\'m focused on DentiPal — questions about how the platform works, sign-up, or job types. For <their topic>, you\'ll want to look elsewhere."',
+                '',
+                'For questions that need user-specific data ("what jobs are near me?", "my applications", "my clinic", "show my shifts"), respond:',
+                '  "You\'ll need to sign in to see personal data like that. Once you\'re signed in as a professional or clinic, the assistant can pull it up for you."',
+                '',
+                'NEVER attempt to access user data, NEVER claim to take an action, NEVER promise to follow up. You only describe the platform.',
+                '═══════════════════════════',
+            ].join('\n'),
+            guardrailConfiguration: {
+                guardrailIdentifier: chatGuardrail.attrGuardrailId,
+                guardrailVersion: 'DRAFT',
+            },
+            // No actionGroups intentionally — public agent is system-prompt-only.
+        });
+        publicAgent.addDependency(chatGuardrail);
+
+        const publicAgentAlias = new bedrock.CfnAgentAlias(this, 'DentiPalPublicAgentAliasV2', {
+            agentAliasName: 'live',
+            agentId: publicAgent.attrAgentId,
+            description: 'Production alias for the public agent.',
         });
 
         // --- 6a.3c Alias bumper — keeps `live` tracking the latest DRAFT ---
@@ -2876,8 +3050,10 @@ export class DentiPalCDKStack extends cdk.Stack {
             resources: [
                 `arn:aws:bedrock:${this.region}:${this.account}:agent/${professionalAgent.attrAgentId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent/${clinicAgent.attrAgentId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent/${publicAgent.attrAgentId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${professionalAgent.attrAgentId}/*`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${clinicAgent.attrAgentId}/*`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${publicAgent.attrAgentId}/*`,
             ],
         }));
 
@@ -2912,6 +3088,17 @@ export class DentiPalCDKStack extends cdk.Stack {
         });
         clinicAliasBumper.node.addDependency(clinicAgentAlias);
 
+        const publicAliasBumper = new cdk.CustomResource(this, 'PublicAliasBumper', {
+            serviceToken: aliasBumperProvider.serviceToken,
+            properties: {
+                agentId: publicAgent.attrAgentId,
+                aliasId: publicAgentAlias.attrAgentAliasId,
+                aliasName: 'live',
+                deployTimestamp: bumperTimestamp,
+            },
+        });
+        publicAliasBumper.node.addDependency(publicAgentAlias);
+
         // --- 6a.4 chatMessage Lambda — handles the new WebSocket route ---
         const chatMessageHandler = new lambda.Function(this, 'ChatMessageHandler', {
             functionName: 'DentiPal-Chat-Message',
@@ -2924,11 +3111,13 @@ export class DentiPalCDKStack extends cdk.Stack {
                 // ChatConnections (new) + Connections (existing, for bootstrap read)
                 CHAT_CONNECTIONS_TABLE: chatConnectionsTable.tableName,
                 CONNS_TABLE: connectionsTable.tableName,
-                // Bedrock agent + alias IDs (Phase 2: pro + clinic; public follows in Phase 3)
+                // Bedrock agent + alias IDs — pro, clinic, public.
                 BEDROCK_PROFESSIONAL_AGENT_ID: professionalAgent.attrAgentId,
                 BEDROCK_PROFESSIONAL_AGENT_ALIAS_ID: professionalAgentAlias.attrAgentAliasId,
                 BEDROCK_CLINIC_AGENT_ID: clinicAgent.attrAgentId,
                 BEDROCK_CLINIC_AGENT_ALIAS_ID: clinicAgentAlias.attrAgentAliasId,
+                BEDROCK_PUBLIC_AGENT_ID: publicAgent.attrAgentId,
+                BEDROCK_PUBLIC_AGENT_ALIAS_ID: publicAgentAlias.attrAgentAliasId,
                 // Tables read/written by the refactored run* functions called from toolExecutor
                 JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
                 APPLICATIONS_TABLE: jobApplicationsTable.tableName,
@@ -3015,6 +3204,8 @@ export class DentiPalCDKStack extends cdk.Stack {
                 `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${professionalAgent.attrAgentId}/${professionalAgentAlias.attrAgentAliasId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent/${clinicAgent.attrAgentId}`,
                 `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${clinicAgent.attrAgentId}/${clinicAgentAlias.attrAgentAliasId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent/${publicAgent.attrAgentId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${publicAgent.attrAgentId}/${publicAgentAlias.attrAgentAliasId}`,
                 // Guardrail (any version)
                 `arn:aws:bedrock:${this.region}:${this.account}:guardrail/${chatGuardrail.attrGuardrailId}`,
                 // Foundation model + inference profile — some accounts require
@@ -3060,6 +3251,8 @@ export class DentiPalCDKStack extends cdk.Stack {
         new cdk.CfnOutput(this, 'BedrockProfessionalAgentAliasId', { value: professionalAgentAlias.attrAgentAliasId });
         new cdk.CfnOutput(this, 'BedrockClinicAgentId', { value: clinicAgent.attrAgentId });
         new cdk.CfnOutput(this, 'BedrockClinicAgentAliasId', { value: clinicAgentAlias.attrAgentAliasId });
+        new cdk.CfnOutput(this, 'BedrockPublicAgentId', { value: publicAgent.attrAgentId });
+        new cdk.CfnOutput(this, 'BedrockPublicAgentAliasId', { value: publicAgentAlias.attrAgentAliasId });
 
         // 6c. Public agent — REMOVED (was Phase 3 OpenSearch Serverless + KB).
         //     To re-add: restore S3 bucket + OpenSearch collection + KB + Public CfnAgent.

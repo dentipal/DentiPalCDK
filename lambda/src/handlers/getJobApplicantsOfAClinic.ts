@@ -348,8 +348,11 @@ export const handler = async (
     extractUserFromBearerToken(authHeader);
     // ------------------------------------------------
 
+
+    // Fall back to splitting event.path for real API Gateway traffic where the route is
+    // /{clinicId}/applicants. Without this fallback, in-process calls hit a 400.
     const path = event.path || "";
-    const clinicId = path.split("/")[1];
+    const clinicId = event.pathParameters?.clinicId || path.split("/")[1];
 
     console.log(`🏥 Clinic ID: ${clinicId}`);
 

@@ -61,8 +61,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     try {
         const caller = extractUserFromBearerToken(event.headers?.Authorization || event.headers?.authorization);
-        if (!requireInternalGroup(caller.groups, ["Admin"])) {
-            return json(event, 403, { error: "Forbidden", message: "Admin role required." });
+        // Admin + HR — both can view the directory so HR can onboard without
+        // double-inviting clinics that already exist.
+        if (!requireInternalGroup(caller.groups, ["Admin", "HR"])) {
+            return json(event, 403, { error: "Forbidden", message: "Admin or HR role required." });
         }
 
         const qs = event.queryStringParameters || {};
