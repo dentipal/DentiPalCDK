@@ -35,6 +35,8 @@ interface DynamoDBAddressItem {
     city?: AttributeValue;
     state?: AttributeValue;
     pincode?: AttributeValue;
+    lat?: AttributeValue; // N — geocoded latitude (optional, present once address is geocoded)
+    lng?: AttributeValue; // N — geocoded longitude
     [key: string]: AttributeValue | undefined;
 }
 
@@ -51,7 +53,16 @@ interface ProfileResponseItem {
     city: string;
     state: string;
     zipcode: string;
+    lat: number | null;
+    lng: number | null;
 }
+
+// Helper: parse a DynamoDB N attribute as a finite number, else null
+const parseNumOrNull = (attr?: AttributeValue): number | null => {
+    if (!attr || !("N" in attr) || typeof attr.N !== "string") return null;
+    const v = parseFloat(attr.N);
+    return Number.isFinite(v) ? v : null;
+};
 
 // Helper to build JSON responses with shared CORS
 const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
@@ -98,15 +109,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const addressResult: QueryCommandOutput = await dynamodb.send(addressCommand);
             const address: DynamoDBAddressItem = (addressResult.Items?.[0] as DynamoDBAddressItem) || {};
             
-            const city = address.city?.S || ''; 
-            const state = address.state?.S || ''; 
-            const zipcode = address.pincode?.S || ''; 
-            
+            const city = address.city?.S || '';
+            const state = address.state?.S || '';
+            const zipcode = address.pincode?.S || '';
+            const lat = parseNumOrNull(address.lat);
+            const lng = parseNumOrNull(address.lng);
+
             // Extract and transform profile fields
             const dentalSoftwareExperience: string[] = item.dental_software_experience?.SS || [];
             const specialties: string[] = item.specialties?.SS || [];
             const yearsOfExperience: number = item.years_of_experience?.N ? parseInt(item.years_of_experience.N, 10) : 0;
-            
+
             // Return the structured profile
             return {
                 userSub: currentSub,
@@ -119,7 +132,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 yearsOfExperience: yearsOfExperience,
                 city: city,
                 state: state,
-                zipcode: zipcode
+                zipcode: zipcode,
+                lat,
+                lng
             };
         }));
 

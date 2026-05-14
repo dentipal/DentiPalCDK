@@ -1,6 +1,7 @@
 import {
     DynamoDBClient,
     QueryCommand,
+    GetItemCommand,
     QueryCommandInput,
     QueryCommandOutput,
     AttributeValue,
@@ -15,6 +16,13 @@ const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
 const JOB_APPLICATIONS_CLINIC_GSI =
     process.env.JOB_APPLICATIONS_CLINIC_GSI || "clinicId-jobId-index";
+const CLINICS_TABLE = process.env.CLINICS_TABLE;
+
+const parseNumOrNull = (attr?: AttributeValue): number | null => {
+    if (!attr || !("N" in attr) || typeof attr.N !== "string") return null;
+    const v = parseFloat(attr.N);
+    return Number.isFinite(v) ? v : null;
+};
 
 // Only count strictly "worked" outcomes — paid follows completed in the
 // status machine, both mean the professional actually delivered the shift.
@@ -124,6 +132,26 @@ export const handler = async (
             ExclusiveStartKey = res.LastEvaluatedKey;
         } while (ExclusiveStartKey);
 
+        // Also fetch the clinic's geocoded coordinates so the frontend can
+        // distance-sort professionals relative to this clinic without an
+        // extra round-trip. Best-effort: a missing clinic record or missing
+        // lat/lng just yields nulls — the frontend falls back to no sort.
+        let clinicLat: number | null = null;
+        let clinicLng: number | null = null;
+        if (CLINICS_TABLE) {
+            try {
+                const clinicRes = await dynamodb.send(new GetItemCommand({
+                    TableName: CLINICS_TABLE,
+                    Key: { clinicId: { S: clinicId } },
+                    ProjectionExpression: "lat, lng",
+                }));
+                clinicLat = parseNumOrNull(clinicRes.Item?.lat);
+                clinicLng = parseNumOrNull(clinicRes.Item?.lng);
+            } catch (e) {
+                console.warn("[getWorkedProfessionals] Failed to load clinic coords:", e);
+            }
+        }
+
         return {
             statusCode: 200,
             headers: corsHeaders(event),
@@ -131,6 +159,8 @@ export const handler = async (
                 clinicId,
                 professionalUserSubs: Array.from(seen),
                 count: seen.size,
+                clinicLat,
+                clinicLng,
             }),
         };
     } catch (error) {

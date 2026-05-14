@@ -38,8 +38,19 @@ interface DynamoDBItem {
     createdAt?: AttributeValue;
     // Address Fields
     city?: AttributeValue;
+    state?: AttributeValue;
+    pincode?: AttributeValue;
+    lat?: AttributeValue; // N — geocoded latitude (optional)
+    lng?: AttributeValue; // N — geocoded longitude (optional)
     [key: string]: AttributeValue | undefined;
 }
+
+// Helper: parse a DynamoDB N attribute as a finite number, else null
+const parseNumOrNull = (attr?: AttributeValue): number | null => {
+    if (!attr || !("N" in attr) || typeof attr.N !== "string") return null;
+    const v = parseFloat(attr.N);
+    return Number.isFinite(v) ? v : null;
+};
 
 // Interface for the final mapped professional details
 interface ProfessionalDetails {
@@ -48,6 +59,10 @@ interface ProfessionalDetails {
     last_name: string;
     role: string;
     city: string;
+    state: string;
+    zipcode: string;
+    lat: number | null;
+    lng: number | null;
     profile_image: string | null;
     years_of_experience: number | null;
     dental_software_experience: string[];
@@ -175,6 +190,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     last_name: professionalProfile.last_name?.S || 'Unknown',
                     role: professionalProfile.role?.S || 'Unknown',
                     city: address?.city?.S || 'N/A', // Add city from USER_ADDRESSES_TABLE
+                    state: address?.state?.S || '',
+                    zipcode: address?.pincode?.S || '',
+                    lat: parseNumOrNull(address?.lat),
+                    lng: parseNumOrNull(address?.lng),
                     profile_image: professionalProfile.profile_image?.S || null,
                     years_of_experience: professionalProfile.years_of_experience?.N ?
                         parseInt(professionalProfile.years_of_experience.N, 10) : null,
