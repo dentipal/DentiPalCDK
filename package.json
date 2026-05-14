@@ -9,7 +9,8 @@
     "watch": "tsc -w",
     "test": "jest",
     "test:chatbot-pro": "jest test/chatbotProfessional.test.ts",
-    "cdk": "cdk"
+    "cdk": "cdk",
+    "deploy": "cd lambda && npm run build && cd .. && cdk deploy"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.159",
