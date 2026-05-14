@@ -44,12 +44,40 @@ export const handler = async (
             };
         }
 
-        const clinicId = event.pathParameters?.clinicId;
+        // API Gateway uses a {proxy+} catch-all integration, so the named
+        // {clinicId} placeholder is not populated on pathParameters. We try
+        // every source in order: explicit clinicId, proxy split, then a
+        // direct regex on the raw request path (the most reliable fallback).
+        let clinicId = event.pathParameters?.clinicId || "";
+        if (!clinicId) {
+            const proxy = event.pathParameters?.proxy || "";
+            const proxyParts = proxy.split("/").filter(Boolean);
+            if (proxyParts.length >= 2 && proxyParts[0] === "clinics") {
+                clinicId = proxyParts[1];
+            }
+        }
+        if (!clinicId) {
+            const rawPath: string =
+                event.path ||
+                (event as any).rawPath ||
+                event.resource ||
+                "";
+            const match = rawPath.match(/\/clinics\/([^\/]+)\/worked-professionals/);
+            if (match) clinicId = match[1];
+        }
+
         if (!clinicId) {
             return {
                 statusCode: 400,
                 headers: corsHeaders(event),
-                body: JSON.stringify({ error: "clinicId path parameter is required" }),
+                body: JSON.stringify({
+                    error: "clinicId path parameter is required",
+                    debug: {
+                        path: event.path,
+                        resource: event.resource,
+                        pathParameters: event.pathParameters,
+                    },
+                }),
             };
         }
 
