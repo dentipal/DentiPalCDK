@@ -139,16 +139,57 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             Username: userSub,
         }));
 
-        // 7b. Write to the session-invalidation denylist so existing ACCESS
-        //     tokens (which Cognito does NOT revoke) are rejected by the
-        //     router on their next request. invalidatedBefore is "now"; any
-        //     token issued before this moment is dead on its next API call.
-        //     We use a 31-day ttl so rows auto-clean after refresh tokens
-        //     would have expired anyway.
-        // Use "now - 1s" so a token issued in the same second as this write
-        // still passes (`iat < invalidatedBefore` is the check). Eliminates
-        // a 1-in-1 chance of locking out the current device.
-        const invalidatedBefore = Math.floor(Date.now() / 1000) - 1;
+        // 8. Re-issue tokens FIRST so we know the exact `iat` of the new
+        //    access token. We then use that timestamp as the denylist
+        //    boundary, which guarantees the current device's brand-new
+        //    token passes the check (iat == invalidatedBefore → passes
+        //    because the router uses strict `<`).
+        let newTokens: any = null;
+        let newTokenIat: number | undefined;
+        if (email) {
+            try {
+                const auth = await cognito.send(new AdminInitiateAuthCommand({
+                    UserPoolId: process.env.USER_POOL_ID!,
+                    ClientId: process.env.CLIENT_ID!,
+                    AuthFlow: "ADMIN_USER_PASSWORD_AUTH",
+                    AuthParameters: {
+                        USERNAME: email,
+                        PASSWORD: newPassword,
+                    },
+                }));
+                newTokens = {
+                    accessToken: auth.AuthenticationResult?.AccessToken,
+                    idToken: auth.AuthenticationResult?.IdToken,
+                    refreshToken: auth.AuthenticationResult?.RefreshToken,
+                    expiresIn: auth.AuthenticationResult?.ExpiresIn,
+                };
+
+                // Decode the new access token JWT to read its `iat`.
+                // Format: header.payload.signature — all base64url.
+                const access = newTokens.accessToken as string | undefined;
+                if (access) {
+                    const parts = access.split(".");
+                    if (parts.length === 3) {
+                        const padded = parts[1] + "===".slice((parts[1].length + 3) % 4);
+                        const payloadJson = Buffer.from(padded, "base64").toString("utf8");
+                        const payload = JSON.parse(payloadJson);
+                        if (typeof payload.iat === "number") newTokenIat = payload.iat;
+                    }
+                }
+            } catch (e) {
+                console.warn("Re-auth after password change failed", e);
+            }
+        }
+
+        // 9. Write to the session-invalidation denylist so existing ACCESS
+        //    tokens (which Cognito does NOT revoke) are rejected by the
+        //    router on their next request.
+        //
+        //    invalidatedBefore = the new token's `iat` if we have it,
+        //    otherwise "now". Router check is strict `<`, so any token
+        //    issued strictly BEFORE the new one fails — the new token
+        //    itself (iat == invalidatedBefore) passes.
+        const invalidatedBefore = newTokenIat ?? Math.floor(Date.now() / 1000);
         if (process.env.SESSION_INVALIDATIONS_TABLE) {
             try {
                 await ddb.send(new PutCommand({
@@ -167,34 +208,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
-        // 8. Re-issue tokens so the current device stays logged in.
-        //    NOTE: This MUST come after step 7b so the new token's `iat`
-        //    is >= invalidatedBefore, otherwise the router would reject
-        //    the current device's very next request.
-        let newTokens: any = null;
-        if (email) {
-            try {
-                const auth = await cognito.send(new AdminInitiateAuthCommand({
-                    UserPoolId: process.env.USER_POOL_ID!,
-                    ClientId: process.env.CLIENT_ID!,
-                    AuthFlow: "ADMIN_USER_PASSWORD_AUTH",
-                    AuthParameters: {
-                        USERNAME: email,
-                        PASSWORD: newPassword,
-                    },
-                }));
-                newTokens = {
-                    accessToken: auth.AuthenticationResult?.AccessToken,
-                    idToken: auth.AuthenticationResult?.IdToken,
-                    refreshToken: auth.AuthenticationResult?.RefreshToken,
-                    expiresIn: auth.AuthenticationResult?.ExpiresIn,
-                };
-            } catch (e) {
-                console.warn("Re-auth after password change failed", e);
-            }
-        }
-
-        // 9. Clean up the OTP row
+        // 10. Clean up the OTP row
         await ddb.send(new DeleteCommand({
             TableName: process.env.PASSWORD_OTP_TABLE!,
             Key: { userSub },
