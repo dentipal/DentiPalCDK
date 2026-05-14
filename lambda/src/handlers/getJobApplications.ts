@@ -5,6 +5,7 @@ import {
   DynamoDBClient,
   QueryCommand,
   QueryCommandOutput,
+  GetItemCommand,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { extractUserFromBearerToken } from "./utils";
@@ -12,6 +13,33 @@ import { corsHeaders } from "./corsHeaders";
 export const dynamodb = new DynamoDBClient({
   region: process.env.REGION,
 });
+
+const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-ClinicProfiles";
+
+/** Per-invocation cache of clinicUserSub → clinic_name. Multiple applications
+ *  often share a clinic, so this avoids redundant GetItem calls. */
+async function fetchClinicName(
+  clinicUserSub: string,
+  cache: Map<string, string>
+): Promise<string | undefined> {
+  if (!clinicUserSub) return undefined;
+  if (cache.has(clinicUserSub)) return cache.get(clinicUserSub);
+  try {
+    const resp = await dynamodb.send(new GetItemCommand({
+      TableName: CLINIC_PROFILES_TABLE,
+      Key: { userSub: { S: clinicUserSub } },
+      ProjectionExpression: "clinic_name",
+    }));
+    const name = resp.Item?.clinic_name?.S || "";
+    if (name) {
+      cache.set(clinicUserSub, name);
+      return name;
+    }
+  } catch (e) {
+    console.warn(`[getJobApplications] clinic-name lookup failed for ${clinicUserSub}:`, e);
+  }
+  return undefined;
+}
 
 
 // -------- Helper: Pick Latest Negotiation --------
@@ -131,6 +159,7 @@ export const handler = async (event: any) => {
 
     const applicationsResponse = { Items: allItems };
     const applications: any[] = [];
+    const clinicNameCache = new Map<string, string>();
 
     const toDates = (attr: AttributeValue | undefined): string[] => {
       if (!attr) return [];
@@ -228,6 +257,17 @@ export const handler = async (event: any) => {
 
             application.createdAt = strOr(job.created_at, job.createdAt);
             application.updatedAt = strOr(job.updated_at, job.updatedAt);
+
+            // Resolve the clinic display name from CLINIC_PROFILES_TABLE.
+            // Application rows often store an empty string for clinicUserSub —
+            // fall back to the job row's clinicUserSub which is denormalized at
+            // post time and reliably populated.
+            const clinicUserSubForLookup = application.clinicUserSub || str(job.clinicUserSub);
+            const clinicName = await fetchClinicName(clinicUserSubForLookup, clinicNameCache);
+            if (clinicName) {
+              application.clinicName = clinicName;
+              application.clinic = { ...(application.clinic || {}), name: clinicName };
+            }
           }
         } catch (jobError: any) {
           console.warn(
