@@ -2,6 +2,7 @@ import {
   DynamoDBClient,
   QueryCommand,
   QueryCommandInput,
+  GetItemCommand,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyHandler, APIGatewayProxyResult } from "aws-lambda";
@@ -9,6 +10,33 @@ import { extractAuthFromEvent, AuthContext } from "./utils";
 import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-ClinicProfiles";
+
+/** Per-invocation cache of clinicUserSub → clinic_name. Avoids re-fetching when
+ *  multiple invitations belong to the same clinic. Cleared between Lambda
+ *  invocations because the module reload boundary handles it. */
+async function fetchClinicName(
+  clinicUserSub: string,
+  cache: Map<string, string>
+): Promise<string | undefined> {
+  if (!clinicUserSub) return undefined;
+  if (cache.has(clinicUserSub)) return cache.get(clinicUserSub);
+  try {
+    const resp = await dynamodb.send(new GetItemCommand({
+      TableName: CLINIC_PROFILES_TABLE,
+      Key: { userSub: { S: clinicUserSub } },
+      ProjectionExpression: "clinic_name",
+    }));
+    const name = resp.Item?.clinic_name?.S || "";
+    if (name) {
+      cache.set(clinicUserSub, name);
+      return name;
+    }
+  } catch (e) {
+    console.warn(`[getJobInvitations] clinic-name lookup failed for ${clinicUserSub}:`, e);
+  }
+  return undefined;
+}
 
 const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
   statusCode,
@@ -90,6 +118,7 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
   console.log(`Found ${allItems.length} invitations for professional ${professionalUserSub}`);
 
   const invitations: any[] = [];
+  const clinicNameCache = new Map<string, string>();
 
   for (const item of allItems) {
     const invitation: any = {
@@ -169,6 +198,16 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
         invitation.payType = job.pay_type?.S || "per_hour";
         invitation.clinicSoftware = toStrArr(job.clinicSoftware);
         invitation.jobDescription = job.job_description?.S || invitation.jobDescription;
+
+        // Resolve the clinic display name from CLINIC_PROFILES_TABLE so the
+        // professional UI can show "<role> at <clinic name>" without an
+        // additional client round-trip.
+        const clinicUserSub = job.clinicUserSub?.S || "";
+        const clinicName = await fetchClinicName(clinicUserSub, clinicNameCache);
+        if (clinicName) {
+          invitation.clinicName = clinicName;
+          invitation.clinic = { ...(invitation.clinic || {}), name: clinicName };
+        }
       }
     } catch (jobError: any) {
       console.error(`Failed to fetch job details for JobId: ${invitation.jobId}:`, jobError.message || jobError);
