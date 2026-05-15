@@ -12,6 +12,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils"; 
 // Import shared CORS headers
 import { corsHeaders } from "./corsHeaders";
+import { notifyJobChangedFromUpdate } from "./notifyJobChanged";
 
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
@@ -222,6 +223,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const updateResponse = await dynamodb.send(new UpdateItemCommand(updateCommand));
         const updatedJob = updateResponse.Attributes;
+
+        // Fan out a job-modified notification to applicants + invitees so
+        // they know the terms they were considering have shifted. Best-
+        // effort: failures must not bubble up and fail the edit response.
+        try {
+            await notifyJobChangedFromUpdate({
+                jobId: jobId!,
+                existingJob: existingJob as unknown as Record<string, AttributeValue>,
+                updateBody: updateData as unknown as Record<string, unknown>,
+            });
+        } catch (notifyErr) {
+            console.error("[updatePermanentJob] notifyJobChanged failed (non-fatal):", (notifyErr as Error).message);
+        }
 
         // --- Step 4: Return structured response ---
         return json(event, 200, {

@@ -32,6 +32,7 @@ export type NotificationType =
     | "shift_no_show"
     | "shift_reminder_h24"
     | "shift_reminder_h1"
+    | "job_modified"
     | "application_rejected"
     | "invitation_received"
     | "invitation_response"
