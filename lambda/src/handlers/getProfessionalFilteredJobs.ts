@@ -9,6 +9,14 @@ import { extractUserFromBearerToken } from "./utils";
 import { corsHeaders } from "./corsHeaders";
 import { haversineDistance, type Coordinates } from "./geo";
 import { fireAndForgetIncrement, PROMOTION_TIER_WEIGHT } from "./promotionCounters";
+import {
+  getProfessionalAvailability,
+  jobMatchesWeekdays,
+  getScheduledOccurrences,
+  dateIsBlocked,
+  jobConflictsWithScheduled,
+  jobDates,
+} from "./professionalAvailability";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
@@ -472,11 +480,35 @@ export const handler = async (
     // pro hasn't opted into an organic radius filter.
     const needStoredCoords = !liveUserCoords;
     const isFirstPage = !cursor;
-    const [appliedInfo, storedCoords, promotedItems] = await Promise.all([
+    // Phase 2: also fetch the pro's "scheduled" job occurrences so the feed
+    // can hide anything that time-conflicts with what they're already booked.
+    // Parallel with the existing fetches — adds one query, no serial cost.
+    const [appliedInfo, storedCoords, promotedItems, availability, scheduledOccurrences] = await Promise.all([
       getAppliedJobInfo(userSub),
       needStoredCoords ? getProfessionalCoords(userSub) : Promise.resolve(null as Coordinates | null),
       isFirstPage ? getActivePromotedJobItems() : Promise.resolve([] as Record<string, AttributeValue>[]),
+      getProfessionalAvailability(userSub),
+      getScheduledOccurrences(userSub),
     ]);
+
+    // Master availability gate — when the pro flips the toggle OFF we surface
+    // an empty feed (no jobs, no promoted slots) but keep the response shape
+    // so the UI's loading/empty states still render. Scheduled-shifts and
+    // applications endpoints are intentionally untouched: the pro must still
+    // see jobs they're already committed to.
+    if (!availability.isAvailableForJobs) {
+      return json(event, 200, {
+        totalJobs: 0,
+        totalMatched: 0,
+        hasMore: false,
+        nextCursor: null,
+        jobs: [],
+        promotedJobs: [],
+        counts: { temporary: 0, multiday: 0, permanent: 0 },
+        countsTruncated: false,
+        availability: { isAvailableForJobs: false, availableDays: [] },
+      });
+    }
 
     const appliedJobIds = appliedInfo.jobIds;
     const appliedClinicIds = appliedInfo.clinicIds;
@@ -578,6 +610,27 @@ export const handler = async (
           // Phase 1: everything except jobType
           if (!matchesFilters(item, filtersSansJobType)) continue;
 
+          // Weekday gate from the pro's Availability section. Empty day list →
+          // no filter; otherwise the job's date(s) must hit at least one of
+          // the selected weekdays.
+          if (!jobMatchesWeekdays(item, availability.availableDays)) continue;
+
+          // ---- Phase 2 gates (additive — each is a no-op when the pro
+          // hasn't filled in the corresponding setting). Order matters only
+          // for clarity; any one rejection drops the job.
+          //
+          // (a) Blocked dates — exact YYYY-MM-DD match wins over weekday.
+          const occDates = jobDates(item);
+          let blockedByDate = false;
+          for (const d of occDates) {
+            if (dateIsBlocked(d, availability.unavailableDates)) { blockedByDate = true; break; }
+          }
+          if (blockedByDate) continue;
+
+          // (b) Schedule-conflict — same day + overlapping time as something
+          // the pro is already booked for.
+          if (jobConflictsWithScheduled(item, scheduledOccurrences)) continue;
+
           // Radius filter: skip jobs outside the professional's travel radius
           let distanceMi: number | null = null;
           if (radiusMiles && profCoords) {
@@ -667,6 +720,22 @@ export const handler = async (
 
         // Two-phase: gate by non-jobType filters first, bucket, then jobType.
         if (!matchesFilters(item, filtersSansJobType)) continue;
+
+        // Weekday gate (same semantics as the organic loop above).
+        if (!jobMatchesWeekdays(item, availability.availableDays)) continue;
+
+        // Phase 2 gates — same set as the organic loop. Promoted placements
+        // must not break the pro's actual availability rules.
+        {
+          const occDates = jobDates(item);
+          let blocked = false;
+          for (const d of occDates) {
+            if (dateIsBlocked(d, availability.unavailableDates)) { blocked = true; break; }
+          }
+          if (blocked) continue;
+
+          if (jobConflictsWithScheduled(item, scheduledOccurrences)) continue;
+        }
 
         // Also honour the user-set radius filter when one is active and is
         // tighter than the promoted gate (e.g. pro restricted feed to 10 mi).

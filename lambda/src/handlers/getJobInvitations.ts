@@ -8,33 +8,65 @@ import {
 import { APIGatewayProxyHandler, APIGatewayProxyResult } from "aws-lambda";
 import { extractAuthFromEvent, AuthContext } from "./utils";
 import { corsHeaders } from "./corsHeaders";
+import {
+  getProfessionalAvailability,
+  getScheduledOccurrences,
+  jobBlockedByAvailability,
+} from "./professionalAvailability";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-ClinicProfiles";
+const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-V5-Clinics";
 
-/** Per-invocation cache of clinicUserSub → clinic_name. Avoids re-fetching when
- *  multiple invitations belong to the same clinic. Cleared between Lambda
- *  invocations because the module reload boundary handles it. */
+/** Per-invocation cache. Keys: clinicUserSub for profile-table hits,
+ *  "cid:<clinicId>" for clinics-table hits. */
 async function fetchClinicName(
   clinicUserSub: string,
+  clinicId: string,
   cache: Map<string, string>
 ): Promise<string | undefined> {
-  if (!clinicUserSub) return undefined;
-  if (cache.has(clinicUserSub)) return cache.get(clinicUserSub);
-  try {
-    const resp = await dynamodb.send(new GetItemCommand({
-      TableName: CLINIC_PROFILES_TABLE,
-      Key: { userSub: { S: clinicUserSub } },
-      ProjectionExpression: "clinic_name",
-    }));
-    const name = resp.Item?.clinic_name?.S || "";
-    if (name) {
-      cache.set(clinicUserSub, name);
-      return name;
+  // 1) Preferred: ClinicProfiles keyed by userSub.
+  if (clinicUserSub) {
+    if (cache.has(clinicUserSub)) return cache.get(clinicUserSub);
+    try {
+      const resp = await dynamodb.send(new GetItemCommand({
+        TableName: CLINIC_PROFILES_TABLE,
+        Key: { userSub: { S: clinicUserSub } },
+        ProjectionExpression: "clinic_name",
+      }));
+      const name = resp.Item?.clinic_name?.S || "";
+      if (name) {
+        cache.set(clinicUserSub, name);
+        if (clinicId) cache.set(`cid:${clinicId}`, name);
+        return name;
+      }
+    } catch (e) {
+      console.warn(`[getJobInvitations] profile lookup failed for sub=${clinicUserSub}:`, e);
     }
-  } catch (e) {
-    console.warn(`[getJobInvitations] clinic-name lookup failed for ${clinicUserSub}:`, e);
   }
+
+  // 2) Fallback: Clinics table keyed by clinicId. Covers legacy/test rows
+  //    where clinicUserSub is empty.
+  if (clinicId) {
+    const cidKey = `cid:${clinicId}`;
+    if (cache.has(cidKey)) return cache.get(cidKey);
+    try {
+      const resp = await dynamodb.send(new GetItemCommand({
+        TableName: CLINICS_TABLE,
+        Key: { clinicId: { S: clinicId } },
+        ProjectionExpression: "#n",
+        ExpressionAttributeNames: { "#n": "name" },
+      }));
+      const name = resp.Item?.name?.S || "";
+      if (name) {
+        cache.set(cidKey, name);
+        return name;
+      }
+    } catch (e) {
+      console.warn(`[getJobInvitations] clinics lookup failed for clinicId=${clinicId}:`, e);
+    }
+  }
+
   return undefined;
 }
 
@@ -117,6 +149,16 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
 
   console.log(`Found ${allItems.length} invitations for professional ${professionalUserSub}`);
 
+  // Pull the pro's availability + already-scheduled jobs once up front so we
+  // can re-run the same gate `sendJobInvitations` enforces at send time.
+  // The pro's settings can change after an invite was created — newly-blocked
+  // dates, a fresh schedule conflict with another clinic, etc. — so this
+  // surface filters invites whose underlying job no longer fits.
+  const [availability, scheduledOccurrences] = await Promise.all([
+    getProfessionalAvailability(professionalUserSub),
+    getScheduledOccurrences(professionalUserSub),
+  ]);
+
   const invitations: any[] = [];
   const clinicNameCache = new Map<string, string>();
 
@@ -147,6 +189,19 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
 
       if (jobResponse.Items && jobResponse.Items[0]) {
         const job = jobResponse.Items[0];
+
+        // Availability gate — same rules as sendJobInvitations / createJobApplication.
+        // If the pro's current availability blocks this job (toggle off, weekday
+        // miss, blocked date, or schedule conflict with another scheduled job),
+        // skip the invite entirely so the pro never sees an invite they can't
+        // accept. Soft-fail on lookup misses so a transient blip never blanks
+        // the whole Invites tab.
+        const blockedReason = jobBlockedByAvailability(
+          job,
+          availability,
+          scheduledOccurrences,
+        );
+        if (blockedReason !== null) continue;
 
         invitation.jobTitle = job.job_title?.S || "Unknown Job Title";
         invitation.jobType = job.job_type?.S || "Unknown";
@@ -199,11 +254,12 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
         invitation.clinicSoftware = toStrArr(job.clinicSoftware);
         invitation.jobDescription = job.job_description?.S || invitation.jobDescription;
 
-        // Resolve the clinic display name from CLINIC_PROFILES_TABLE so the
-        // professional UI can show "<role> at <clinic name>" without an
-        // additional client round-trip.
+        // Resolve clinic display name with a fallback chain:
+        //   1. ClinicProfiles by job.clinicUserSub (preferred)
+        //   2. Clinics table by clinicId (handles rows with empty userSub).
         const clinicUserSub = job.clinicUserSub?.S || "";
-        const clinicName = await fetchClinicName(clinicUserSub, clinicNameCache);
+        const clinicIdForLookup = invitation.clinicId || job.clinicId?.S || "";
+        const clinicName = await fetchClinicName(clinicUserSub, clinicIdForLookup, clinicNameCache);
         if (clinicName) {
           invitation.clinicName = clinicName;
           invitation.clinic = { ...(invitation.clinic || {}), name: clinicName };

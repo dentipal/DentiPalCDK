@@ -37,6 +37,20 @@ const SPECIALIZATION_OPTIONS = [
     "Orthodontics",
 ];
 
+// Allowed weekday values for the Availability section's "Weekly Availability"
+// selector. Keep canonical capitalized English so reads/writes don't have to
+// case-normalize downstream. MUST match the frontend DAYS_OF_WEEK constant in
+// dentipal/src/schemas/availabilitySchema.ts.
+const AVAILABLE_DAY_OPTIONS = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+
 // Fields that clients cannot set/change via this endpoint.
 const BLOCKED_FIELDS = new Set<string>(["userSub", "createdAt", "email", "role"]);
 
@@ -76,6 +90,32 @@ const validateNumber = (min: number, max: number): Validator => (value) => {
 const validateBoolean: Validator = (value) => {
     if (typeof value !== "boolean") return { ok: false, error: "Must be a boolean" };
     return { ok: true, out: { BOOL: value } };
+};
+
+// YYYY-MM-DD for the unavailable-dates list.
+const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+const validateDateArray: Validator = (value) => {
+    if (!Array.isArray(value)) return { ok: false, error: "Must be an array of YYYY-MM-DD strings" };
+    if (value.length > 366) return { ok: false, error: "Too many blocked dates (max 366)" };
+    const seen = new Set<string>();
+    const cleaned: string[] = [];
+    for (const item of value) {
+        if (typeof item !== "string") return { ok: false, error: "Each date must be a string" };
+        const trimmed = item.trim();
+        if (!trimmed) continue;
+        if (!DATE_REGEX.test(trimmed)) return { ok: false, error: `Invalid date "${trimmed}" — use YYYY-MM-DD` };
+        const d = new Date(trimmed + "T00:00:00Z");
+        if (Number.isNaN(d.getTime())) return { ok: false, error: `"${trimmed}" is not a real calendar date` };
+        if (seen.has(trimmed)) continue;
+        seen.add(trimmed);
+        cleaned.push(trimmed);
+    }
+    if (cleaned.length === 0) {
+        // Empty → REMOVE the attribute. SS can't be empty in DynamoDB.
+        return { ok: true, out: { NULL: true } };
+    }
+    return { ok: true, out: { SS: cleaned.sort() } };
 };
 
 const validateLicense: Validator = (value) => {
@@ -133,6 +173,16 @@ const FIELD_VALIDATORS: Record<string, Validator> = {
     // Travel
     is_willing_to_travel: validateBoolean,
     max_travel_distance: validateInteger(0, 10000),
+
+    // Availability — master toggle + weekday selection. Read by findJobs /
+    // getProfessionalFilteredJobs (gate the pro's feed), getAllProfessionals
+    // (hide opted-out pros from clinic listings), and createJobApplication
+    // (reject applications while unavailable).
+    is_available_for_jobs: validateBoolean,
+    available_days: validateStringArray({ allowed: AVAILABLE_DAY_OPTIONS, maxItems: AVAILABLE_DAY_OPTIONS.length }),
+    // Blocked calendar dates. Optional — when missing, the "any date"
+    // behavior is preserved.
+    unavailable_dates: validateDateArray,
 
     // Document keys (opaque S3 keys)
     resumeKey: validateFreeText(512),

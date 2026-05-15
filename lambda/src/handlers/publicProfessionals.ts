@@ -8,6 +8,8 @@ import {
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 // Import shared CORS headers
 import { corsHeaders } from "./corsHeaders";
+import { readAvailabilityFromProfileItem } from "./professionalAvailability";
+import type { AttributeValue } from "@aws-sdk/client-dynamodb";
 
 // Helper to build JSON responses with shared CORS
 const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
@@ -91,8 +93,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const result: ScanCommandOutput = await dynamodb.send(scanCommand);
 
+    // Honour the pro's Availability toggle on the clinic-facing public list
+    // too — toggle OFF must hide the pro from new-assignment discovery
+    // surfaces. Legacy rows default to ON (see readAvailabilityFromProfileItem).
+    const visibleItems = (result.Items || []).filter((item) => {
+      const { isAvailableForJobs } = readAvailabilityFromProfileItem(
+        item as unknown as Record<string, AttributeValue>,
+      );
+      return isAvailableForJobs;
+    });
+
     const profiles: Profile[] = await Promise.all(
-      (result.Items || []).map(async (item) => {
+      visibleItems.map(async (item) => {
         const professionalItem = item as unknown as ProfessionalProfileItem;
         const userSub = professionalItem.userSub?.S || "";
 

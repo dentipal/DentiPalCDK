@@ -13,6 +13,14 @@ import {
 import { APIGatewayProxyResult, APIGatewayProxyEvent } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 import { corsHeaders } from "./corsHeaders";
+import {
+    getProfessionalAvailability,
+    getScheduledOccurrences,
+    jobMatchesWeekdays,
+    dateIsBlocked,
+    jobConflictsWithScheduled,
+    jobDates,
+} from "./professionalAvailability";
 
 // --- Initialization ---
 const REGION: string = process.env.AWS_REGION || process.env.REGION || "us-east-1";
@@ -172,6 +180,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(event, 404, { error: "No matching application found" });
         }
 
+<<<<<<< HEAD
         // --- Step 5: Resolve the accepted rate ---
         // When the applicant negotiated, the application row carries proposedRate
         // and a negotiationId pointing at the live counter-offer thread. Persist
@@ -223,6 +232,77 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             updateExpr += ", acceptedRate = :acceptedRate";
             updateAttrValues[":acceptedRate"] = { N: String(acceptedRate) };
         }
+=======
+        // --- Step 4b: Availability check (Phase 2 clinic-side validation) ---
+        // Before flipping the application to "scheduled", verify the pro is
+        // actually available for this job's date/time. Catches:
+        //   - master toggle OFF
+        //   - pro removed the weekday from their availability after applying
+        //   - pro marked this date unavailable after applying
+        //   - pro narrowed their time windows so the shift no longer fits
+        //   - pro got booked elsewhere for an overlapping slot
+        //
+        // Returning 409 here means the clinic sees a clear "Professional is
+        // not available for selected slot" message; existing scheduled jobs
+        // remain untouched.
+        let preHireJobItem: Record<string, any> | null = null;
+        try {
+            const jobRes = await dynamo.send(new QueryCommand({
+                TableName: JOB_POSTINGS_TABLE,
+                IndexName: "jobId-index-1",
+                KeyConditionExpression: "jobId = :jid",
+                ExpressionAttributeValues: { ":jid": { S: jobId } },
+                Limit: 1,
+            }));
+            preHireJobItem = (jobRes.Items || [])[0] || null;
+        } catch (e) {
+            console.warn("[acceptProf] Pre-hire job lookup failed (non-fatal for legacy validation):", (e as Error).message);
+        }
+
+        if (preHireJobItem) {
+            const [availability, scheduled] = await Promise.all([
+                getProfessionalAvailability(professionalUserSub),
+                getScheduledOccurrences(professionalUserSub),
+            ]);
+
+            if (!availability.isAvailableForJobs) {
+                return json(event, 409, {
+                    status: "error",
+                    error: "ProfessionalUnavailable",
+                    message: "Professional is not available for selected slot.",
+                    details: { reason: "off" },
+                });
+            }
+            if (!jobMatchesWeekdays(preHireJobItem, availability.availableDays)) {
+                return json(event, 409, {
+                    status: "error",
+                    error: "ProfessionalUnavailable",
+                    message: "Professional is not available for selected slot.",
+                    details: { reason: "weekday" },
+                });
+            }
+            for (const d of jobDates(preHireJobItem)) {
+                if (dateIsBlocked(d, availability.unavailableDates)) {
+                    return json(event, 409, {
+                        status: "error",
+                        error: "ProfessionalUnavailable",
+                        message: "Professional is not available for selected slot.",
+                        details: { reason: "blocked_date", date: d },
+                    });
+                }
+            }
+            if (jobConflictsWithScheduled(preHireJobItem, scheduled)) {
+                return json(event, 409, {
+                    status: "error",
+                    error: "ProfessionalUnavailable",
+                    message: "Professional is not available for selected slot.",
+                    details: { reason: "schedule_conflict" },
+                });
+            }
+        }
+
+        // --- Step 5: Update Status ---
+>>>>>>> 671e9af243b7fafff30e289aca07350ff0510616
         const updateCommandInput: UpdateItemCommandInput = {
             TableName: JOB_APPLICATIONS_TABLE,
             Key: {

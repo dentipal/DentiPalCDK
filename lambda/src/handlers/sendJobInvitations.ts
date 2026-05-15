@@ -17,6 +17,14 @@ import {
     APIGatewayProxyEvent,
 } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
+import {
+    getProfessionalAvailability,
+    getScheduledOccurrences,
+    jobMatchesWeekdays,
+    dateIsBlocked,
+    jobConflictsWithScheduled,
+    jobDates,
+} from "./professionalAvailability";
 import { v4 as uuidv4 } from "uuid";
 import { corsHeaders } from "./corsHeaders";
 
@@ -207,6 +215,50 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
             existingInvitationChecks.filter((c) => c.alreadyInvited).map((c) => c.sub)
         );
 
+        // 6b. Availability check per professional (Phase 2 clinic-side guard).
+        // For each invitee, verify the pro is actually available for this
+        // job's date/time. Pros flagged unavailable (toggle off / wrong day /
+        // wrong time / blocked date / conflicting schedule) are stripped from
+        // the invite batch and surfaced back in the `errors` list so the UI
+        // can show the validation message from the spec.
+        const unavailableReasons = new Map<string, string>();
+        await Promise.all(
+            professionalUserSubs.map(async (profSub) => {
+                if (alreadyInvitedSubs.has(profSub)) return; // already filtered
+                try {
+                    const [availability, scheduled] = await Promise.all([
+                        getProfessionalAvailability(profSub),
+                        getScheduledOccurrences(profSub),
+                    ]);
+
+                    if (!availability.isAvailableForJobs) {
+                        unavailableReasons.set(profSub, "off"); return;
+                    }
+                    // `JobItem` defines fields as optional; the availability
+                    // helpers expect a strict Record. The runtime shape is the
+                    // same — just a TS narrowing.
+                    const jobAttr = job as unknown as Record<string, AttributeValue>;
+
+                    if (!jobMatchesWeekdays(jobAttr, availability.availableDays)) {
+                        unavailableReasons.set(profSub, "weekday"); return;
+                    }
+                    for (const d of jobDates(jobAttr)) {
+                        if (dateIsBlocked(d, availability.unavailableDates)) {
+                            unavailableReasons.set(profSub, "blocked_date"); return;
+                        }
+                    }
+                    if (jobConflictsWithScheduled(jobAttr, scheduled)) {
+                        unavailableReasons.set(profSub, "schedule_conflict"); return;
+                    }
+                } catch (err) {
+                    // Don't punish the invite on a transient availability lookup
+                    // failure — fall back to permissive (legacy behavior). Logged
+                    // for ops visibility.
+                    console.warn(`[sendJobInvitations] availability check failed for ${profSub}; allowing invite:`, (err as Error).message);
+                }
+            })
+        );
+
         // 7. Send Invitations (no role filtering — all roles are allowed)
         const timestamp: string = new Date().toISOString();
         const invitationResults: InvitationResult[] = [];
@@ -229,6 +281,15 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
                 errors.push({
                     professionalUserSub: profSub,
                     error: "Professional has already been invited to this job",
+                });
+                continue;
+            }
+            if (unavailableReasons.has(profSub)) {
+                // Mirrors the spec's required clinic-side message; the reason
+                // code lets the UI tailor the explanation if it wants to.
+                errors.push({
+                    professionalUserSub: profSub,
+                    error: "Professional is not available for selected slot.",
                 });
                 continue;
             }
