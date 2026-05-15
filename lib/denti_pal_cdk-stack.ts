@@ -669,6 +669,7 @@ import * as eventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as bedrock from 'aws-cdk-lib/aws-bedrock';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as path from 'path';
 
 export class DentiPalCDKStack extends cdk.Stack {
@@ -1712,6 +1713,25 @@ export class DentiPalCDKStack extends cdk.Stack {
             autoDeploy: true,
         });
 
+        // --- Custom domain: wss://ws.dentipal.com ---
+        const wsDomainCertArn = 'arn:aws:acm:us-east-1:489502444760:certificate/8aff342e-17de-4fda-affc-c5edaa3f490a';
+
+        const wsDomain = new apigwv2.DomainName(this, 'WsCustomDomain', {
+            domainName: 'ws.dentipal.com',
+            certificate: acm.Certificate.fromCertificateArn(this, 'WsDomainCert', wsDomainCertArn),
+        });
+
+        new apigwv2.ApiMapping(this, 'WsApiMapping', {
+            api: webSocketApi,
+            domainName: wsDomain,
+            stage: webSocketStage,
+        });
+
+        new cdk.CfnOutput(this, 'WsCustomDomainTarget', {
+            value: wsDomain.regionalDomainName,
+            description: 'Use this as the value for the ws.dentipal.com CNAME record',
+        });
+
         // ========================================================================
         // 6a. Bedrock AgentCore + chatMessage WebSocket route (Phase 1)
         //
@@ -1803,6 +1823,14 @@ export class DentiPalCDKStack extends cdk.Stack {
         // preview/confirm_apply_to_job and preview/confirm_respond_invitation
         // pairs that have been replaced by single-shot apply_to_job and
         // respond_invitation respectively.
+        // confirm_* tools are intentionally NOT in this list. The agent only
+        // calls preview_*, which renders a confirm card; the user clicks
+        // Submit, which sends a `confirmAction` frame that bypasses Bedrock
+        // and runs the confirm_* tool directly. Exposing confirm_* to the
+        // model lets it skip the user-confirm step (call preview AND confirm
+        // in the same turn) — observed 2026-05-14 with confirm_accept_professional.
+        // The toolExecutor switch still handles every confirm_* case for the
+        // confirmAction shortcut path.
         const PRO_V1_FUNCTIONS = [
             // search / info
             'search_jobs_near_me',
@@ -1815,41 +1843,23 @@ export class DentiPalCDKStack extends cdk.Stack {
             // Single-shot writes (no preview/confirm pair).
             'apply_to_job',
             'respond_invitation',
-            // Counter-offer preview/confirm pair — rates need a review step.
+            // Preview-only — confirm fires from the user's Submit click.
             'preview_negotiate',
-            'confirm_negotiate',
-            // Withdraw an application.
             'preview_withdraw_application',
-            'confirm_withdraw_application',
-            // Post-shift attestation (triggers payment processing).
             'preview_attest_completed_shift',
-            'confirm_attest_completed_shift',
-            // Self-service profile / address / preferences edits.
             'preview_update_my_profile',
-            'confirm_update_my_profile',
             'preview_update_home_address',
-            'confirm_update_home_address',
             'preview_update_notification_preferences',
-            'confirm_update_notification_preferences',
-            // Feedback + referrals.
             'preview_submit_feedback',
-            'confirm_submit_feedback',
             'preview_send_referral',
-            'confirm_send_referral',
         ];
-        // Clinic agent tool list. All available clinic functions are enabled
-        // (47/50 under the APIs-per-Agent quota).
+        // Clinic agent tool list. confirm_* tools are deliberately omitted
+        // (see comment above PRO_V1_FUNCTIONS). They still exist in the
+        // toolExecutor switch — they're called by the confirmAction shortcut
+        // when the user clicks Submit, which never goes through Bedrock.
         const CLINIC_V1_FUNCTIONS = [
             // info / lookups
             'get_my_clinics',
-            // get_action_needed intentionally REMOVED — it returned a flat
-            // applications array with no profile join and no byJobId grouping,
-            // which the agent kept preferring (via the legacy "what needs my
-            // attention" intent), causing the chat widget to fall back to the
-            // unenriched flat renderer (no name, no Accept / Decline buttons).
-            // list_applicants_for_job (without a jobId) covers the same intent
-            // with profile enrichment + the byJobId shape the widget needs.
-            // 'get_action_needed',
             'list_applicants_for_job',
             'get_professional_info',
             'get_open_shifts',
@@ -1858,50 +1868,26 @@ export class DentiPalCDKStack extends cdk.Stack {
             'get_job_details',
             'get_clinic_favorites',
             'search_professionals',
-            // post temporary / consulting / permanent jobs
+            // Preview-only — confirm fires from the user's Submit click.
             'preview_post_temporary_job',
-            'confirm_post_temporary_job',
             'preview_post_consulting_job',
-            'confirm_post_consulting_job',
             'preview_post_permanent_job',
-            'confirm_post_permanent_job',
-            // accept / reject / negotiate / report-no-show on applicants
             'preview_accept_professional',
-            'confirm_accept_professional',
             'preview_reject_professional',
-            'confirm_reject_professional',
             'preview_negotiate',
-            'confirm_negotiate',
             'preview_mark_shift_completed',
-            'confirm_mark_shift_completed',
             'preview_report_no_show',
-            'confirm_report_no_show',
-            // edit / cancel posted jobs
             'preview_edit_job',
-            'confirm_edit_job',
             'preview_cancel_job',
-            'confirm_cancel_job',
-            // invitations to specific pros
             'preview_send_invitations',
-            'confirm_send_invitations',
-            // favorites + team management
             'preview_add_clinic_favorite',
-            'confirm_add_clinic_favorite',
             'preview_remove_clinic_favorite',
-            'confirm_remove_clinic_favorite',
             'preview_invite_team_member',
-            'confirm_invite_team_member',
             'preview_update_team_member',
-            'confirm_update_team_member',
             'preview_remove_team_member',
-            'confirm_remove_team_member',
-            // clinic-profile / notifications / feedback
             'preview_update_clinic_profile',
-            'confirm_update_clinic_profile',
             'preview_update_notification_preferences',
-            'confirm_update_notification_preferences',
             'preview_submit_feedback',
-            'confirm_submit_feedback',
         ];
 
         const ACTION_GROUP_CHUNK_SIZE = 10;
@@ -2800,7 +2786,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'NEVER respond with an empty turn — always emit one sentence, even if very short.',
                 '═════════════════════════════════════════════════',
                 '',
-                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields.',
+                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields. CRITICAL: after a preview_* tool call, NEVER call any other tool in the same turn — the user will click Submit, which fires the confirm independently. Calling a confirm_* tool yourself will fail (the model has no access to confirm_* — they are user-only).',
                 '',
                 'When a tool returns a single-shot result (apply_to_job, respond_invitation), one short sentence is fine ("Applied. Status: pending.").',
                 '',
@@ -2887,11 +2873,12 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "favorites" / "starred pros" / "my saved professionals" → get_clinic_favorites.',
                 '- "find a hygienist" / "search pros" / "look up a dentist" → search_professionals with the role/specialty/area the user mentioned.',
                 '- "post a temp shift" / "post a job" → If you have ALL required fields (clinic, role, date, start_time, end_time, rate, shift_speciality), call preview_post_temporary_job IMMEDIATELY. If anything is missing, ask for the missing pieces in ONE short conversational sentence with an inline example — NEVER as a numbered checklist, never with bold markdown, never asking 8 questions at once. Example response when ALL fields are missing: "Sure — clinic, role, date, time window, and rate? e.g., \'Qwerty Clinic, Dental Assistant, May 21 9am–2pm, $50/hr\'". When only the rate is missing: "What rate? e.g., $40/hr".',
-                '- "accept <pro>" / "hire <pro> for job X" → preview_accept_professional → wait for confirm.',
-                '- "reject <pro>" / "decline <pro>" → preview_reject_professional → wait for confirm.',
+                '- "accept <pro>" / "hire <pro> for job X" / "accept this professional" / "hire them" → preview_accept_professional → wait for confirm.',
+                '- "reject <pro>" / "decline <pro>" / "decline this professional" / "pass on them" → preview_reject_professional → wait for confirm.',
                 '- When the user message contains explicit "jobId=<UUID>" and "professionalUserSub=<UUID>" tokens (the applicants list buttons inject these), parse them verbatim and call the tool directly — do NOT ask for confirmation of the IDs.',
+                '- For "accept/decline THIS professional" / "hire them" without inline IDs in the current message: SCAN PRIOR USER MESSAGES IN THIS CONVERSATION for the most recent "userSub=<UUID>" and "jobId=<UUID>" tokens (typically from a "Show me the full profile of …" or "Accept applicant …" message generated by the applicants-list View/Accept/Decline buttons). Use those values verbatim. NEVER ask the user for jobId or userSub if either has appeared in prior turns — it is always recoverable from history. Only ask if both intent and history are completely empty.',
                 '- "post a permanent job" / "post a full-time position" → preview_post_permanent_job (then wait for confirm).',
-                '- "post a consulting gig" / "multi-day consulting" → preview_post_consulting_job (then wait for confirm).',
+                '- "post a consulting gig" / "multi-day consulting" / "post multiday job" → preview_post_consulting_job. DATES rules:\n  • If the user gave a RANGE ("May 21-25", "May 21 to May 25"), pass the WHOLE range string verbatim as the dates field — DO NOT enumerate it yourself (you tend to miscount inclusive ranges; the server expands ranges correctly).\n  • If the user gave specific days ("May 21, 23, 27"), pass an ISO array: dates=["2026-05-21","2026-05-23","2026-05-27"].\n  • DO NOT pass total_days — the server derives it from the resolved dates array.\n  • Default to the current calendar year unless the user said otherwise.',
                 '- "negotiate $X on application Y" / "counter their offer" → preview_negotiate with the rate. The system renders a confirm card.',
                 '- "mark shift complete" / "shift was worked" / "sign off the shift" → preview_mark_shift_completed.',
                 '- "no-show" / "<pro> didn\'t show up" → preview_report_no_show.',
@@ -2920,7 +2907,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'NEVER respond with an empty turn — always emit one sentence, even if very short. If you need to ask a follow-up to proceed (e.g., missing rate when posting), do so in ONE sentence.',
                 '═════════════════════════════════════════════════',
                 '',
-                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields.',
+                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields. CRITICAL: after a preview_* tool call, NEVER call any other tool in the same turn — the user will click Submit, which fires the confirm independently. Calling a confirm_* tool yourself will fail (the model has no access to confirm_* — they are user-only).',
                 '',
                 'When a tool returns a single-shot success (e.g., accept_professional confirmed), one short sentence is fine.',
                 '',
@@ -3099,6 +3086,77 @@ export class DentiPalCDKStack extends cdk.Stack {
         });
         publicAliasBumper.node.addDependency(publicAgentAlias);
 
+        // --- 6a.3b AgentCore Memory — long-term, cross-session user memory ---
+        // Replaces the 15-min Bedrock Agents session memory with persistent
+        // per-user memory. AgentCore Memory runs two managed strategies in
+        // the background:
+        //   - SUMMARIZATION: rolling per-session summaries, scoped per user.
+        //   - USER_PREFERENCE: structured extracted preferences, scoped per
+        //     user across all sessions.
+        // chatMessage Lambda calls CreateEvent on every turn and
+        // RetrieveMemoryRecords on session bootstrap to inject prior summary
+        // and preferences into the first-turn preamble. Bedrock Agents
+        // continues to handle the actual model + tool loop unchanged.
+        //
+        // MemoryExecutionRoleArn is intentionally omitted — AgentCore uses
+        // its service-linked role, which has the right permissions for the
+        // built-in strategies' Bedrock model calls. Providing a custom role
+        // would override that with whatever we wrote, which is fragile.
+
+        // L2/L1 constructs for AWS::BedrockAgentCore::* are not yet in this
+        // CDK version (2.206). Use the generic CfnResource escape hatch — it
+        // renders the CFN resource directly, so AgentCore support requires
+        // no CDK upgrade. Switch to bedrock.CfnMemory once aws-cdk-lib ships it.
+        const chatMemory = new cdk.CfnResource(this, 'DentiPalChatMemory', {
+            type: 'AWS::BedrockAgentCore::Memory',
+            properties: {
+                // Name pattern is ^[a-zA-Z][a-zA-Z0-9_]{0,47}$ — underscores only.
+                Name: 'DentiPal_ChatMemory',
+                Description: 'Long-term chat memory for DentiPal users (per-user summaries and preferences).',
+                // 90 days — long enough for "the agent remembers me a month later"
+                // without retaining indefinitely. Bumpable later without recreating.
+                EventExpiryDuration: 90,
+                MemoryStrategies: [
+                    {
+                        SummaryMemoryStrategy: {
+                            Name: 'sessionSummaries',
+                            Description: 'Rolling per-session conversation summary, scoped per actor (Cognito userSub).',
+                            // Template form — AgentCore expands {actorId} from the
+                            // CreateEvent's actorId field (we pass userSub) and
+                            // {sessionId} from the event's sessionId.
+                            NamespaceTemplates: ['/summaries/{actorId}/{sessionId}/'],
+                        },
+                    },
+                    {
+                        UserPreferenceMemoryStrategy: {
+                            Name: 'userPreferences',
+                            Description: 'Structured user preferences (preferred shifts, roles, locations, etc.), extracted across all sessions for an actor.',
+                            // Per-actor only — preferences merge across sessions,
+                            // not silo per-session.
+                            NamespaceTemplates: ['/preferences/{actorId}/'],
+                        },
+                    },
+                ],
+            },
+        });
+        const chatMemoryId = chatMemory.getAtt('MemoryId').toString();
+        const chatMemoryArn = chatMemory.getAtt('MemoryArn').toString();
+
+        // Wire AgentCore Memory ID + deletion IAM into the monolith REST
+        // Lambda so its account-deletion handlers (deleteOwnAccount.ts,
+        // deleteUser.ts) can call clearUserMemory and actually delete the
+        // user's memory records on account closure. Without this, the
+        // clearUserMemory call silently no-ops and we leave conversational
+        // artifacts behind (GDPR gap).
+        lambdaFunction.addEnvironment('AGENTCORE_MEMORY_ID', chatMemoryId);
+        lambdaFunction.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'bedrock-agentcore:ListMemoryRecords',
+                'bedrock-agentcore:BatchDeleteMemoryRecords',
+            ],
+            resources: [chatMemoryArn],
+        }));
+
         // --- 6a.4 chatMessage Lambda — handles the new WebSocket route ---
         const chatMessageHandler = new lambda.Function(this, 'ChatMessageHandler', {
             functionName: 'DentiPal-Chat-Message',
@@ -3118,6 +3176,10 @@ export class DentiPalCDKStack extends cdk.Stack {
                 BEDROCK_CLINIC_AGENT_ALIAS_ID: clinicAgentAlias.attrAgentAliasId,
                 BEDROCK_PUBLIC_AGENT_ID: publicAgent.attrAgentId,
                 BEDROCK_PUBLIC_AGENT_ALIAS_ID: publicAgentAlias.attrAgentAliasId,
+                // AgentCore Memory — multi-day per-user memory. The chat
+                // Lambda reads this on session bootstrap and writes events
+                // on every turn. Bedrock Agents still runs the actual loop.
+                AGENTCORE_MEMORY_ID: chatMemoryId,
                 // Tables read/written by the refactored run* functions called from toolExecutor
                 JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
                 APPLICATIONS_TABLE: jobApplicationsTable.tableName,
@@ -3135,6 +3197,11 @@ export class DentiPalCDKStack extends cdk.Stack {
                 PREFS_TABLE: notificationPreferencesTable.tableName, // legacy alias used by some handlers
                 FEEDBACK_TABLE: feedbackTable.tableName,
                 REFERRALS_TABLE: referralsTable.tableName,
+                // Raw WebSocket API ID — needed because the management API
+                // (PostToConnection) does NOT accept the custom domain
+                // `ws.dentipal.com`. The Lambda uses this to construct the
+                // raw `<api-id>.execute-api.<region>.amazonaws.com` host.
+                WEBSOCKET_API_ID: webSocketApi.apiId,
             },
             timeout: cdk.Duration.seconds(60), // Bedrock streaming + multi-loop tool exec
             memorySize: 1024,
@@ -3215,6 +3282,34 @@ export class DentiPalCDKStack extends cdk.Stack {
                 `arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
                 `arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
             ],
+        }));
+
+        // AgentCore Memory data-plane access — chatMessage Lambda calls
+        // CreateEvent on every turn and RetrieveMemoryRecords on session
+        // bootstrap. clearUserMemory (called from account-deletion path)
+        // lists then batch-deletes a user's records.
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'bedrock-agentcore:CreateEvent',
+                'bedrock-agentcore:RetrieveMemoryRecords',
+                'bedrock-agentcore:ListMemoryRecords',
+                'bedrock-agentcore:DeleteMemoryRecord',
+                'bedrock-agentcore:BatchDeleteMemoryRecords',
+                'bedrock-agentcore:ListEvents',
+                'bedrock-agentcore:DeleteEvent',
+            ],
+            resources: [chatMemoryArn],
+        }));
+
+        // EventBridge PutEvents — handlers like acceptProf / rejectProf /
+        // confirmShiftCompletion / etc. publish ShiftEvent so the inbox
+        // event-to-message Lambda can write a system message into the
+        // applicant's conversation. Without this, in-process invocations from
+        // the chatbot fail with AccessDenied on PutEvents and surface as a
+        // generic 500 "Failed to accept applicant".
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['events:PutEvents'],
+            resources: ['*'],
         }));
 
         // PostToConnection — push streamed frames back to the client.

@@ -7,6 +7,7 @@ import { DynamoDBDocumentClient, QueryCommand, DeleteCommand } from "@aws-sdk/li
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { corsHeaders } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
+import { clearUserMemory } from "./chat/agentCoreMemory";
 
 // --- AWS SDK Clients Initialization ---
 const REGION = process.env.REGION || "us-east-1";
@@ -78,9 +79,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         // 3. Delete User from Cognito
         await cognitoClient.send(new AdminDeleteUserCommand({
-            UserPoolId: process.env.USER_POOL_ID, 
-            Username: userSub 
+            UserPoolId: process.env.USER_POOL_ID,
+            Username: userSub
         }));
+
+        // 4. Best-effort: clear AgentCore Memory records (summaries +
+        //    preferences) for this user. clearUserMemory handles all errors
+        //    internally and short-circuits if AGENTCORE_MEMORY_ID isn't set,
+        //    so it's safe to call even before the CDK env-var grant lands.
+        await clearUserMemory(userSub);
 
         return json(event, 200, {
             status: "success",

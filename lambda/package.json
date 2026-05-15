@@ -10,6 +10,7 @@
     "@aws-sdk/client-apigatewaymanagementapi": "^3.1045.0",
     "@aws-sdk/client-bedrock-agent": "^3.1045.0",
     "@aws-sdk/client-bedrock-agent-runtime": "^3.1045.0",
+    "@aws-sdk/client-bedrock-agentcore": "^3.1045.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.940.0",
     "@aws-sdk/client-dynamodb": "^3.940.0",
     "@aws-sdk/client-eventbridge": "^3.1029.0",

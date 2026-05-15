@@ -204,6 +204,146 @@ function clampLimit(n: any): number {
 }
 
 /**
+ * Coerce a single date input (any shape the agent might send) into a
+ * `YYYY-MM-DD` string. Returns null when nothing parseable is left.
+ *
+ * Accepted inputs:
+ *   - "2026-05-21"                  → unchanged
+ *   - "2026-05-21T..."              → date portion only
+ *   - "May 21" / "May 21 2026"      → resolved against current year
+ *   - "21" / "21 May" / "21/5"      → best-effort
+ */
+function toIsoDate(raw: any, fallbackYear: number): string | null {
+  if (raw == null) return null;
+  if (typeof raw !== "string") raw = String(raw);
+  const s = raw.trim();
+  if (!s) return null;
+  // Already ISO?
+  const isoMatch = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoMatch) return isoMatch[1];
+  // Try Date.parse with the year appended if missing.
+  const hasYear = /\b(20|19)\d{2}\b/.test(s);
+  const candidate = hasYear ? s : `${s} ${fallbackYear}`;
+  const d = new Date(candidate);
+  if (Number.isNaN(d.getTime())) return null;
+  // If the year is missing AND the parsed date is more than 30d in the past,
+  // bump it to next year (intent was almost certainly future).
+  if (!hasYear) {
+    const now = new Date();
+    if (d.getTime() < now.getTime() - 30 * 24 * 3600 * 1000) {
+      d.setFullYear(d.getFullYear() + 1);
+    }
+  }
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
+ * Expand a textual date range like "may 21-24" or "May 21 - May 23 2026"
+ * into a list of ISO dates. Returns null when no clear start/end can be
+ * extracted (caller falls back to single-date parse).
+ */
+function expandDateRange(raw: string, fallbackYear: number): string[] | null {
+  // Pattern A: same month — "may 21-24" / "May 21-24 2026"
+  const m1 = raw.match(/^(.+?)\s*(\d{1,2})\s*[-–to]+\s*(\d{1,2})\b(.*)$/i);
+  if (m1) {
+    const [, prefix, startDay, endDay, suffix] = m1;
+    const start = toIsoDate(`${prefix.trim()} ${startDay} ${suffix.trim()}`.trim(), fallbackYear);
+    const end = toIsoDate(`${prefix.trim()} ${endDay} ${suffix.trim()}`.trim(), fallbackYear);
+    if (start && end) return enumerateDates(start, end);
+  }
+  // Pattern B: full-date range — "2026-05-21 to 2026-05-23" / "May 21 - May 23 2026"
+  const m2 = raw.match(/^(.+?)\s*(?:to|through|-)\s*(.+)$/i);
+  if (m2) {
+    const start = toIsoDate(m2[1], fallbackYear);
+    const end = toIsoDate(m2[2], fallbackYear);
+    if (start && end) return enumerateDates(start, end);
+  }
+  return null;
+}
+
+function enumerateDates(startIso: string, endIso: string): string[] {
+  const out: string[] = [];
+  const start = new Date(startIso + "T00:00:00");
+  const end = new Date(endIso + "T00:00:00");
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return [startIso];
+  if (end.getTime() < start.getTime()) return [startIso];
+  // Cap at a reasonable consulting-gig length so a typo can't generate 1000 entries.
+  const MAX = 60;
+  let cur = start;
+  while (cur.getTime() <= end.getTime() && out.length < MAX) {
+    const yyyy = cur.getFullYear();
+    const mm = String(cur.getMonth() + 1).padStart(2, "0");
+    const dd = String(cur.getDate()).padStart(2, "0");
+    out.push(`${yyyy}-${mm}-${dd}`);
+    cur = new Date(cur.getTime() + 24 * 3600 * 1000);
+  }
+  return out;
+}
+
+/**
+ * Mutates `input` in place: turns the agent's `dates` field (array, comma-
+ * separated string, or range) into a clean `string[]` of ISO dates, and
+ * auto-derives `total_days` from the resulting list when the agent forgot.
+ * Used by both preview_post_consulting_job and confirm_post_consulting_job.
+ */
+function normalizeDatesInPlace(input: any): void {
+  if (!input) return;
+  const fallbackYear = new Date().getFullYear();
+  let dates: string[] = [];
+
+  if (Array.isArray(input.dates)) {
+    dates = (input.dates as any[])
+      .map((d: any) => toIsoDate(d, fallbackYear))
+      .filter((d: string | null): d is string => !!d);
+  } else if (typeof input.dates === "string") {
+    const raw = input.dates.trim();
+    // Range first (handles "may 21-24" before splitting on `-`).
+    const expanded = expandDateRange(raw, fallbackYear);
+    if (expanded) {
+      dates = expanded;
+    } else if (raw.includes(",")) {
+      // "may 21,22,23" — propagate the prefix (month name) onto bare numbers.
+      const parts = raw.split(",").map((p: string) => p.trim()).filter(Boolean);
+      let lastPrefix = "";
+      const expandedParts: string[] = [];
+      for (const p of parts) {
+        // If part is bare number, prepend last prefix (e.g. "may ").
+        if (/^\d{1,2}$/.test(p) && lastPrefix) {
+          expandedParts.push(`${lastPrefix} ${p}`);
+        } else {
+          expandedParts.push(p);
+          // Capture the month-word prefix for later bare-number parts.
+          const prefixMatch = p.match(/^([A-Za-z]+)\s+\d/);
+          if (prefixMatch) lastPrefix = prefixMatch[1];
+        }
+      }
+      dates = expandedParts
+        .map((p) => toIsoDate(p, fallbackYear))
+        .filter((d): d is string => !!d);
+    } else {
+      const single = toIsoDate(raw, fallbackYear);
+      if (single) dates = [single];
+    }
+  }
+
+  // Dedupe + sort for stability (and so total_days reflects unique days).
+  dates = Array.from(new Set(dates)).sort();
+  input.dates = dates;
+
+  // ALWAYS overwrite total_days from the resolved dates array — the dates
+  // list is the source of truth. The agent frequently miscounts inclusive
+  // ranges (e.g. "May 21–25" = 5 days, not 4). Letting the agent's stale
+  // total_days through here trips the handler's "Dates count must match
+  // total_days" validator and cancels the post.
+  if (dates.length > 0) {
+    input.total_days = dates.length;
+  }
+}
+
+/**
  * Mutates `input` in place: turns whatever shape the agent put in
  * `professional_role` / `professional_roles` into the canonical snake_case
  * dbValue(s) the backend handlers accept. Drops fields that can't be
@@ -649,15 +789,37 @@ export async function executeTool(
 
         let r: { status: number; body: any };
         const clinicIdGiven = call.input.clinicId && typeof call.input.clinicId === "string";
-        const userClinics = (userContext?.clinics || [])
+        let userClinics: string[] = (userContext?.clinics || [])
           .map((c: any) => c.clinicId)
-          .filter(Boolean);
+          .filter((id: any) => typeof id === "string" && id.length > 0);
 
-        if (clinicIdGiven || userClinics.length <= 1) {
-          // Single-clinic path. Explicit param wins; otherwise fall back to
-          // the user's sole clinic. Handler will 400 if neither resolves.
-          const cid = clinicIdGiven ? call.input.clinicId : userClinics[0];
-          r = await callOne(cid);
+        // Session context only fetches from UserClinicAssignments — a user
+        // who CREATED a clinic but never wrote an assignment row will show up
+        // with zero clinics here even though they own one. Live-fetch via the
+        // same handler get_my_clinics uses (scans Clinics for createdBy +
+        // AssociatedUsers membership) so the fan-out has something to chew on.
+        if (userClinics.length === 0 && !clinicIdGiven && !call.input.jobId) {
+          try {
+            const cr = await callHandlerInProcess(getUsersClinicsHandler, { method: "GET", auth });
+            if (cr.status < 400 && Array.isArray(cr.body?.clinics)) {
+              userClinics = cr.body.clinics
+                .map((c: any) => c?.clinicId)
+                .filter((id: any) => typeof id === "string" && id.length > 0);
+              console.log(`[list_applicants_for_job] live-fetched ${userClinics.length} clinics (session had 0)`);
+            }
+          } catch (e: any) {
+            console.warn("[list_applicants_for_job] live clinic fetch failed:", e?.message || e);
+          }
+        }
+
+        if (!clinicIdGiven && userClinics.length === 0) {
+          return err(call.toolName, 400, "No clinics found for this user. Ask them to set one up first.");
+        }
+
+        if (clinicIdGiven) {
+          r = await callOne(call.input.clinicId);
+        } else if (userClinics.length === 1) {
+          r = await callOne(userClinics[0]);
         } else {
           // Multi-clinic fan-out. Run in parallel; surface 200 even if some
           // clinics fail — chat is best-effort visible, not all-or-nothing.
@@ -746,9 +908,12 @@ export async function executeTool(
       case "preview_post_consulting_job":
         normalizeClinicIdsInPlace(call.input, userContext);
         normalizeProfessionalRoleInPlace(call.input);
+        normalizeDatesInPlace(call.input);
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) => {
           if (!Array.isArray(i.clinicIds) || i.clinicIds.length === 0) return "clinicIds required (array of UUIDs)";
-          if (!Array.isArray(i.dates) || i.dates.length === 0) return "dates required";
+          if (!Array.isArray(i.dates) || i.dates.length === 0) {
+            return `dates required (got: ${JSON.stringify(call.input.dates)}). Pass an array of ISO dates like ["2026-05-21","2026-05-22"] OR a string like "may 21-24".`;
+          }
           if (typeof i.total_days !== "number") return "total_days required";
           if (typeof i.hours_per_day !== "number") return "hours_per_day required";
           return null;
@@ -756,9 +921,11 @@ export async function executeTool(
       case "confirm_post_consulting_job":
         normalizeClinicIdsInPlace(call.input, userContext);
         normalizeProfessionalRoleInPlace(call.input);
+        normalizeDatesInPlace(call.input);
         return genericConfirm(call.toolName, auth, connectionId, call.input, (p) => {
           normalizeClinicIdsInPlace(p, userContext);
           normalizeProfessionalRoleInPlace(p);
+          normalizeDatesInPlace(p);
           return callHandlerInProcess(createMultiDayConsultingHandler, { method: "POST", body: p, auth });
         });
 
@@ -1067,3 +1234,4 @@ export async function executeTool(
     return err(call.toolName, 500, e?.message || "Tool execution failed");
   }
 }
+

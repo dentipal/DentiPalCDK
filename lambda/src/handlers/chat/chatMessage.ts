@@ -24,6 +24,7 @@ import {
 } from "./sessionStore";
 import { executeTool, ToolCall } from "./toolExecutor";
 import { fetchUserContext, renderContextPreamble, UserContext } from "./userContext";
+import { hydrateMemoryPreamble, writeMemoryEvent, ConversationTurn } from "./agentCoreMemory";
 import { AuthContext, CLINIC_ROLES } from "../utils";
 
 const REGION = process.env.REGION || "us-east-1";
@@ -88,15 +89,6 @@ interface ConfirmActionFrame {
 }
 
 type InboundFrame = ChatMessageFrame | ConfirmActionFrame;
-
-const PROFESSIONAL_GROUPS_LOWER = new Set([
-  "associatedentist", "dentalhygienist", "dentalassistant",
-  "expandedfunctionsda", "dualrolefrontda", "patientcoordinatorfront",
-  "treatmentcoordinatorfront", "dentist", "hygienist", "dhcomborole",
-]);
-
-const isClinicGroup = (g: string) => (CLINIC_ROLES as readonly string[]).includes(g.toLowerCase());
-const isProfessionalGroup = (g: string) => PROFESSIONAL_GROUPS_LOWER.has(g.toLowerCase());
 
 /**
  * First-message bootstrap.
@@ -196,17 +188,17 @@ function getAgentTarget(agentType: string): { agentId: string; agentAliasId: str
 }
 
 /**
- * Build the API Gateway Management API client for the current WebSocket
- * connection. Endpoint is derived from the request context so the same Lambda
- * works across stages.
+ * Construct the per-invocation ApiGatewayManagementApi client for posting
+ * frames back to the WebSocket connection. The endpoint URL is derived from
+ * the inbound event's requestContext (domainName + stage), which is how API
+ * Gateway WebSocket APIs identify their management endpoint per stage.
  */
 function buildApiGwClient(event: any): ApiGatewayManagementApiClient {
-  const domain = event.requestContext?.domainName;
-  const stage = event.requestContext?.stage;
-  if (!domain || !stage) throw new Error("Missing WebSocket request context for PostToConnection");
+  const domainName = event?.requestContext?.domainName;
+  const stage = event?.requestContext?.stage;
   return new ApiGatewayManagementApiClient({
     region: REGION,
-    endpoint: `https://${domain}/${stage}`,
+    endpoint: `https://${domainName}/${stage}`,
   });
 }
 
@@ -233,32 +225,7 @@ async function postFrame(
   }
 }
 
-/**
- * chatMessage route handler.
- *
- * Flow:
- *   1. Resolve session row (and refresh TTL).
- *   2. Parse the incoming frame.
- *   3. Invoke Bedrock AgentCore for the session's agentType, with the same
- *      bedrockSessionId carried across turns.
- *   4. Iterate the streaming response:
- *        - `chunk` events → forward as `{type:"token", delta}` frames.
- *        - `returnControl` events → execute the requested tool via
- *          toolExecutor, then continue the conversation by re-invoking with
- *          `sessionState.returnControlInvocationResults`. The model resumes
- *          where it stopped.
- *        - `trace` events → optionally forward as `{type:"trace", ...}` for
- *          debug; redacted in prod.
- *   5. Send a terminal `{type:"final", ...}` frame when the stream ends.
- *
- * Errors:
- *   - Session not found / expired → `{type:"error", reason:"session_expired"}`.
- *     Client should drop the socket and reconnect (server's $disconnect will
- *     fire automatically; the new $connect mints a fresh row).
- *   - Bedrock error → `{type:"error", reason:"agent_failure"}`.
- *   - Tool error → forwarded as `{type:"toolResult", ok:false, ...}` and the
- *     model is given the error so it can recover gracefully.
- */
+
 export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
   const connectionId: string | undefined = event.requestContext?.connectionId;
   if (!connectionId) {
@@ -389,6 +356,20 @@ async function handlerBody(
         session.userContext as any,
       );
       console.log(`[chatMessage] confirmAction result — tool=${frame.toolName} ok=${result.ok} error=${result.ok ? "(none)" : result.error}`);
+      // Record the confirmation in long-term memory. The agent didn't drive
+      // this turn, so without an explicit write the user's eventual "did I
+      // post that shift?" question wouldn't see it. Fire-and-forget so a
+      // memory hiccup never blocks the success frame.
+      //
+      // Role is USER because clicking "confirm" is a user action — TOOL is
+      // reserved for actual tool-output payloads that the model emitted,
+      // and some strategies may treat TOOL turns specially during extraction.
+      if (session.agentType !== "public" && result.ok) {
+        const summaryText = `User confirmed action "${frame.toolName}" with payload ${JSON.stringify(frame.payload || {}).slice(0, 800)}.`;
+        void writeMemoryEvent(session.userSub, session.bedrockSessionId, [
+          { role: "USER", text: summaryText },
+        ]).catch((e) => console.warn("[chatMessage] confirm memory write failed:", e));
+      }
       await postFrame(api, connectionId, {
         type: "toolResult",
         tool: frame.toolName,
@@ -449,16 +430,62 @@ async function handlerBody(
   // so the agent grounds itself in who's talking, their role, home address,
   // and which clinics they manage. Subsequent turns send the raw user text;
   // Bedrock keeps the preamble in the session memory keyed by bedrockSessionId.
+  //
+  // Authenticated sessions also get a memory preamble pulled from AgentCore
+  // Memory — rolling summaries of prior sessions plus extracted preferences,
+  // so the assistant carries context across days/weeks. Public (anon) sessions
+  // skip this because their userSub rotates per connection.
   let firstTurnText = userText;
   if (!session.contextInjected && session.userContext) {
     try {
-      const preamble = renderContextPreamble(session.userContext as unknown as UserContext);
-      firstTurnText = `${preamble}\n\nUser said: ${userText}`;
+      const profilePreamble = renderContextPreamble(session.userContext as unknown as UserContext);
+      let memoryPreamble = "";
+      if (session.agentType !== "public") {
+        // Bound first-turn latency: race the AgentCore retrieve against a
+        // 1.5s timer. If AgentCore is slow/unreachable we proceed without
+        // memory rather than making the user wait. Memory is a
+        // quality-of-life signal, not load-bearing.
+        const HYDRATE_TIMEOUT_MS = 1500;
+        memoryPreamble = await Promise.race([
+          hydrateMemoryPreamble(session.userSub),
+          new Promise<string>((resolve) =>
+            setTimeout(() => {
+              console.warn(`[chatMessage] hydrateMemoryPreamble timed out after ${HYDRATE_TIMEOUT_MS}ms`);
+              resolve("");
+            }, HYDRATE_TIMEOUT_MS),
+          ),
+        ]).catch((e) => {
+          console.warn("[chatMessage] hydrateMemoryPreamble failed (continuing without):", e);
+          return "";
+        });
+      }
+      firstTurnText = [memoryPreamble, profilePreamble, `User said: ${userText}`]
+        .filter(Boolean)
+        .join("\n\n");
       await markContextInjected(session.userSub, connectionId);
     } catch (e) {
-      console.warn("[chatMessage] renderContextPreamble failed (continuing without):", e);
+      console.warn("[chatMessage] preamble assembly failed (continuing without):", e);
     }
   }
+
+  // Accumulates the assistant's user-visible text across every InvokeAgent
+  // loop within this single user turn, so we can persist the complete turn
+  // pair to AgentCore Memory once the loop settles.
+  let assistantTextAcrossLoops = "";
+  // Fire-and-forget memory write — never awaited on the user-visible path,
+  // so memory latency / errors can't block the chat turn. Safe because
+  // Lambda's default `callbackWaitsForEmptyEventLoop=true` keeps the
+  // runtime alive until pending promises settle. (Verified: no caller in
+  // this codebase sets that flag to false.)
+  const persistTurnToMemory = (stopReason: string) => {
+    if (session.agentType === "public") return; // anon userSubs are ephemeral
+    const turns: ConversationTurn[] = [{ role: "USER", text: userText }];
+    const assistant = assistantTextAcrossLoops.trim();
+    if (assistant) turns.push({ role: "ASSISTANT", text: assistant });
+    // Don't await; log on failure inside writeMemoryEvent.
+    void writeMemoryEvent(session.userSub, session.bedrockSessionId, turns)
+      .catch((e) => console.warn(`[chatMessage] memory write (stop=${stopReason}) failed:`, e));
+  };
 
   try {
     let inputText: string | undefined = firstTurnText;
@@ -492,8 +519,12 @@ async function handlerBody(
 
       const response = await bedrock.send(command);
       if (!response.completion) {
+        // Persist whatever turn we have so memory continuity isn't lost,
+        // then return — falling through to the loop-cap path below would
+        // send a second contradictory error frame.
+        persistTurnToMemory("empty_completion");
         await postFrame(api, connectionId, { type: "error", reason: "empty_completion" });
-        break;
+        return { statusCode: 200, body: "ok" };
       }
 
       let pendingToolCalls: ToolCall[] = [];
@@ -552,8 +583,13 @@ async function handlerBody(
 
       console.log(`[chatMessage] turn complete loop=${loop} pendingToolCalls=${pendingToolCalls.length} assistantTextLen=${assistantTextThisTurn.length} text="${assistantTextThisTurn.slice(0, 200)}"`);
 
+      // Roll into the cross-loop accumulator so memory captures the
+      // full assistant utterance even when it was split by tool calls.
+      assistantTextAcrossLoops += assistantTextThisTurn;
+
       // No tool calls => assistant turn is complete.
       if (pendingToolCalls.length === 0) {
+        persistTurnToMemory("end_turn");
         await postFrame(api, connectionId, { type: "final", stopReason: "end_turn" });
         return { statusCode: 200, body: "ok" };
       }
@@ -590,6 +626,7 @@ async function handlerBody(
     }
 
     // Hit the loop cap.
+    persistTurnToMemory("tool_loop_cap");
     await postFrame(api, connectionId, {
       type: "error",
       reason: "tool_loop_cap",
@@ -599,6 +636,9 @@ async function handlerBody(
 
   } catch (err: any) {
     console.error("chatMessage: Bedrock invoke failed", err);
+    // Memory still gets the (possibly partial) turn — useful for diagnostic
+    // continuity across sessions even when this one errored out.
+    persistTurnToMemory("agent_failure");
     await postFrame(api, connectionId, {
       type: "error",
       reason: "agent_failure",
