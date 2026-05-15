@@ -17,10 +17,8 @@ import {
     getScheduledOccurrences,
     jobMatchesWeekdays,
     dateIsBlocked,
-    jobTimeMatchesWindows,
     jobConflictsWithScheduled,
     jobDates,
-    dateToWeekday,
 } from "./professionalAvailability";
 
 // --- Initialization ---
@@ -219,18 +217,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                         error: "ProfessionalUnavailable",
                         message: "Professional is not available for selected slot.",
                         details: { reason: "blocked_date", date: d },
-                    });
-                }
-            }
-            for (const d of jobDates(preHireJobItem)) {
-                const wd = dateToWeekday(d);
-                if (!wd) continue;
-                if (!jobTimeMatchesWindows(preHireJobItem, wd, availability.availableTimeSlots)) {
-                    return json(event, 409, {
-                        status: "error",
-                        error: "ProfessionalUnavailable",
-                        message: "Professional is not available for selected slot.",
-                        details: { reason: "time_window" },
                     });
                 }
             }

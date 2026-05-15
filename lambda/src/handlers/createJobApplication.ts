@@ -15,10 +15,8 @@ import {
     getScheduledOccurrences,
     jobMatchesWeekdays,
     dateIsBlocked,
-    jobTimeMatchesWindows,
     jobConflictsWithScheduled,
     jobDates,
-    dateToWeekday,
 } from "./professionalAvailability";
 import { AttributeValue } from "@aws-sdk/client-dynamodb";
 
@@ -262,17 +260,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     error: "Conflict",
                     message: "You've marked this date as unavailable.",
                     details: { reason: "blocked_date", date: d },
-                });
-            }
-        }
-        for (const d of jobDates(jobAttrItem)) {
-            const wd = dateToWeekday(d);
-            if (!wd) continue;
-            if (!jobTimeMatchesWindows(jobAttrItem, wd, availability.availableTimeSlots)) {
-                return json(event, 409, {
-                    error: "Conflict",
-                    message: "This job's time doesn't fit your availability windows.",
-                    details: { reason: "time_window" },
                 });
             }
         }

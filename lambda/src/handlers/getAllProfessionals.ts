@@ -11,10 +11,58 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 
 import { corsHeaders } from "./corsHeaders";
-import { readAvailabilityFromProfileItem } from "./professionalAvailability";
+import {
+    readAvailabilityFromProfileItem,
+    getScheduledOccurrences,
+    jobMatchesWeekdays,
+    jobDates,
+    dateIsBlocked,
+    jobConflictsWithScheduled,
+} from "./professionalAvailability";
 
 // Initialize DynamoDB client (AWS SDK v3)
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+
+// Build a synthetic job-shaped DynamoDB item from query-string fields so the
+// existing `jobBlockedByAvailability` helper can score each pro without
+// needing a saved job posting. Used when the modal is opened during a
+// not-yet-saved job-post flow (`PostTemporaryJob` / `MultiDayConsultingJob`).
+function buildSyntheticJob(opts: {
+    date?: string;
+    dates?: string[];
+    startTime?: string;
+    endTime?: string;
+}): Record<string, AttributeValue> {
+    const job: Record<string, AttributeValue> = {};
+    if (opts.date) job.date = { S: opts.date };
+    if (opts.dates && opts.dates.length > 0) job.dates = { SS: opts.dates };
+    if (opts.startTime) job.start_time = { S: opts.startTime };
+    if (opts.endTime) job.end_time = { S: opts.endTime };
+    return job;
+}
+
+// Fetch a saved job posting by jobId via the same GSI used by
+// sendJobInvitations (`jobId-index-1` on JOB_POSTINGS_TABLE). Returns the raw
+// item so the availability helpers can read its date / time attributes
+// directly. Null when the jobId is unknown or the table env is missing —
+// caller falls back to "no filter".
+async function fetchJobItem(jobId: string): Promise<Record<string, AttributeValue> | null> {
+    const TABLE = process.env.JOB_POSTINGS_TABLE;
+    if (!TABLE) return null;
+    try {
+        const resp = await dynamodb.send(new QueryCommand({
+            TableName: TABLE,
+            IndexName: process.env.JOB_ID_INDEX || "jobId-index-1",
+            KeyConditionExpression: "jobId = :jid",
+            ExpressionAttributeValues: { ":jid": { S: jobId } },
+            Limit: 1,
+        }));
+        return (resp.Items?.[0] as Record<string, AttributeValue>) || null;
+    } catch (err) {
+        console.warn(`[getAllProfessionals] job lookup failed for ${jobId}:`, (err as Error).message);
+        return null;
+    }
+}
 
 // --- Type Definitions ---
 
@@ -97,12 +145,88 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // Hide pros who toggled themselves OFF in their Availability section
         // from the clinic-side discovery list. Legacy rows (no attribute) stay
         // visible by virtue of readAvailabilityFromProfileItem's default.
-        const visibleProfiles = rawProfiles.filter((item) => {
+        let visibleProfiles = rawProfiles.filter((item) => {
             const { isAvailableForJobs } = readAvailabilityFromProfileItem(
                 item as unknown as Record<string, AttributeValue>,
             );
             return isAvailableForJobs;
         });
+
+        // ----- Optional Phase-2 filter: job-specific availability -----
+        // When the modal is opened in a job context, the client passes the
+        // job's identity (jobId for saved jobs) or its date/time (for the
+        // not-yet-saved post-job flow) as query params. We re-use the
+        // `jobBlockedByAvailability` gate that `sendJobInvitations` enforces
+        // at submit time, so a pro who'd be rejected at invite time is
+        // simply not shown here. Purely additive: when no params are
+        // supplied, the list is unchanged.
+        const qs = event.queryStringParameters || {};
+        const jobIdParam = qs.jobId?.trim() || "";
+        const dateParam = qs.date?.trim() || "";
+        const datesParam = qs.dates?.trim() || ""; // CSV
+        const startTimeParam = qs.startTime?.trim() || "";
+        const endTimeParam = qs.endTime?.trim() || "";
+
+        const hasInlineSlot =
+            !!dateParam || !!datesParam || !!startTimeParam || !!endTimeParam;
+        const hasJobContext = !!jobIdParam || hasInlineSlot;
+
+        if (hasJobContext) {
+            // Resolve the candidate job: either a saved posting (jobId) or
+            // a synthetic one built from inline date/time fields.
+            let jobItem: Record<string, AttributeValue> | null = null;
+            if (jobIdParam) {
+                jobItem = await fetchJobItem(jobIdParam);
+            }
+            if (!jobItem && hasInlineSlot) {
+                jobItem = buildSyntheticJob({
+                    date: dateParam || undefined,
+                    dates: datesParam
+                        ? datesParam.split(",").map((d) => d.trim()).filter(Boolean)
+                        : undefined,
+                    startTime: startTimeParam || undefined,
+                    endTime: endTimeParam || undefined,
+                });
+            }
+
+            // Only run the gate when we actually have a job shape to match
+            // against — otherwise we'd silently drop everyone.
+            if (jobItem && Object.keys(jobItem).length > 0) {
+                const scored = await Promise.all(visibleProfiles.map(async (item) => {
+                    const sub = item.userSub?.S || "";
+                    if (!sub) return { item, keep: true };
+                    const availability = readAvailabilityFromProfileItem(
+                        item as unknown as Record<string, AttributeValue>,
+                    );
+
+                    // Day-only filter (intentionally NOT calling the shared
+                    // `jobBlockedByAvailability` because it also enforces
+                    // per-day time windows, which we don't want here — the
+                    // clinic only needs to know the pro covers the day):
+                    //   1. Master toggle on (already enforced above, but keep
+                    //      defensive in case the upstream filter changes).
+                    //   2. Weekday is in the pro's available_days.
+                    //   3. None of the job's dates are in unavailable_dates.
+                    //   4. The pro isn't already scheduled for another clinic
+                    //      on the same date (schedule conflict).
+                    if (!availability.isAvailableForJobs) return { item, keep: false };
+                    if (!jobMatchesWeekdays(jobItem!, availability.availableDays)) {
+                        return { item, keep: false };
+                    }
+                    for (const d of jobDates(jobItem!)) {
+                        if (dateIsBlocked(d, availability.unavailableDates)) {
+                            return { item, keep: false };
+                        }
+                    }
+                    const scheduled = await getScheduledOccurrences(sub);
+                    if (jobConflictsWithScheduled(jobItem!, scheduled)) {
+                        return { item, keep: false };
+                    }
+                    return { item, keep: true };
+                }));
+                visibleProfiles = scored.filter((s) => s.keep).map((s) => s.item);
+            }
+        }
 
         // 3. Process the result and fetch addresses concurrently
         const profiles: ProfileResponseItem[] = await Promise.all(visibleProfiles.map(async (item) => {

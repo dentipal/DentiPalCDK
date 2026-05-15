@@ -22,10 +22,8 @@ import {
     getScheduledOccurrences,
     jobMatchesWeekdays,
     dateIsBlocked,
-    jobTimeMatchesWindows,
     jobConflictsWithScheduled,
     jobDates,
-    dateToWeekday,
 } from "./professionalAvailability";
 import { v4 as uuidv4 } from "uuid";
 import { corsHeaders } from "./corsHeaders";
@@ -247,13 +245,6 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
                     for (const d of jobDates(jobAttr)) {
                         if (dateIsBlocked(d, availability.unavailableDates)) {
                             unavailableReasons.set(profSub, "blocked_date"); return;
-                        }
-                    }
-                    for (const d of jobDates(jobAttr)) {
-                        const wd = dateToWeekday(d);
-                        if (!wd) continue;
-                        if (!jobTimeMatchesWindows(jobAttr, wd, availability.availableTimeSlots)) {
-                            unavailableReasons.set(profSub, "time_window"); return;
                         }
                     }
                     if (jobConflictsWithScheduled(jobAttr, scheduled)) {
