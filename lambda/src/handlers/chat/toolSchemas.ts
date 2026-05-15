@@ -34,12 +34,16 @@ const STRING_ARRAY = { type: "array", items: { type: "string" } };
 
 export const SEARCH_JOBS_NEAR_ME: ToolDefinition = {
   name: "search_jobs_near_me", bucket: "search", scope: "professional",
-  description: "Find active job postings matching filters. Use whenever the user wants to discover jobs.",
+  description:
+    "Find active job postings matching filters. Use whenever the user wants to discover jobs. " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) for queries like 'jobs on Monday'; " +
+    "pass `dateFrom`/`dateTo` (YYYY-MM-DD) for explicit date windows. Server filters — do NOT filter results yourself.",
   inputSchema: {
     type: "object",
     properties: {
       radiusMiles: NUMBER, jobType: STRING, professionalRole: STRING, shiftSpeciality: STRING,
       minRate: NUMBER, maxRate: NUMBER, dateFrom: STRING, dateTo: STRING,
+      dayOfWeek: STRING,
       assistedHygiene: BOOL, limit: NUMBER,
     },
   },
@@ -53,26 +57,50 @@ export const GET_JOB_DETAILS: ToolDefinition = {
 
 export const GET_MY_APPLICATIONS: ToolDefinition = {
   name: "get_my_applications", bucket: "info", scope: "professional",
-  description: "List the professional's applications and their statuses.",
-  inputSchema: { type: "object", properties: {} },
+  description:
+    "List the professional's applications and their statuses. " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) or `dateFrom`/`dateTo` (YYYY-MM-DD) " +
+    "to filter by the underlying shift's date. Server filters.",
+  inputSchema: {
+    type: "object",
+    properties: { dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+  },
 };
 
 export const GET_MY_INVITATIONS: ToolDefinition = {
   name: "get_my_invitations", bucket: "info", scope: "professional",
-  description: "List the professional's pending clinic invitations (excludes accepted/declined/past).",
-  inputSchema: { type: "object", properties: {} },
+  description:
+    "List the professional's pending clinic invitations (excludes accepted/declined/past). " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) or `dateFrom`/`dateTo` (YYYY-MM-DD) " +
+    "to filter by the underlying shift's date. Server filters.",
+  inputSchema: {
+    type: "object",
+    properties: { dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+  },
 };
 
 export const GET_SCHEDULED_SHIFTS: ToolDefinition = {
   name: "get_scheduled_shifts", bucket: "info", scope: "both",
-  description: "List accepted, future shifts. Pro sees their own; clinic sees theirs.",
-  inputSchema: { type: "object", properties: { clinicId: STRING } },
+  description:
+    "List accepted, future shifts. Pro sees their own; clinic sees theirs. " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) for 'shifts on Monday' queries; " +
+    "`dateFrom`/`dateTo` (YYYY-MM-DD) for explicit date windows. Server filters.",
+  inputSchema: {
+    type: "object",
+    properties: { clinicId: STRING, dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+  },
 };
 
 export const GET_COMPLETED_SHIFTS: ToolDefinition = {
   name: "get_completed_shifts", bucket: "info", scope: "both",
-  description: "List completed shifts. Pro sees their own; clinic sees theirs.",
-  inputSchema: { type: "object", properties: { clinicId: STRING } },
+  description:
+    "List completed shifts. Pro sees their own; clinic sees theirs. " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) or `dateFrom`/`dateTo` (YYYY-MM-DD) " +
+    "for day-of-week or date-window filtering. Server filters.",
+  inputSchema: {
+    type: "object",
+    properties: { clinicId: STRING, dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+  },
 };
 
 export const GET_MY_NEGOTIATIONS: ToolDefinition = {
@@ -381,8 +409,22 @@ export const GET_ACTION_NEEDED: ToolDefinition = {
 
 export const GET_OPEN_SHIFTS: ToolDefinition = {
   name: "get_open_shifts", bucket: "info", scope: "clinic",
-  description: "List upcoming unfilled shifts for a clinic.",
-  inputSchema: { type: "object", required: ["clinicId"], properties: { clinicId: STRING } },
+  description:
+    "List upcoming unfilled shifts for a clinic. Optional filters: " +
+    "`dayOfWeek` (mon|tue|wed|thu|fri|sat|sun — case-insensitive, full names also accepted) " +
+    "to restrict to a specific weekday; " +
+    "`dateFrom`/`dateTo` (YYYY-MM-DD inclusive) for an explicit date window. " +
+    "When the user asks 'open shifts for Monday' / 'Thursday' etc., pass dayOfWeek; do NOT filter results yourself.",
+  inputSchema: {
+    type: "object",
+    required: ["clinicId"],
+    properties: {
+      clinicId: STRING,
+      dayOfWeek: STRING,
+      dateFrom: STRING,
+      dateTo: STRING,
+    },
+  },
 };
 
 export const LIST_APPLICANTS_FOR_JOB: ToolDefinition = {

@@ -140,6 +140,126 @@ function filterApplicationsByStatusInResult(
 }
 
 /**
+ * Server-side filter for `get_open_shifts` (and any sibling shift-list tool).
+ * Removes the LLM from the day-of-week / date-range reasoning loop:
+ *   - dayOfWeek: "mon" | "monday" | "MON" | ... → restrict to that weekday
+ *   - dateFrom / dateTo: inclusive YYYY-MM-DD bounds
+ *
+ * The shifts handler returns its list in either `body.data.jobPostings`
+ * (newer envelope) or `body.jobPostings` (flat) or `body.shifts`. We probe
+ * each, filter in place, and rewrite the envelope with an updated count.
+ * No-op on error responses or when no filters are supplied.
+ */
+function filterShiftsByDayAndDateRange(
+  r: { status: number; body: any },
+  opts: { dayOfWeek?: any; dateFrom?: any; dateTo?: any },
+): { status: number; body: any } {
+  if (r.status >= 400 || !r.body || typeof r.body !== "object") return r;
+  const dow = normalizeDayOfWeek(opts.dayOfWeek);
+  const from = typeof opts.dateFrom === "string" ? opts.dateFrom : undefined;
+  const to = typeof opts.dateTo === "string" ? opts.dateTo : undefined;
+  // If no filters requested, return as-is — pure pass-through.
+  if (dow === undefined && !from && !to) return r;
+
+  // Where the array lives in the handler's response. We pick the first
+  // matching field; the assignment back uses the same key so the envelope
+  // stays consistent. Order matters — probe data.<field> before top.<field>
+  // because handlers using the data envelope often also have a flat field
+  // alongside it for backwards compat.
+  const candidates: Array<["data" | "top", string]> = [
+    ["data", "jobPostings"],
+    ["data", "shifts"],
+    ["data", "applications"],
+    ["data", "invitations"],
+    ["data", "jobs"],
+    ["top", "jobPostings"],
+    ["top", "shifts"],
+    ["top", "applications"],
+    ["top", "invitations"],
+    ["top", "jobs"],
+  ];
+  let arr: any[] | undefined;
+  let foundIn: ["data" | "top", string] | undefined;
+  for (const [loc, key] of candidates) {
+    const at = loc === "data" ? r.body?.data?.[key] : r.body?.[key];
+    if (Array.isArray(at)) { arr = at; foundIn = [loc, key]; break; }
+  }
+  if (!arr || !foundIn) return r;
+
+  const kept = arr.filter((s) => {
+    // Applications / invitations carry the shift date one level down inside
+    // a `jobPosting` / `job` sub-object — direct rows (job postings, shifts)
+    // have it at the top. Probe both layers so this filter works uniformly.
+    const date = extractShiftDate(s);
+    if (!date) return false; // can't filter rows with no parseable date
+    if (from && date < from) return false;
+    if (to && date > to) return false;
+    if (dow !== undefined) {
+      // Construct as local midnight so 'YYYY-MM-DD' doesn't shift across
+      // timezones (Date('YYYY-MM-DD') parses as UTC midnight, which can
+      // land on the prior day in negative-offset locales). Append T00:00:00.
+      const d = new Date(date.length === 10 ? date + "T00:00:00" : date);
+      if (Number.isNaN(d.getTime()) || d.getDay() !== dow) return false;
+    }
+    return true;
+  });
+
+  const nextBody = { ...r.body };
+  if (foundIn[0] === "data") {
+    nextBody.data = { ...r.body.data, [foundIn[1]]: kept };
+    if (typeof r.body.data?.totalCount === "number") nextBody.data.totalCount = kept.length;
+  } else {
+    nextBody[foundIn[1]] = kept;
+    if (typeof r.body.totalCount === "number") nextBody.totalCount = kept.length;
+  }
+  return { status: r.status, body: nextBody };
+}
+
+/**
+ * Find a shift date inside a row regardless of which list-shape it came
+ * from. Probes (first match wins):
+ *   - direct fields:   row.date / row.startDate / row.dates[0]
+ *   - nested via job:  row.jobPosting.date / .startDate / .dates[0]
+ *                      row.job.date / .startDate / .dates[0]
+ * Returns undefined if nothing parseable — caller treats that as "exclude
+ * this row from filtered output." Better than guessing a default that could
+ * silently mis-bucket records.
+ */
+function extractShiftDate(row: any): string | undefined {
+  if (!row || typeof row !== "object") return undefined;
+  const probe = (obj: any): string | undefined => {
+    if (!obj || typeof obj !== "object") return undefined;
+    if (typeof obj.date === "string") return obj.date;
+    if (typeof obj.startDate === "string") return obj.startDate;
+    if (Array.isArray(obj.dates) && typeof obj.dates[0] === "string") return obj.dates[0];
+    return undefined;
+  };
+  return probe(row) || probe(row.jobPosting) || probe(row.job);
+}
+
+/**
+ * Map a user-supplied weekday string to a JS Date.getDay() index (0=Sun..6=Sat).
+ * Accepts case-insensitive 3-letter abbreviations or full names. Returns
+ * undefined for any value we don't recognize so the caller skips the filter
+ * rather than producing wrong results.
+ */
+function normalizeDayOfWeek(v: any): number | undefined {
+  if (typeof v !== "string") return undefined;
+  const key = v.trim().toLowerCase();
+  if (!key) return undefined;
+  const map: Record<string, number> = {
+    sun: 0, sunday: 0,
+    mon: 1, monday: 1,
+    tue: 2, tues: 2, tuesday: 2,
+    wed: 3, weds: 3, wednesday: 3,
+    thu: 4, thur: 4, thurs: 4, thursday: 4,
+    fri: 5, friday: 5,
+    sat: 6, saturday: 6,
+  };
+  return key in map ? map[key] : undefined;
+}
+
+/**
  * Mirror the dashboard's "Action Needed" filter on the chat side.
  *
  * `getJobApplicantsOfAClinic` (the Lambda behind `list_applicants_for_job`)
@@ -589,6 +709,21 @@ export async function executeTool(
             return p;
           }).sort((a: any, b: any) => (a.distanceMiles ?? 9999) - (b.distanceMiles ?? 9999));
         }
+
+        // Day-of-week filter applied AFTER the handler returns and BEFORE
+        // the limit slice — otherwise we'd cap at requestedLimit, then
+        // filter, and end up with far fewer than the user asked for. The
+        // handler already honored dateFrom/dateTo via qs.start/end so those
+        // are server-side at the underlying handler level.
+        const dow = normalizeDayOfWeek(call.input.dayOfWeek);
+        if (dow !== undefined) {
+          finalPostings = finalPostings.filter((p: any) => {
+            const date: string | undefined = p?.date || (Array.isArray(p?.dates) ? p.dates[0] : undefined);
+            if (!date || typeof date !== "string") return false;
+            const d = new Date(date.length === 10 ? date + "T00:00:00" : date);
+            return !Number.isNaN(d.getTime()) && d.getDay() === dow;
+          });
+        }
         finalPostings = finalPostings.slice(0, requestedLimit);
 
         await setRecentSearchResults(auth.userSub, connectionId, finalPostings.slice(0, 20));
@@ -607,11 +742,21 @@ export async function executeTool(
       }
       case "get_my_applications": {
         const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
-        return errOrOk(call.toolName, r);
+        const filtered = filterShiftsByDayAndDateRange(r, {
+          dayOfWeek: call.input.dayOfWeek,
+          dateFrom: call.input.dateFrom,
+          dateTo: call.input.dateTo,
+        });
+        return errOrOk(call.toolName, filtered);
       }
       case "get_my_invitations": {
         const r = await runGetJobInvitations(auth);
-        return errOrOk(call.toolName, r);
+        const filtered = filterShiftsByDayAndDateRange(r, {
+          dayOfWeek: call.input.dayOfWeek,
+          dateFrom: call.input.dateFrom,
+          dateTo: call.input.dateTo,
+        });
+        return errOrOk(call.toolName, filtered);
       }
       case "get_my_negotiations": {
         const r = await callHandlerInProcess(getAllNegotiationsProfHandler, { method: "GET", auth });
@@ -622,30 +767,42 @@ export async function executeTool(
         // in-place to match the dashboard's "Scheduled" tab — anything where
         // applicationStatus is scheduled / accepted / hired / confirmed.
         // Clinics: dedicated clinic-side handler returns already-filtered.
+        const dateOpts = {
+          dayOfWeek: call.input.dayOfWeek,
+          dateFrom: call.input.dateFrom,
+          dateTo: call.input.dateTo,
+        };
         const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
         if (isPro || !call.input.clinicId) {
           const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
-          return errOrOk(call.toolName, filterApplicationsByStatusInResult(r, ["scheduled", "accepted", "hired", "confirmed"]));
+          const byStatus = filterApplicationsByStatusInResult(r, ["scheduled", "accepted", "hired", "confirmed"]);
+          return errOrOk(call.toolName, filterShiftsByDayAndDateRange(byStatus, dateOpts));
         }
         const r = await callHandlerInProcess(getScheduledShiftsHandler, {
           method: "GET",
           pathParameters: { clinicId: call.input.clinicId },
           auth,
         });
-        return errOrOk(call.toolName, r);
+        return errOrOk(call.toolName, filterShiftsByDayAndDateRange(r, dateOpts));
       }
       case "get_completed_shifts": {
+        const dateOpts = {
+          dayOfWeek: call.input.dayOfWeek,
+          dateFrom: call.input.dateFrom,
+          dateTo: call.input.dateTo,
+        };
         const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
         if (isPro || !call.input.clinicId) {
           const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
-          return errOrOk(call.toolName, filterApplicationsByStatusInResult(r, ["completed"]));
+          const byStatus = filterApplicationsByStatusInResult(r, ["completed"]);
+          return errOrOk(call.toolName, filterShiftsByDayAndDateRange(byStatus, dateOpts));
         }
         const r = await callHandlerInProcess(getCompletedShiftsHandler, {
           method: "GET",
           pathParameters: { clinicId: call.input.clinicId },
           auth,
         });
-        return errOrOk(call.toolName, r);
+        return errOrOk(call.toolName, filterShiftsByDayAndDateRange(r, dateOpts));
       }
 
       // ------------------- PROFESSIONAL: single-shot writes (v1) -------------------
@@ -752,7 +909,16 @@ export async function executeTool(
         const r = await callHandlerInProcess(getClinicShiftsHandler, {
           method: "GET", pathParameters: { clinicId: call.input.clinicId }, auth,
         });
-        return errOrOk(call.toolName, r);
+        // Server-side filter for dayOfWeek + date range. Doing this here
+        // (not in the LLM) means "open shifts for Monday" can't be wrong
+        // because Haiku miscomputed a calendar day. The agent just passes
+        // the param; we own the calendar math.
+        const filtered = filterShiftsByDayAndDateRange(r, {
+          dayOfWeek: call.input.dayOfWeek,
+          dateFrom: call.input.dateFrom,
+          dateTo: call.input.dateTo,
+        });
+        return errOrOk(call.toolName, filtered);
       }
       case "list_applicants_for_job": {
         // Three modes:
