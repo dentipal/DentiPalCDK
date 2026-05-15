@@ -8,6 +8,11 @@ import {
 import { APIGatewayProxyHandler, APIGatewayProxyResult } from "aws-lambda";
 import { extractAuthFromEvent, AuthContext } from "./utils";
 import { corsHeaders } from "./corsHeaders";
+import {
+  getProfessionalAvailability,
+  getScheduledOccurrences,
+  jobBlockedByAvailability,
+} from "./professionalAvailability";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-ClinicProfiles";
@@ -144,6 +149,16 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
 
   console.log(`Found ${allItems.length} invitations for professional ${professionalUserSub}`);
 
+  // Pull the pro's availability + already-scheduled jobs once up front so we
+  // can re-run the same gate `sendJobInvitations` enforces at send time.
+  // The pro's settings can change after an invite was created — newly-blocked
+  // dates, a fresh schedule conflict with another clinic, etc. — so this
+  // surface filters invites whose underlying job no longer fits.
+  const [availability, scheduledOccurrences] = await Promise.all([
+    getProfessionalAvailability(professionalUserSub),
+    getScheduledOccurrences(professionalUserSub),
+  ]);
+
   const invitations: any[] = [];
   const clinicNameCache = new Map<string, string>();
 
@@ -174,6 +189,19 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
 
       if (jobResponse.Items && jobResponse.Items[0]) {
         const job = jobResponse.Items[0];
+
+        // Availability gate — same rules as sendJobInvitations / createJobApplication.
+        // If the pro's current availability blocks this job (toggle off, weekday
+        // miss, blocked date, or schedule conflict with another scheduled job),
+        // skip the invite entirely so the pro never sees an invite they can't
+        // accept. Soft-fail on lookup misses so a transient blip never blanks
+        // the whole Invites tab.
+        const blockedReason = jobBlockedByAvailability(
+          job,
+          availability,
+          scheduledOccurrences,
+        );
+        if (blockedReason !== null) continue;
 
         invitation.jobTitle = job.job_title?.S || "Unknown Job Title";
         invitation.jobType = job.job_type?.S || "Unknown";

@@ -92,65 +92,8 @@ const validateBoolean: Validator = (value) => {
     return { ok: true, out: { BOOL: value } };
 };
 
-// HH:MM 24-hour validator used by the per-day time-window JSON below.
-const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/;
 // YYYY-MM-DD for the unavailable-dates list.
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
-
-// Phase-2 Availability: per-day time windows. Stored as a single JSON string
-// (DynamoDB Maps are clunky to validate field-by-field at the lambda layer).
-// We deeply validate the JSON contents here so downstream code can trust the
-// shape without re-parsing.
-const validateTimeSlotsJson: Validator = (value) => {
-    if (typeof value !== "string") return { ok: false, error: "Must be a JSON string" };
-    if (value === "") return { ok: true, out: { S: "{}" } };
-    // Generous cap — 7 days × ~10 windows × ~30 bytes is well under this.
-    if (value.length > 4096) return { ok: false, error: "Time slot config is too large" };
-
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(value);
-    } catch {
-        return { ok: false, error: "Invalid JSON" };
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return { ok: false, error: "Time slots must be an object keyed by day" };
-    }
-
-    const cleaned: Record<string, { start: string; end: string }[]> = {};
-    for (const [day, windows] of Object.entries(parsed as Record<string, unknown>)) {
-        if (!AVAILABLE_DAY_OPTIONS.includes(day)) {
-            return { ok: false, error: `Unknown day "${day}"` };
-        }
-        if (!Array.isArray(windows)) {
-            return { ok: false, error: `Windows for ${day} must be an array` };
-        }
-        if (windows.length > 12) {
-            return { ok: false, error: `Too many windows for ${day} (max 12)` };
-        }
-        const dayWindows: { start: string; end: string }[] = [];
-        for (const w of windows) {
-            if (!w || typeof w !== "object") {
-                return { ok: false, error: `Invalid window in ${day}` };
-            }
-            const { start, end } = w as { start?: unknown; end?: unknown };
-            if (typeof start !== "string" || typeof end !== "string") {
-                return { ok: false, error: `${day} window needs string start/end (HH:MM)` };
-            }
-            if (!TIME_REGEX.test(start) || !TIME_REGEX.test(end)) {
-                return { ok: false, error: `${day} window must use HH:MM (24-hour)` };
-            }
-            if (start >= end) {
-                return { ok: false, error: `${day} window: end must be after start` };
-            }
-            dayWindows.push({ start, end });
-        }
-        // Drop empty arrays so they don't clutter the stored object.
-        if (dayWindows.length > 0) cleaned[day] = dayWindows;
-    }
-
-    return { ok: true, out: { S: JSON.stringify(cleaned) } };
-};
 
 const validateDateArray: Validator = (value) => {
     if (!Array.isArray(value)) return { ok: false, error: "Must be an array of YYYY-MM-DD strings" };
@@ -237,10 +180,8 @@ const FIELD_VALIDATORS: Record<string, Validator> = {
     // (reject applications while unavailable).
     is_available_for_jobs: validateBoolean,
     available_days: validateStringArray({ allowed: AVAILABLE_DAY_OPTIONS, maxItems: AVAILABLE_DAY_OPTIONS.length }),
-    // Phase 2 additions: per-day time windows (JSON) + blocked calendar
-    // dates. Optional — when missing, the Phase 1 "any time / any date"
+    // Blocked calendar dates. Optional — when missing, the "any date"
     // behavior is preserved.
-    available_time_slots: validateTimeSlotsJson,
     unavailable_dates: validateDateArray,
 
     // Document keys (opaque S3 keys)

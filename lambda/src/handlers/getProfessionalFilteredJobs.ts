@@ -14,10 +14,8 @@ import {
   jobMatchesWeekdays,
   getScheduledOccurrences,
   dateIsBlocked,
-  jobTimeMatchesWindows,
   jobConflictsWithScheduled,
   jobDates,
-  dateToWeekday,
 } from "./professionalAvailability";
 
 const REGION = process.env.REGION || "us-east-1";
@@ -629,20 +627,7 @@ export const handler = async (
           }
           if (blockedByDate) continue;
 
-          // (b) Per-day time windows — the job's time range must fit fully
-          // inside at least one of the pro's windows for that weekday.
-          let blockedByWindow = false;
-          for (const d of occDates) {
-            const wd = dateToWeekday(d);
-            if (!wd) continue;
-            if (!jobTimeMatchesWindows(item, wd, availability.availableTimeSlots)) {
-              blockedByWindow = true;
-              break;
-            }
-          }
-          if (blockedByWindow) continue;
-
-          // (c) Schedule-conflict — same day + overlapping time as something
+          // (b) Schedule-conflict — same day + overlapping time as something
           // the pro is already booked for.
           if (jobConflictsWithScheduled(item, scheduledOccurrences)) continue;
 
@@ -748,17 +733,6 @@ export const handler = async (
             if (dateIsBlocked(d, availability.unavailableDates)) { blocked = true; break; }
           }
           if (blocked) continue;
-
-          let badWindow = false;
-          for (const d of occDates) {
-            const wd = dateToWeekday(d);
-            if (!wd) continue;
-            if (!jobTimeMatchesWindows(item, wd, availability.availableTimeSlots)) {
-              badWindow = true;
-              break;
-            }
-          }
-          if (badWindow) continue;
 
           if (jobConflictsWithScheduled(item, scheduledOccurrences)) continue;
         }

@@ -7,15 +7,12 @@ import {
 // Helper layer used by job-feed, job-application, and clinic-discovery handlers
 // to honour the pro's Availability settings.
 //
-// Phase 1 storage on PROFESSIONAL_PROFILES_TABLE:
+// Storage on PROFESSIONAL_PROFILES_TABLE:
 //   - is_available_for_jobs: BOOL  (master toggle)
-//   - available_days: SS           (weekday list, e.g. ["Monday","Wednesday"])
+//   - available_days:        SS    (weekday list, e.g. ["Monday","Wednesday"])
+//   - unavailable_dates:     SS    (YYYY-MM-DD strings the pro is blocked on)
 //
-// Phase 2 storage (additive):
-//   - available_time_slots: S      (JSON string: {day: [{start,end}]} in 24h HH:MM)
-//   - unavailable_dates:    SS     (YYYY-MM-DD strings the pro is blocked on)
-//
-// Phase 2 commitments come from JOB_APPLICATIONS_TABLE rows whose
+// Scheduled commitments come from JOB_APPLICATIONS_TABLE rows whose
 // applicationStatus is "scheduled" — written by acceptProf when a clinic hires.
 //
 // Legacy rows missing any of these attributes inherit the most permissive
@@ -27,19 +24,10 @@ const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-V
 
 const ddb = new DynamoDBClient({ region: REGION });
 
-export interface TimeWindow {
-  start: string; // "HH:MM" 24-hour
-  end: string;   // "HH:MM" 24-hour
-}
-
-export type AvailableTimeSlots = Partial<Record<string, TimeWindow[]>>;
-
 export interface ProfessionalAvailability {
   isAvailableForJobs: boolean;
   // Empty array means "no weekday restriction — match any day".
   availableDays: string[];
-  // Empty map (or missing day key) means "no time restriction for that day".
-  availableTimeSlots: AvailableTimeSlots;
   // YYYY-MM-DD list of blocked dates.
   unavailableDates: string[];
 }
@@ -47,7 +35,6 @@ export interface ProfessionalAvailability {
 export const DEFAULT_AVAILABILITY: ProfessionalAvailability = {
   isAvailableForJobs: true,
   availableDays: [],
-  availableTimeSlots: {},
   unavailableDates: [],
 };
 
@@ -90,40 +77,7 @@ export function readAvailabilityFromProfileItem(
     }
   }
 
-  // Phase 2: parse the JSON-stringified time-slot map. Defensive — malformed
-  // / legacy values fall back to "no time restriction" rather than failing.
-  let availableTimeSlots: AvailableTimeSlots = {};
-  const slotsRaw = item.available_time_slots?.S;
-  if (slotsRaw && slotsRaw.length > 0) {
-    try {
-      const parsed = JSON.parse(slotsRaw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        for (const [day, windows] of Object.entries(parsed as Record<string, unknown>)) {
-          if (!Array.isArray(windows)) continue;
-          const cleaned: TimeWindow[] = [];
-          for (const w of windows) {
-            if (
-              w &&
-              typeof w === "object" &&
-              typeof (w as { start?: unknown }).start === "string" &&
-              typeof (w as { end?: unknown }).end === "string"
-            ) {
-              cleaned.push({
-                start: (w as TimeWindow).start,
-                end: (w as TimeWindow).end,
-              });
-            }
-          }
-          if (cleaned.length > 0) availableTimeSlots[day] = cleaned;
-        }
-      }
-    } catch {
-      // Bad JSON → treat as "no time restriction". The validator on the write
-      // path prevents this on new writes; old rows fall back gracefully.
-    }
-  }
-
-  // Phase 2: blocked dates. SS today, but tolerate L for forward compat.
+  // Blocked dates. SS today, but tolerate L for forward compat.
   const datesAttr = item.unavailable_dates;
   let unavailableDates: string[] = [];
   if (datesAttr) {
@@ -136,7 +90,7 @@ export function readAvailabilityFromProfileItem(
     }
   }
 
-  return { isAvailableForJobs, availableDays, availableTimeSlots, unavailableDates };
+  return { isAvailableForJobs, availableDays, unavailableDates };
 }
 
 /**
@@ -154,7 +108,7 @@ export async function getProfessionalAvailability(
         TableName: PROFESSIONAL_PROFILES_TABLE,
         KeyConditionExpression: "userSub = :userSub",
         ExpressionAttributeValues: { ":userSub": { S: userSub } },
-        ProjectionExpression: "is_available_for_jobs, available_days, available_time_slots, unavailable_dates",
+        ProjectionExpression: "is_available_for_jobs, available_days, unavailable_dates",
         Limit: 1,
       }),
     );
@@ -218,7 +172,7 @@ export function jobMatchesWeekdays(
 }
 
 // ===========================================================================
-// Phase 2: time-window matching, blocked-date check, scheduled-job conflicts
+// Blocked-date check, scheduled-job conflicts
 // ===========================================================================
 
 /**
@@ -269,38 +223,6 @@ export function jobTimeRange(jobItem: Record<string, AttributeValue>): { start: 
   const start = jobItem.start_time?.S || jobItem.startTime?.S || null;
   const end = jobItem.end_time?.S || jobItem.endTime?.S || null;
   return { start, end };
-}
-
-/**
- * True if the job's time range is fully inside at least one of the pro's
- * windows for the given weekday. Used as the per-day time filter in Phase 2.
- *
- * - No windows for that day → "no restriction" → match.
- * - Job has no time fields → match (open-ended posting; pro decides per shift).
- * - Otherwise: requires jobStart >= windowStart AND jobEnd <= windowEnd for
- *   at least one window. We intentionally require *full containment* rather
- *   than overlap so the pro never gets a job that runs past their stated end.
- */
-export function jobTimeMatchesWindows(
-  jobItem: Record<string, AttributeValue>,
-  weekday: string,
-  slots: AvailableTimeSlots,
-): boolean {
-  const windows = slots[weekday];
-  if (!windows || windows.length === 0) return true;
-
-  const { start, end } = jobTimeRange(jobItem);
-  const jobStart = timeToMinutes(start);
-  const jobEnd = timeToMinutes(end);
-  if (jobStart === null || jobEnd === null) return true;
-
-  for (const w of windows) {
-    const ws = timeToMinutes(w.start);
-    const we = timeToMinutes(w.end);
-    if (ws === null || we === null) continue;
-    if (jobStart >= ws && jobEnd <= we) return true;
-  }
-  return false;
 }
 
 /**
@@ -456,8 +378,8 @@ export function slotConflictsWithScheduled(
 }
 
 /**
- * The full Phase-2 gate: combines weekday match, blocked-date check,
- * time-window match, and scheduled-job conflict. Used by both the job
+ * The full availability gate: combines master toggle, weekday match,
+ * blocked-date check, and scheduled-job conflict. Used by both the job
  * feed and the application endpoint so the rules can't drift.
  *
  * Returns the *first reason* the job was rejected (for logs/responses), or
@@ -467,23 +389,13 @@ export function jobBlockedByAvailability(
   jobItem: Record<string, AttributeValue>,
   availability: ProfessionalAvailability,
   scheduled: ScheduledOccurrence[],
-): "off" | "weekday" | "blocked_date" | "time_window" | "conflict" | null {
+): "off" | "weekday" | "blocked_date" | "conflict" | null {
   if (!availability.isAvailableForJobs) return "off";
   if (!jobMatchesWeekdays(jobItem, availability.availableDays)) return "weekday";
 
   // Blocked-date check — wins over weekday match.
   for (const d of jobDates(jobItem)) {
     if (dateIsBlocked(d, availability.unavailableDates)) return "blocked_date";
-  }
-
-  // Time-window check — for each dated occurrence, the weekday's windows
-  // (if any) must contain the job's time range.
-  for (const d of jobDates(jobItem)) {
-    const wd = dateToWeekday(d);
-    if (!wd) continue;
-    if (!jobTimeMatchesWindows(jobItem, wd, availability.availableTimeSlots)) {
-      return "time_window";
-    }
   }
 
   if (jobConflictsWithScheduled(jobItem, scheduled)) return "conflict";
