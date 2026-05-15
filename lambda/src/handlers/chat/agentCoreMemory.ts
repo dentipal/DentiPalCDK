@@ -8,10 +8,8 @@
  *    background.
  *  - Retrieve those records on session bootstrap and inject them into
  *    the first-turn preamble so the user perceives continuity across days.
- *  - Wipe a user's records when their account is deleted.
+ *  
  *
- * Bedrock Agents continues to run the actual agent loop unchanged — these
- * helpers sit alongside, not inside, the InvokeAgent path.
  *
  * All three helpers are tolerant: if AgentCore is unreachable or the memory
  * isn't provisioned yet, they log and return a neutral value rather than

@@ -16,6 +16,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 import { corsHeaders } from "./corsHeaders";
 import { clearUserMemory } from "./chat/agentCoreMemory";
+import { clearChatHistory } from "./chat/chatHistoryStore";
 
 // --- Initialization ---
 const REGION = process.env.REGION || "us-east-1";
@@ -258,10 +259,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (subToRemove) {
             await removeUserFromClinics(subToRemove);
             // Best-effort: clear AgentCore Memory records (summaries +
-            // preferences) for this user. clearUserMemory handles all
-            // errors internally and short-circuits if AGENTCORE_MEMORY_ID
-            // isn't set, so it's safe even before the CDK env-var grant lands.
-            await clearUserMemory(subToRemove);
+            // preferences) AND user-facing chat transcript log for this
+            // user. Both helpers handle errors internally and short-circuit
+            // if their env vars aren't set, so this is safe even before
+            // the CDK env-var grant lands on this Lambda.
+            await Promise.all([
+                clearUserMemory(subToRemove),
+                clearChatHistory(subToRemove),
+            ]);
         } else {
             console.warn(`Could not determine 'sub' for user ${idOrSub}. DynamoDB and AgentCore Memory cleanup skipped.`);
         }

@@ -25,6 +25,7 @@ import {
 import { executeTool, ToolCall } from "./toolExecutor";
 import { fetchUserContext, renderContextPreamble, UserContext } from "./userContext";
 import { hydrateMemoryPreamble, writeMemoryEvent, ConversationTurn } from "./agentCoreMemory";
+import { writeTurn as writeChatHistoryTurn } from "./chatHistoryStore";
 import { AuthContext, CLINIC_ROLES } from "../utils";
 
 const REGION = process.env.REGION || "us-east-1";
@@ -189,16 +190,29 @@ function getAgentTarget(agentType: string): { agentId: string; agentAliasId: str
 
 /**
  * Construct the per-invocation ApiGatewayManagementApi client for posting
- * frames back to the WebSocket connection. The endpoint URL is derived from
- * the inbound event's requestContext (domainName + stage), which is how API
- * Gateway WebSocket APIs identify their management endpoint per stage.
+ * frames back to the WebSocket connection.
+ *
+ * IMPORTANT: must use the RAW `<api-id>.execute-api.<region>.amazonaws.com`
+ * host, NOT `event.requestContext.domainName`. For this stack `domainName`
+ * is the custom domain `ws.dentipal.com`, which has a base-path mapping that
+ * already prepends `/prod` — appending another `/${stage}` produces
+ * `/prod/prod/@connections/...` and AWS rejects it as
+ * "AccessDenied execute-api:Invoke" (confusing error, real cause is the
+ * malformed URL — see CDK env-var comment).
+ *
+ * `WEBSOCKET_API_ID` is set by CDK exactly for this construction.
  */
+const WEBSOCKET_API_ID = process.env.WEBSOCKET_API_ID || "";
+
 function buildApiGwClient(event: any): ApiGatewayManagementApiClient {
-  const domainName = event?.requestContext?.domainName;
-  const stage = event?.requestContext?.stage;
+  const stage = event?.requestContext?.stage || "prod";
+  // Prefer the env-var-provided raw API id. Fall back to requestContext.apiId
+  // (also raw) if the env var ever goes missing — never use domainName.
+  const apiId = WEBSOCKET_API_ID || event?.requestContext?.apiId;
+  const endpoint = `https://${apiId}.execute-api.${REGION}.amazonaws.com/${stage}`;
   return new ApiGatewayManagementApiClient({
     region: REGION,
-    endpoint: `https://${domainName}/${stage}`,
+    endpoint,
   });
 }
 
@@ -356,16 +370,20 @@ async function handlerBody(
         session.userContext as any,
       );
       console.log(`[chatMessage] confirmAction result — tool=${frame.toolName} ok=${result.ok} error=${result.ok ? "(none)" : result.error}`);
-      // Record the confirmation in long-term memory. The agent didn't drive
-      // this turn, so without an explicit write the user's eventual "did I
-      // post that shift?" question wouldn't see it. Fire-and-forget so a
-      // memory hiccup never blocks the success frame.
+      // Record the confirmation in AgentCore Memory ONLY — so the agent's
+      // future sessions know what the user confirmed ("did I post that
+      // shift last week?"). We do NOT write to the user-facing transcript
+      // (ChatMessages) because the confirm payload is a machine string
+      // ("confirm_post_temporary_job ({...JSON...})") that has no business
+      // appearing alongside the natural-language USER/ASSISTANT turns. The
+      // toolResult frame still streams to the live session for real-time
+      // feedback; transcript readers see the preceding "Review the details
+      // and click Confirm." line and infer continuation from the next turn.
       //
-      // Role is USER because clicking "confirm" is a user action — TOOL is
-      // reserved for actual tool-output payloads that the model emitted,
-      // and some strategies may treat TOOL turns specially during extraction.
+      // Role is USER in memory because clicking "confirm" is a user action;
+      // TOOL is reserved for actual model-emitted tool-output payloads.
       if (session.agentType !== "public" && result.ok) {
-        const summaryText = `User confirmed action "${frame.toolName}" with payload ${JSON.stringify(frame.payload || {}).slice(0, 800)}.`;
+        const summaryText = `Confirmed: ${frame.toolName} (${JSON.stringify(frame.payload || {}).slice(0, 400)})`;
         void writeMemoryEvent(session.userSub, session.bedrockSessionId, [
           { role: "USER", text: summaryText },
         ]).catch((e) => console.warn("[chatMessage] confirm memory write failed:", e));
@@ -485,6 +503,16 @@ async function handlerBody(
     // Don't await; log on failure inside writeMemoryEvent.
     void writeMemoryEvent(session.userSub, session.bedrockSessionId, turns)
       .catch((e) => console.warn(`[chatMessage] memory write (stop=${stopReason}) failed:`, e));
+    // Also persist to the user-facing transcript table. Separate store
+    // because AgentCore Memory only retains compressed summaries; this
+    // table backs the "scroll up to see prior chats" UI.
+    void writeChatHistoryTurn({
+      userSub: session.userSub,
+      sessionId: session.bedrockSessionId,
+      userText,
+      assistantText: assistant,
+      agentType: session.agentType,
+    }).catch((e) => console.warn(`[chatMessage] chat-history write (stop=${stopReason}) failed:`, e));
   };
 
   try {

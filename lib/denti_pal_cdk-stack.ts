@@ -887,6 +887,23 @@ export class DentiPalCDKStack extends cdk.Stack {
             projectionType: dynamodb.ProjectionType.ALL,
         });
 
+        // 4b. DentiPal-ChatMessages — persistent transcript log for the
+        // user-facing chat history feature (single continuous thread per user).
+        // Separate from AgentCore Memory (which holds compressed summaries for
+        // the AI) and from ChatConnections (which holds 15-min session state).
+        //
+        // Layout: HASH=userSub, RANGE=ts (ISO-8601 ms, lexicographic order
+        // matches chronological order). Query descending + Limit gives
+        // efficient pagination for the "load older messages on scroll up"
+        // pattern. One PutItem per chat turn (user + assistant = 2 writes).
+        const chatMessagesTable = new dynamodb.Table(this, 'ChatMessagesTable', {
+            tableName: 'DentiPal-V5-ChatMessages',
+            partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'ts', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
+        });
+
         // 5. DentiPal-Conversations (Used by WebSocket Handler)
         const conversationsTable = new dynamodb.Table(this, 'ConversationsTable', {
             tableName: 'DentiPal-V5-Conversations',
@@ -1281,6 +1298,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             passwordOtpTable, sessionInvalidationsTable,
             notificationPreferencesTable,
             notificationsTable,
+            chatMessagesTable,
         ];
 
         // ========================================================================
@@ -1394,6 +1412,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 APP_URL: 'https://dentipal.com',
                 NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
                 NOTIFICATIONS_TABLE: notificationsTable.tableName,
+                CHAT_MESSAGES_TABLE: chatMessagesTable.tableName,
                 SES_REGION: this.region,
                 SES_TO: 'shashitest2004@gmail.com',     // Updated per your env variables
                 SMS_TOPIC_ARN: `arn:aws:sns:${this.region}:${this.account}:DentiPal-SMS-Notifications`, // Dynamic construction
@@ -3180,6 +3199,10 @@ export class DentiPalCDKStack extends cdk.Stack {
                 // Lambda reads this on session bootstrap and writes events
                 // on every turn. Bedrock Agents still runs the actual loop.
                 AGENTCORE_MEMORY_ID: chatMemoryId,
+                // User-facing chat history transcript (single continuous
+                // thread per user). Written from this Lambda after each turn;
+                // read by the monolith via GET /chat/history.
+                CHAT_MESSAGES_TABLE: chatMessagesTable.tableName,
                 // Tables read/written by the refactored run* functions called from toolExecutor
                 JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
                 APPLICATIONS_TABLE: jobApplicationsTable.tableName,
@@ -3232,6 +3255,11 @@ export class DentiPalCDKStack extends cdk.Stack {
         notificationPreferencesTable.grantReadWriteData(chatMessageHandler);
         feedbackTable.grantReadWriteData(chatMessageHandler);
         referralsTable.grantReadWriteData(chatMessageHandler);
+        // User-facing chat transcript log (write-only from this Lambda; reads
+        // happen on the REST monolith via GET /chat/history). Granted full
+        // RW because the same Lambda may also clear a user's thread when
+        // they hit "Start fresh" in the future.
+        chatMessagesTable.grantReadWriteData(chatMessageHandler);
 
         // Cognito access — AdminGetUser for given_name/family_name (used by
         // refactored handlers like createTemporaryJob), AdminListGroupsForUser
