@@ -1,5 +1,6 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { marshall } from "@aws-sdk/util-dynamodb";
 import { CognitoIdentityProviderClient, AdminGetUserCommand, AttributeType } from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
@@ -9,6 +10,17 @@ import { fireAndForgetIncrement } from "./promotionCounters";
 import { fireAndForgetJobApplicationIncrement } from "./jobPostingCounters";
 import { sendNotificationEmail } from "./sendNotificationEmail";
 import { renderTemplate } from "./notificationTemplates";
+import {
+    getProfessionalAvailability,
+    getScheduledOccurrences,
+    jobMatchesWeekdays,
+    dateIsBlocked,
+    jobTimeMatchesWindows,
+    jobConflictsWithScheduled,
+    jobDates,
+    dateToWeekday,
+} from "./professionalAvailability";
+import { AttributeValue } from "@aws-sdk/client-dynamodb";
 
 // --- 1. Configuration ---
 const REGION = process.env.REGION || "us-east-1";
@@ -207,6 +219,68 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 error: "Conflict",
                 message: "Cannot apply to this job",
                 details: { currentStatus: jobStatus, reason: "Job is not accepting applications" },
+            });
+        }
+
+        // Availability gate — the Professional Profile "Availability" toggle.
+        // Block applications when the pro has flipped themselves OFF: they
+        // should not be able to apply (and clinics shouldn't see them as a new
+        // applicant) until they flip the toggle back ON. Scheduled-job
+        // visibility is handled elsewhere and stays unaffected.
+        const [availability, scheduledOccurrences] = await Promise.all([
+            getProfessionalAvailability(userSub),
+            getScheduledOccurrences(userSub),
+        ]);
+        if (!availability.isAvailableForJobs) {
+            return json(event, 403, {
+                error: "Forbidden",
+                message: "You are currently marked as unavailable for jobs.",
+                details: {
+                    reason: "Turn on the availability toggle in your profile to apply.",
+                },
+            });
+        }
+
+        // Phase 2 gates — same set the feed applies, repeated here so a pro
+        // can't bypass the filter by hitting the apply endpoint directly with
+        // a known jobId. jobItem here is a plain JS object (DocumentClient),
+        // so we marshall it once to feed the AttributeValue-shaped helpers.
+        const jobAttrItem = marshall(jobItem, {
+            removeUndefinedValues: true,
+        }) as Record<string, AttributeValue>;
+
+        if (!jobMatchesWeekdays(jobAttrItem, availability.availableDays)) {
+            return json(event, 409, {
+                error: "Conflict",
+                message: "This job doesn't match your weekly availability.",
+                details: { reason: "weekday" },
+            });
+        }
+        for (const d of jobDates(jobAttrItem)) {
+            if (dateIsBlocked(d, availability.unavailableDates)) {
+                return json(event, 409, {
+                    error: "Conflict",
+                    message: "You've marked this date as unavailable.",
+                    details: { reason: "blocked_date", date: d },
+                });
+            }
+        }
+        for (const d of jobDates(jobAttrItem)) {
+            const wd = dateToWeekday(d);
+            if (!wd) continue;
+            if (!jobTimeMatchesWindows(jobAttrItem, wd, availability.availableTimeSlots)) {
+                return json(event, 409, {
+                    error: "Conflict",
+                    message: "This job's time doesn't fit your availability windows.",
+                    details: { reason: "time_window" },
+                });
+            }
+        }
+        if (jobConflictsWithScheduled(jobAttrItem, scheduledOccurrences)) {
+            return json(event, 409, {
+                error: "Conflict",
+                message: "This job overlaps with another shift you're already scheduled for.",
+                details: { reason: "schedule_conflict" },
             });
         }
 
