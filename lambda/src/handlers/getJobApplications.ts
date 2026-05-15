@@ -309,11 +309,15 @@ export const handler = async (event: any) => {
         }
 
         // ---- Negotiation Flow ----
-        const isNegotiating =
-          (application.applicationStatus || "").toLowerCase() ===
-          "negotiating";
+        // Fetch the negotiation row whenever the application has one — not only
+        // for "negotiating" status. Scheduled / accepted / completed apps still
+        // need the negotiation's agreedRate / proposedRate so the professional
+        // dashboard can display the negotiated rate instead of the original
+        // posting rate.
+        const negotiationIdFromApp = str(item.negotiationId);
+        const hasNegotiation = !!negotiationIdFromApp;
 
-        if (isNegotiating && application.applicationId) {
+        if (hasNegotiation && application.applicationId) {
           try {
             const negoResp = await dynamodb.send(
               new QueryCommand({
@@ -324,7 +328,7 @@ export const handler = async (event: any) => {
                   ":aid": { S: application.applicationId },
                 },
                 ProjectionExpression:
-                  "applicationId, negotiationId, clinicCounterHourlyRate, professionalCounterHourlyRate, clinicCounterRate, professionalCounterRate, agreedHourlyRate, agreedRate, payType, negotiationStatus, updatedAt, createdAt",
+                  "applicationId, negotiationId, clinicCounterHourlyRate, professionalCounterHourlyRate, clinicCounterRate, professionalCounterRate, agreedHourlyRate, agreedRate, proposedHourlyRate, proposedRate, payType, negotiationStatus, updatedAt, createdAt",
               })
             );
 
@@ -334,16 +338,20 @@ export const handler = async (event: any) => {
               const clinicCounter = num(latest.clinicCounterRate) ?? num(latest.clinicCounterHourlyRate) ?? null;
               const professionalCounter = num(latest.professionalCounterRate) ?? num(latest.professionalCounterHourlyRate) ?? null;
               const agreed = num(latest.agreedRate) ?? num(latest.agreedHourlyRate) ?? null;
+              const proposed = num(latest.proposedRate) ?? num(latest.proposedHourlyRate) ?? null;
 
+              application.negotiationId = str(latest.negotiationId) || negotiationIdFromApp;
               application.negotiation = {
                 negotiationId: str(latest.negotiationId),
                 clinicCounterRate: clinicCounter,
                 professionalCounterRate: professionalCounter,
                 agreedRate: agreed,
+                proposedRate: proposed,
                 // Legacy aliases
                 clinicCounterHourlyRate: clinicCounter,
                 professionalCounterHourlyRate: professionalCounter,
                 agreedHourlyRate: agreed,
+                proposedHourlyRate: proposed,
                 payType: str(latest.payType) || undefined,
                 negotiationStatus: str(latest.negotiationStatus),
                 updatedAt: str(latest.updatedAt),

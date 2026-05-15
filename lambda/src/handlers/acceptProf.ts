@@ -4,6 +4,7 @@ import {
     QueryCommand,
     UpdateItemCommand,
     UpdateItemCommandInput,
+    AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import {
     EventBridgeClient,
@@ -25,6 +26,23 @@ import {
 const REGION: string = process.env.AWS_REGION || process.env.REGION || "us-east-1";
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE!;
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE!;
+const JOB_NEGOTIATIONS_TABLE = process.env.JOB_NEGOTIATIONS_TABLE!;
+
+const numFromAttr = (v: AttributeValue | undefined): number | null => {
+    if (!v) return null;
+    if (typeof v.N === "string") {
+        const n = Number(v.N);
+        return Number.isFinite(n) ? n : null;
+    }
+    if (typeof v.S === "string" && v.S.trim() !== "" && !isNaN(+v.S)) {
+        const n = Number(v.S);
+        return Number.isFinite(n) ? n : null;
+    }
+    return null;
+};
+
+const positive = (n: number | null): number | null =>
+    n != null && Number.isFinite(n) && n > 0 ? n : null;
 
 const dynamo = new DynamoDBClient({ region: REGION });
 const eb = new EventBridgeClient({ region: REGION });
@@ -74,11 +92,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // --- Step 1: Authentication ---
-        let clinicUserSub: string;
         try {
             const authHeader = event.headers?.Authorization || event.headers?.authorization;
             const userInfo = extractUserFromBearerToken(authHeader);
-            clinicUserSub = userInfo.sub;
 
             const groups: string[] = userInfo.groups || [];
             const ALLOWED = new Set(["root", "clinicadmin", "clinicmanager"]);
@@ -162,7 +178,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(event, 404, { error: "No matching application found" });
         }
 
-        // --- Step 4b: Availability check (Phase 2 clinic-side validation) ---
+
+        // --- Step 5: Availability check (Phase 2 clinic-side validation) ---
         // Before flipping the application to "scheduled", verify the pro is
         // actually available for this job's date/time. Catches:
         //   - master toggle OFF
@@ -173,7 +190,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         //
         // Returning 409 here means the clinic sees a clear "Professional is
         // not available for selected slot" message; existing scheduled jobs
-        // remain untouched.
+        // remain untouched. Doing this BEFORE the rate-lookup / update-write
+        // means a rejected hire never touches DynamoDB writes or the
+        // negotiations table query.
         let preHireJobItem: Record<string, any> | null = null;
         try {
             const jobRes = await dynamo.send(new QueryCommand({
@@ -230,31 +249,80 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
-        // --- Step 5: Update Status ---
+        // --- Step 6: Resolve the accepted rate ---
+        // When the applicant negotiated, the application row carries proposedRate
+        // and a negotiationId pointing at the live counter-offer thread. Persist
+        // the agreed-on amount as acceptedRate so the professional dashboard's
+        // Scheduled tab renders the negotiated rate, not the original posting rate.
+        // Priority: negotiation.agreedRate → professionalCounterRate → clinicCounterRate
+        //           → negotiation.proposedRate → application.proposedRate.
+        let acceptedRate: number | null = null;
+        const negotiationIdFromApp = matchingItem.negotiationId?.S;
+        if (negotiationIdFromApp) {
+            try {
+                const negoRes = await dynamo.send(new QueryCommand({
+                    TableName: JOB_NEGOTIATIONS_TABLE,
+                    IndexName: "applicationId-index",
+                    KeyConditionExpression: "applicationId = :aid",
+                    ExpressionAttributeValues: {
+                        ":aid": { S: matchingItem.applicationId?.S || "" },
+                    },
+                }));
+                const negoItems = negoRes.Items || [];
+                let latest = negoItems[0];
+                for (let i = 1; i < negoItems.length; i++) {
+                    const a = negoItems[i].updatedAt?.S || negoItems[i].createdAt?.S || "";
+                    const b = latest.updatedAt?.S || latest.createdAt?.S || "";
+                    if (a > b) latest = negoItems[i];
+                }
+                if (latest) {
+                    acceptedRate =
+                        positive(numFromAttr(latest.agreedRate) ?? numFromAttr(latest.agreedHourlyRate)) ??
+                        positive(numFromAttr(latest.professionalCounterRate) ?? numFromAttr(latest.professionalCounterHourlyRate)) ??
+                        positive(numFromAttr(latest.clinicCounterRate) ?? numFromAttr(latest.clinicCounterHourlyRate)) ??
+                        positive(numFromAttr(latest.proposedRate) ?? numFromAttr(latest.proposedHourlyRate));
+                }
+            } catch (e) {
+                console.warn("[acceptProf] negotiation lookup failed (non-fatal):", (e as Error).message);
+            }
+        }
+        if (acceptedRate == null) {
+            acceptedRate = positive(numFromAttr(matchingItem.proposedRate) ?? numFromAttr(matchingItem.proposedHourlyRate));
+        }
+
+        // --- Step 7: Update Application (status + acceptedRate when resolved) ---
+        const updateAttrValues: { [key: string]: AttributeValue } = {
+            ":status": { S: "scheduled" },
+            ":now": { S: new Date().toISOString() },
+        };
+        let updateExpr = "SET applicationStatus = :status, updatedAt = :now";
+        if (acceptedRate != null) {
+            updateExpr += ", acceptedRate = :acceptedRate";
+            updateAttrValues[":acceptedRate"] = { N: String(acceptedRate) };
+        }
         const updateCommandInput: UpdateItemCommandInput = {
             TableName: JOB_APPLICATIONS_TABLE,
             Key: {
                 jobId: { S: jobId },
                 professionalUserSub: { S: professionalUserSub }
             },
-            UpdateExpression: "SET applicationStatus = :status, updatedAt = :now",
-            ExpressionAttributeValues: {
-                ":status": { S: "scheduled" },
-                ":now": { S: new Date().toISOString() }
-            }
+            UpdateExpression: updateExpr,
+            ExpressionAttributeValues: updateAttrValues,
         };
 
         await dynamo.send(new UpdateItemCommand(updateCommandInput));
 
-        // --- Step 6: Emit EventBridge Event (triggers inbox conversation) ---
+        // --- Step 8: Emit EventBridge Event (triggers inbox conversation) ---
         const clinicIdFromClaims = getClinicIdFromEvent(event);
         const clinicId = clinicIdFromClaims || body.clinicId || matchingItem.clinicId?.S || null;
 
         let inboxMessageSent = false;
 
-        // Fetch the actual job posting for shift details
-        let jobItem: Record<string, any> | null = null;
-        if (clinicId) {
+        // Fetch the actual job posting for shift details. Reuse the row fetched
+        // for the availability check when available so we don't pay for the
+        // same query twice on the happy path.
+        let jobItem: Record<string, any> | null = preHireJobItem;
+        if (clinicId && !jobItem) {
             try {
                 const jobRes = await dynamo.send(new QueryCommand({
                     TableName: JOB_POSTINGS_TABLE,
@@ -302,7 +370,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (clinicId) {
             const shiftDate = jobItem?.date?.S || jobItem?.start_date?.S || matchingItem.date?.S || "TBD";
             const shiftRole = jobItem?.professional_role?.S || matchingItem.role?.S || matchingItem.professionalRole?.S || "Professional";
-            const shiftRate = matchingItem.proposedRate?.N ? Number(matchingItem.proposedRate.N)
+            const shiftRate = acceptedRate != null ? acceptedRate
+                : matchingItem.proposedRate?.N ? Number(matchingItem.proposedRate.N)
                 : (jobItem?.rate?.N ? Number(jobItem.rate.N) : 0);
             const shiftStartTime = jobItem?.start_time?.S || "";
             const shiftEndTime = jobItem?.end_time?.S || "";
