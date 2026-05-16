@@ -168,6 +168,28 @@ function buildNotification(detail: EventBridgeEvent["detail"]): NotificationDraf
                 subjectId: detail.jobId,
             };
 
+        case "job-modified": {
+            // Fired by the type-specific job update handlers when a clinic
+            // edits a job that already has applicants or pending invitees.
+            // The fanout (one event per recipient) lives in the helper —
+            // here we just turn the per-recipient detail into a row. The
+            // changedFields summary is built clinic-side so the row can
+            // tell the user *what* changed without re-querying anything.
+            if (!proSub) return null;
+            const changedFields = typeof detail.changedFields === "string" ? detail.changedFields : "";
+            const bodyParts = [shiftLine, changedFields ? `Changed: ${changedFields}` : ""].filter(Boolean);
+            return {
+                recipientSub: proSub,
+                type: "job_modified",
+                title: `${clinicName} updated a job you're tracking`,
+                body: bodyParts.join(" · ") || undefined,
+                actorName: clinicName,
+                deepLink: PROFESSIONAL_DASHBOARD_PENDING,
+                subjectType: "job",
+                subjectId: detail.jobId,
+            };
+        }
+
         case "application-rejected":
             if (!proSub) return null;
             return {

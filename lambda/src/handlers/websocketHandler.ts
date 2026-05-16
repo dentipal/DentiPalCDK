@@ -21,6 +21,7 @@ import {
 
 import { S3Client, GetObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge";
 
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 
@@ -58,6 +59,7 @@ const CLINIC_OFFICE_IMAGES_BUCKET = process.env.CLINIC_OFFICE_IMAGES_BUCKET || "
 const ddb = new DynamoDBClient({ region: REGION });
 const cognitoIdp = new CognitoIdentityProviderClient({ region: REGION });
 const s3 = new S3Client({ region: REGION });
+const eb = new EventBridgeClient({ region: REGION });
 const MAX_LEN = 1000;
 
 // Pagination defaults (applied everywhere — no more unbounded reads)
@@ -1655,6 +1657,32 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
             timestamp,
             status: delivered ? "delivered" : "sent",
         });
+
+        // Fan out a `message-received` EventBridge event so the recipient's
+        // notification bell + notifications page reflect new inbox messages.
+        // Currently only the professional side has a notification consumer
+        // for `message-received` (see event-to-notification.ts), so we only
+        // publish when a clinic user sends to a professional. Best-effort:
+        // failures are logged but never block the message itself.
+        if (isSenderClinic) {
+            try {
+                await eb.send(new PutEventsCommand({
+                    Entries: [{
+                        Source: "denti-pal.api",
+                        DetailType: "ShiftEvent",
+                        Detail: JSON.stringify({
+                            eventType: "message-received",
+                            clinicId,
+                            clinicName,
+                            professionalSub,
+                            preview: content.slice(0, 140),
+                        }),
+                    }],
+                }));
+            } catch (eventErr) {
+                console.warn("[ws] sendMessage event publish failed (non-fatal):", (eventErr as Error).message);
+            }
+        }
 
         console.log("[ws] sendMessage DONE", {
             connectionId,
