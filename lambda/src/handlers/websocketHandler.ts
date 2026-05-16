@@ -146,10 +146,24 @@ function userKeyFromClaims(claims: UserClaims): string {
 function wsClientFromEvent(event: WebSocketAPIGatewayEventV2): ApiGatewayManagementApiClient {
     const domain = event.requestContext.domainName;
     const stage = event.requestContext.stage;
-    // The endpoint construction is crucial for API Gateway Management
+    // When the client connects via a custom domain whose api-mapping uses an
+    // EMPTY key (e.g. `ws.dentipal.com` → API `ehfga71svb` stage `prod`,
+    // ApiMappingKey=""), the stage is consumed by the mapping and is NOT
+    // part of the URL path. Appending `/${stage}` in that case produces
+    // `https://ws.dentipal.com/prod/@connections/{id}`, which the router
+    // treats as route key `prod/@connections/{id}` → NotFoundException and
+    // the inbox stalls on the loading skeleton forever.
+    //
+    // Only append `/${stage}` for the raw execute-api hostname, where the
+    // stage IS part of the path. For custom domains we assume the mapping
+    // takes care of stage routing and use the bare domain.
+    const isRawApiGatewayDomain = /\.execute-api\..*\.amazonaws\.com$/.test(domain);
+    const endpoint = isRawApiGatewayDomain
+        ? `https://${domain}/${stage}`
+        : `https://${domain}`;
     return new ApiGatewayManagementApiClient({
         region: REGION,
-        endpoint: `https://${domain}/${stage}`,
+        endpoint,
     });
 }
 
