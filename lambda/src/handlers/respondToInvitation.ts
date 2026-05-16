@@ -293,8 +293,10 @@ export const handler = async (
             DetailType: "ShiftEvent",
             Detail: JSON.stringify({
               eventType: "invite-accepted",
+              actor: "professional",
               clinicId,
               professionalSub: userSub,
+              jobId,
               shiftDetails,
             }),
           }],
@@ -444,6 +446,37 @@ export const handler = async (
       })
     );
     console.log("   -> Invitation Updated.");
+
+    // 8b. Publish EventBridge events for the in-app notification feed so the
+    //     clinic team gets a bell + page entry when the pro declines or
+    //     starts negotiating. `invite-accepted` is fired above (inside the
+    //     accepted branch) because it also kicks off the inbox conversation.
+    if (responseData.response === "declined" || responseData.response === "negotiating") {
+      const inviteEventType = responseData.response === "declined" ? "invite-declined" : "invite-negotiating";
+      try {
+        await eb.send(new PutEventsCommand({
+          Entries: [{
+            Source: "denti-pal.api",
+            DetailType: "ShiftEvent",
+            Detail: JSON.stringify({
+              eventType: inviteEventType,
+              actor: "professional",
+              clinicId,
+              professionalSub: userSub,
+              jobId,
+              shiftDetails: {
+                date: invitation.shiftDate?.S || invitation.date?.S || undefined,
+                role: invitation.role?.S || invitation.professionalRole?.S || undefined,
+                rate: invitation.rate?.N ? Number(invitation.rate.N) : undefined,
+              },
+            }),
+          }],
+        }));
+        console.log(`   -> EventBridge ShiftEvent (${inviteEventType}) published.`);
+      } catch (ebErr: any) {
+        console.warn(`   -> ${inviteEventType} event publish failed (non-fatal):`, ebErr.message);
+      }
+    }
 
     // 9. Success Response
     console.log("--- HANDLER FINISHED SUCCESS ---");

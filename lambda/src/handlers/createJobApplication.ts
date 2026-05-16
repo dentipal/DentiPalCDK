@@ -2,6 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { CognitoIdentityProviderClient, AdminGetUserCommand, AttributeType } from "@aws-sdk/client-cognito-identity-provider";
+import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken } from "./utils";
@@ -30,6 +31,7 @@ const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-Cli
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 const cognito = new CognitoIdentityProviderClient({ region: REGION });
+const eb = new EventBridgeClient({ region: REGION });
 const USER_POOL_ID = process.env.USER_POOL_ID || "";
 
 function pickAttr(attrs: AttributeType[] | undefined, name: string): string {
@@ -433,6 +435,49 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }).catch((err) => {
             console.error("[createJobApplication] unhandled notify error:", (err as Error).message);
         });
+
+        // 10c. Fan out an `application-received` EventBridge event so the
+        // event-to-notification consumer writes a bell row for every clinic
+        // team member. Best-effort — failures are logged but never block
+        // the 201 response. Pro audience is intentionally none (they just
+        // saw their own submission succeed).
+        try {
+            const applicantUser = await getCognitoUser(userSub);
+            const professionalName = applicantUser?.name || "A professional";
+            const j = jobItem;
+            const rateNum = j.rate ?? (j.pay_type === "per_transaction"
+                ? j.rate_per_transaction
+                : j.pay_type === "percentage_of_revenue"
+                    ? j.revenue_percentage
+                    : j.hourly_rate);
+            const clinicName = (clinicProfileItem as any)?.clinic_name || undefined;
+
+            await eb.send(new PutEventsCommand({
+                Entries: [{
+                    Source: "denti-pal.api",
+                    DetailType: "ShiftEvent",
+                    Detail: JSON.stringify({
+                        eventType: "application-received",
+                        actor: "professional",
+                        clinicId: clinicIdFromJob,
+                        clinicName,
+                        professionalSub: userSub,
+                        professionalName,
+                        jobId,
+                        applicationId,
+                        negotiationId,
+                        shiftDetails: {
+                            date: j.date || j.startDate || j.start_date || undefined,
+                            role: j.professional_role || j.professionalRole || j.shift_speciality || j.shiftSpeciality || undefined,
+                            rate: rateNum !== undefined && rateNum !== null ? Number(rateNum) : undefined,
+                            startTime: j.startTime || j.start_time || undefined,
+                        },
+                    }),
+                }],
+            }));
+        } catch (ebErr) {
+            console.warn("[createJobApplication] application-received event publish failed (non-fatal):", (ebErr as Error).message);
+        }
 
         // 11. Construct Response
         const jobInfo = {

@@ -3386,12 +3386,16 @@ export class DentiPalCDKStack extends cdk.Stack {
             environment: {
                 REGION: this.region,
                 NOTIFICATIONS_TABLE: notificationsTable.tableName,
+                // Needed by getClinicRecipientSubs() to fan out clinic-team
+                // notifications (one bell entry per team member).
+                CLINICS_TABLE: clinicsTable.tableName,
             },
             timeout: cdk.Duration.seconds(30),
             memorySize: 256,
         });
 
         notificationsTable.grantWriteData(eventToNotificationHandler);
+        clinicsTable.grantReadData(eventToNotificationHandler);
 
         // Third target on the same rule; EventBridge fans out independently
         // to email, chat, and notification consumers.
