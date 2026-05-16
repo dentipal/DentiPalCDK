@@ -64,6 +64,9 @@ interface NotificationDraft {
     actorName?: string;
     subjectType?: string;
     subjectId?: string;
+    /** Stored on the row so the frontend can construct clinic-scoped URLs
+     *  (JobApplicantsPage requires `?clinicId=` to initialize). */
+    clinicId?: string;
 }
 
 const PROFESSIONAL_DASHBOARD = "/professional-dashboard";
@@ -79,24 +82,33 @@ const CLINIC_INBOX = "/clinic-inbox";
 const CLINIC_NEGOTIATIONS = "/negotiations";
 const CLINIC_PROFILE = "/clinic-profile";
 
-/** Build the clinic-side deepLink for a job-scoped event. Falls back to the
- *  clinic dashboard if the jobId is missing. */
-function clinicJobDeepLink(jobId: string | undefined): string {
+/** Build the clinic-side deepLink for a job-scoped event. Includes
+ *  `?clinicId=` because JobApplicantsPage uses it to initialize the clinic
+ *  context — without it the page hangs on "Initializing Clinic...". Falls
+ *  back to the clinic dashboard if the jobId is missing. */
+function clinicJobDeepLink(jobId: string | undefined, clinicId: string | undefined): string {
     if (!jobId) return CLINIC_DASHBOARD;
-    return `/jobs/${encodeURIComponent(jobId)}/applicants`;
+    const base = `/jobs/${encodeURIComponent(jobId)}/applicants`;
+    return clinicId ? `${base}?clinicId=${encodeURIComponent(clinicId)}` : base;
 }
 
 /** Build the clinic-side deepLink for a negotiation event. Threads the
- *  application/negotiation/job id through so the page can scroll-and-highlight. */
+ *  application/negotiation/job id through so the page can scroll-and-highlight,
+ *  plus `clinicId` so the negotiations overview loads under the right
+ *  clinic context. */
 function clinicNegotiationDeepLink(
-    negotiationId?: string,
-    applicationId?: string,
-    jobId?: string
+    negotiationId: string | undefined,
+    applicationId: string | undefined,
+    jobId: string | undefined,
+    clinicId: string | undefined
 ): string {
-    if (negotiationId) return `${CLINIC_NEGOTIATIONS}?negotiationId=${encodeURIComponent(negotiationId)}`;
-    if (applicationId) return `${CLINIC_NEGOTIATIONS}?applicationId=${encodeURIComponent(applicationId)}`;
-    if (jobId) return `${CLINIC_NEGOTIATIONS}?jobId=${encodeURIComponent(jobId)}`;
-    return CLINIC_NEGOTIATIONS;
+    const params = new URLSearchParams();
+    if (negotiationId) params.set("negotiationId", negotiationId);
+    else if (applicationId) params.set("applicationId", applicationId);
+    else if (jobId) params.set("jobId", jobId);
+    if (clinicId) params.set("clinicId", clinicId);
+    const qs = params.toString();
+    return qs ? `${CLINIC_NEGOTIATIONS}?${qs}` : CLINIC_NEGOTIATIONS;
 }
 
 function shiftLineFrom(detail: EventBridgeEvent["detail"]): string {
@@ -214,9 +226,10 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                     title: `${proName} completed a shift`,
                     body: shiftLine || undefined,
                     actorName: proName,
-                    deepLink: clinicJobDeepLink(detail.jobId),
+                    deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
                     subjectType: "job",
                     subjectId: detail.jobId,
+                    clinicId: detail.clinicId,
                 });
             }
             return drafts;
@@ -246,9 +259,10 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                     title: `No-show reported for ${proName}`,
                     body: shiftLine || undefined,
                     actorName: proName,
-                    deepLink: clinicJobDeepLink(detail.jobId),
+                    deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
                     subjectType: "job",
                     subjectId: detail.jobId,
+                    clinicId: detail.clinicId,
                 });
             }
             return drafts;
@@ -351,9 +365,10 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                     title: `${proName} applied to your job`,
                     body: shiftLine || undefined,
                     actorName: proName,
-                    deepLink: clinicJobDeepLink(detail.jobId),
+                    deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
                     subjectType: "job",
                     subjectId: detail.jobId,
+                    clinicId: detail.clinicId,
                 });
             }
             return drafts;
@@ -407,9 +422,10 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                     title: `${proName} ${verb} your invitation`,
                     body: shiftLine || undefined,
                     actorName: proName,
-                    deepLink: clinicJobDeepLink(detail.jobId),
+                    deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
                     subjectType: "job",
                     subjectId: detail.jobId,
+                    clinicId: detail.clinicId,
                 });
             }
             return drafts;
@@ -462,9 +478,10 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                             ? (eventType === "negotiation-accepted" ? `Confirmed at $${detail.shiftDetails.rate}/hr` : `Counter rate: $${detail.shiftDetails.rate}/hr`)
                             : undefined,
                         actorName: proName,
-                        deepLink: clinicNegotiationDeepLink(detail.negotiationId, detail.applicationId, detail.jobId),
+                        deepLink: clinicNegotiationDeepLink(detail.negotiationId, detail.applicationId, detail.jobId, detail.clinicId),
                         subjectType: "negotiation",
                         subjectId: detail.negotiationId,
+                        clinicId: detail.clinicId,
                     });
                 }
             }
@@ -511,6 +528,7 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                         body: preview,
                         actorName: proName,
                         deepLink: CLINIC_INBOX,
+                        clinicId: detail.clinicId,
                     });
                 }
             }
@@ -550,6 +568,7 @@ async function writeOne(draft: NotificationDraft): Promise<void> {
         actorName: draft.actorName,
         subjectType: draft.subjectType,
         subjectId: draft.subjectId,
+        clinicId: draft.clinicId,
         deepLink: draft.deepLink,
         readAt: null,
         createdAt: new Date().toISOString(),

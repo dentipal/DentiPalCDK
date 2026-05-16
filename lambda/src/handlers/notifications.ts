@@ -58,6 +58,11 @@ export interface NotificationRecord {
     actorName?: string;
     subjectType?: string;
     subjectId?: string;
+    /** ID of the clinic this notification is about. Stored separately from
+     *  subjectId so the frontend can construct clinic-scoped URLs (the
+     *  JobApplicantsPage hangs without `?clinicId=`) even when subjectId
+     *  refers to a different entity (jobId, applicationId, negotiationId). */
+    clinicId?: string;
     deepLink?: string;
     readAt: string | null;
     createdAt: string;
@@ -88,6 +93,7 @@ export function itemToRecord(item: Record<string, AttributeValue>): Notification
         actorName: item.actorName?.S,
         subjectType: item.subjectType?.S,
         subjectId: item.subjectId?.S,
+        clinicId: item.clinicId?.S,
         deepLink: item.deepLink?.S,
         readAt: item.readAt?.S || null,
         createdAt: item.createdAt?.S || "",
@@ -109,6 +115,7 @@ export function recordToItem(record: NotificationRecord): Record<string, Attribu
     if (record.actorName) item.actorName = { S: record.actorName };
     if (record.subjectType) item.subjectType = { S: record.subjectType };
     if (record.subjectId) item.subjectId = { S: record.subjectId };
+    if (record.clinicId) item.clinicId = { S: record.clinicId };
     if (record.deepLink) item.deepLink = { S: record.deepLink };
     if (record.readAt) item.readAt = { S: record.readAt };
     if (record.expiresAt) item.expiresAt = { N: String(record.expiresAt) };
