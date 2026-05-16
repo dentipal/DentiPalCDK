@@ -3,6 +3,7 @@ import {
     PutItemCommand,
     UpdateItemCommand,
     QueryCommand,
+    ScanCommand,
     DeleteItemCommand,
     GetItemCommand,
     AttributeValue,
@@ -371,12 +372,24 @@ async function hasClinicAccess(userSub: string, clinicId: string): Promise<boole
 // Returns every Cognito sub associated with a clinic (admins, managers, etc.)
 // Used by pro→clinic fan-out so multi-clinic users still receive realtime
 // messages even when their connection-time `clinicId` differs from the
-// conversation's `clinicId`. Reads `Clinics.AssociatedUsers` (Set or List)
-// plus `createdBy` (Root/owner). Failures return an empty list — the
-// canonical `clinic#${clinicId}` lookup still runs as a baseline.
+// conversation's `clinicId`.
+//
+// Lookup strategy (each step is a fallback for the previous one):
+//   1. `Clinics.AssociatedUsers` (Set/List of user subs) + `createdBy`
+//      — fast, single GetItem
+//   2. If step 1 returns nothing, SCAN the UserClinicAssignments table
+//      filtered by `clinicId`. Slower, but catches clinics whose
+//      AssociatedUsers field was never populated (legacy data) or got
+//      out of sync with the assignments table.
+//
+// We always return at least the empty array on hard failure so callers
+// can keep going — the canonical `clinic#${clinicId}` connection lookup
+// runs in parallel and may still deliver the message.
 async function getClinicMemberSubs(clinicId: string): Promise<string[]> {
     if (!clinicId) return [];
     const subs = new Set<string>();
+
+    // ---- Step 1: Clinics.AssociatedUsers + createdBy ----
     try {
         const clinicRow = await ddb.send(new GetItemCommand({
             TableName: CLINICS_TABLE,
@@ -388,12 +401,64 @@ async function getClinicMemberSubs(clinicId: string): Promise<string[]> {
         else if (associated?.L) associated.L.forEach((x) => x.S && subs.add(x.S));
         const createdBy = clinicRow.Item?.createdBy?.S;
         if (createdBy) subs.add(createdBy);
+        console.log("[ws] getClinicMemberSubs step1 (Clinics.AssociatedUsers)", {
+            clinicId,
+            subsFound: subs.size,
+        });
     } catch (e) {
-        console.warn("[ws] getClinicMemberSubs failed", {
+        console.warn("[ws] getClinicMemberSubs step1 failed", {
             clinicId,
             error: (e as Error).message,
         });
     }
+
+    // ---- Step 2: SCAN UserClinicAssignments when step 1 came up empty ----
+    // This catches clinics whose AssociatedUsers field is missing/empty
+    // (legacy data, partial migrations, or a clinic created via an admin
+    // tool that didn't backfill the set). The scan is paged so it works
+    // for large tables too.
+    if (subs.size === 0) {
+        console.log("[ws] getClinicMemberSubs falling back to assignments scan", {
+            clinicId,
+        });
+        try {
+            let lastKey: Record<string, AttributeValue> | undefined;
+            let pages = 0;
+            do {
+                const r = await ddb.send(new ScanCommand({
+                    TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
+                    FilterExpression: "clinicId = :cid",
+                    ExpressionAttributeValues: { ":cid": { S: clinicId } },
+                    ProjectionExpression: "userSub",
+                    ExclusiveStartKey: lastKey,
+                }));
+                (r.Items || []).forEach((it) => {
+                    const sub = it.userSub?.S;
+                    if (sub) subs.add(sub);
+                });
+                lastKey = r.LastEvaluatedKey;
+                pages++;
+                if (pages > 10) break;   // safety — clinics with >10 pages are unrealistic
+            } while (lastKey);
+            console.log("[ws] getClinicMemberSubs step2 (assignments scan)", {
+                clinicId,
+                subsFound: subs.size,
+                pages,
+            });
+        } catch (e) {
+            console.warn("[ws] getClinicMemberSubs step2 failed", {
+                clinicId,
+                error: (e as Error).message,
+            });
+        }
+    }
+
+    if (subs.size === 0) {
+        console.warn("[ws] getClinicMemberSubs FOUND NO MEMBERS — clinic messages will be dropped", {
+            clinicId,
+        });
+    }
+
     return Array.from(subs);
 }
 
@@ -1601,17 +1666,35 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
         // `user#${sub}` row as well, then dedupe. Clinic → Pro is unaffected
         // (prof's key is stable per user).
         let recipientConnections: string[] = primaryRecipientConns;
+        let memberSubsCount = 0;
+        let memberConnsCount = 0;
         if (!isSenderClinic) {
             const memberSubs = await getClinicMemberSubs(clinicId);
+            memberSubsCount = memberSubs.length;
             if (memberSubs.length) {
                 const memberConnLists = await Promise.all(
                     memberSubs.map((sub) => getConnections(`user#${sub}`))
                 );
+                memberConnsCount = memberConnLists.flat().length;
                 recipientConnections = Array.from(
                     new Set([...primaryRecipientConns, ...memberConnLists.flat()])
                 );
             }
         }
+
+        // Diagnostic — single log line that captures the whole broadcast
+        // surface. If recipientConnections.length === 0, the message will
+        // be saved to MessagesTable but no one will receive it in realtime.
+        console.log("[ws] sendMessage recipient resolution", {
+            isSenderClinic,
+            clinicId,
+            professionalSub,
+            recipientKey,
+            primaryRecipientConns: primaryRecipientConns.length,
+            memberSubsCount,
+            memberConnsCount,
+            finalRecipientConns: recipientConnections.length,
+        });
 
         const connClient = wsClientFromEvent(event);
 
