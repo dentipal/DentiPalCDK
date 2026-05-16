@@ -1686,6 +1686,15 @@ export class DentiPalCDKStack extends cdk.Stack {
             }, this)],
         }));
 
+        // 4. EventBridge PutEvents — onSendMessage publishes a `message-received`
+        // ShiftEvent so event-to-notification turns it into an in-app
+        // notification for the recipient professional. Same default-bus path
+        // the REST monolith uses; the existing ShiftEventRule fans it out.
+        webSocketChatHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['events:PutEvents'],
+            resources: ['*'],
+        }));
+
 
         // --- WebSocket API Gateway v2 Setup ---
 
