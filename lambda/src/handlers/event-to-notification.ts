@@ -67,6 +67,10 @@ interface NotificationDraft {
     /** Stored on the row so the frontend can construct clinic-scoped URLs
      *  (JobApplicantsPage requires `?clinicId=` to initialize). */
     clinicId?: string;
+    /** Stored on the row so the frontend can navigate to
+     *  `/jobs/${jobId}/applicants` for negotiation rows (whose subjectId
+     *  is the negotiationId, not the jobId). */
+    jobId?: string;
 }
 
 const PROFESSIONAL_DASHBOARD = "/professional-dashboard";
@@ -92,24 +96,36 @@ function clinicJobDeepLink(jobId: string | undefined, clinicId: string | undefin
     return clinicId ? `${base}?clinicId=${encodeURIComponent(clinicId)}` : base;
 }
 
-/** Build the clinic-side deepLink for a negotiation event. Threads the
- *  application/negotiation/job id through so the page can scroll-and-highlight,
- *  plus `clinicId` so the negotiations overview loads under the right
- *  clinic context. */
+/** Build the clinic-side deepLink for a negotiation event. Points at the
+ *  job's applicants page (NOT the negotiations overview) — that's where the
+ *  clinic actually accepts / counters / declines the offer. The overview
+ *  page is summary-only and forces a second click to reach the applicants
+ *  list anyway, so going straight to applicants is the better UX.
+ *
+ *  Falls back to `/clinic-dashboard` when jobId is missing. Threads
+ *  `clinicId` so JobApplicantsPage can initialize the clinic context, and
+ *  the negotiation/application id so the page can scroll-and-highlight the
+ *  specific applicant row. */
 function clinicNegotiationDeepLink(
     negotiationId: string | undefined,
     applicationId: string | undefined,
     jobId: string | undefined,
     clinicId: string | undefined
 ): string {
+    if (!jobId) return CLINIC_DASHBOARD;
     const params = new URLSearchParams();
+    if (clinicId) params.set("clinicId", clinicId);
     if (negotiationId) params.set("negotiationId", negotiationId);
     else if (applicationId) params.set("applicationId", applicationId);
-    else if (jobId) params.set("jobId", jobId);
-    if (clinicId) params.set("clinicId", clinicId);
     const qs = params.toString();
-    return qs ? `${CLINIC_NEGOTIATIONS}?${qs}` : CLINIC_NEGOTIATIONS;
+    const base = `/jobs/${encodeURIComponent(jobId)}/applicants`;
+    return qs ? `${base}?${qs}` : base;
 }
+
+// `CLINIC_NEGOTIATIONS` is no longer referenced from negotiation events but
+// is retained for future use (e.g. a summary digest that DOES want the
+// overview page).
+void CLINIC_NEGOTIATIONS;
 
 function shiftLineFrom(detail: EventBridgeEvent["detail"]): string {
     const shift = detail.shiftDetails || {};
@@ -230,6 +246,7 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                     subjectType: "job",
                     subjectId: detail.jobId,
                     clinicId: detail.clinicId,
+                    jobId: detail.jobId,
                 });
             }
             return drafts;
@@ -263,6 +280,7 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                     subjectType: "job",
                     subjectId: detail.jobId,
                     clinicId: detail.clinicId,
+                    jobId: detail.jobId,
                 });
             }
             return drafts;
@@ -369,6 +387,7 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                     subjectType: "job",
                     subjectId: detail.jobId,
                     clinicId: detail.clinicId,
+                    jobId: detail.jobId,
                 });
             }
             return drafts;
@@ -426,6 +445,7 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                     subjectType: "job",
                     subjectId: detail.jobId,
                     clinicId: detail.clinicId,
+                    jobId: detail.jobId,
                 });
             }
             return drafts;
@@ -482,6 +502,7 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                         subjectType: "negotiation",
                         subjectId: detail.negotiationId,
                         clinicId: detail.clinicId,
+                        jobId: detail.jobId,
                     });
                 }
             }
@@ -569,6 +590,7 @@ async function writeOne(draft: NotificationDraft): Promise<void> {
         subjectType: draft.subjectType,
         subjectId: draft.subjectId,
         clinicId: draft.clinicId,
+        jobId: draft.jobId,
         deepLink: draft.deepLink,
         readAt: null,
         createdAt: new Date().toISOString(),
