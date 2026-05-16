@@ -309,9 +309,11 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                         title: `${proName} starts a shift in 24 hours`,
                         body: shiftLine || undefined,
                         actorName: proName,
-                        deepLink: clinicJobDeepLink(detail.jobId),
+                        deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
                         subjectType: "job",
                         subjectId: detail.jobId,
+                        clinicId: detail.clinicId,
+                        jobId: detail.jobId,
                     });
                 }
             }
@@ -338,10 +340,12 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                         type: "shift_reminder_h1",
                         title: `${proName} starts a shift in 1 hour`,
                         body: shiftLine || undefined,
+                        deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
                         actorName: proName,
-                        deepLink: clinicJobDeepLink(detail.jobId),
                         subjectType: "job",
                         subjectId: detail.jobId,
+                        clinicId: detail.clinicId,
+                        jobId: detail.jobId,
                     });
                 }
             }
