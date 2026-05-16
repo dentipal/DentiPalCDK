@@ -877,12 +877,53 @@ export const CONFIRM_REMOVE_TEAM_MEMBER: ToolDefinition = {
 };
 
 // =========================================================================
+// Generic DDB read (escape hatch — see ddbQueryTool.ts and plan
+// make-a-comprehensive-table-joyful-pearl.md). One tool shared by both
+// authenticated agents; explicitly NOT available to the public agent.
+// =========================================================================
+
+export const QUERY_DDB_TABLE: ToolDefinition = {
+  name: "query_ddb_table", bucket: "info", scope: "both",
+  description:
+    "FALLBACK reader for analytics / diagnostic / cross-cut questions the narrow tools don't cover " +
+    "(e.g., 'how many applications did I make last month', 'look up application by id', " +
+    "'compare pending applicants across my clinics'). " +
+    "ALWAYS prefer narrow tools (get_my_applications, get_scheduled_shifts, list_applicants_for_job, etc.) " +
+    "when one fits. NEVER use for writes — those have dedicated preview_*/confirm_* tools. " +
+    "Allowed tables: JobPostings, JobApplications, JobInvitations, JobNegotiations, " +
+    "ProfessionalProfiles, ClinicProfiles. Server FORCES auth scoping — you cannot read another user's data. " +
+    "op = query (multiple rows) or getItem (single row by full key). " +
+    "keyName / indexName must match an allowed key on that table; see error message for the allow-list if you guess wrong.",
+  inputSchema: {
+    type: "object",
+    required: ["table", "op", "keyName", "keyValue"],
+    properties: {
+      table: STRING,        // one of the 6 allow-listed short names (omit DentiPal-V5- prefix)
+      op: STRING,           // "query" | "getItem"
+      indexName: STRING,    // optional GSI name; tool can usually infer from keyName
+      keyName: STRING,      // attribute used as the partition key
+      keyValue: STRING,     // partition key value
+      sortKeyName: STRING,
+      sortKeyValue: STRING,
+      sortKeyValueEnd: STRING,
+      sortKeyOp: STRING,    // "=" | "begins_with" | ">" | ">=" | "<" | "<=" | "between"
+      filterStatus: STRING,
+      filterDateFrom: STRING,
+      filterDateTo: STRING,
+      limit: NUMBER,        // 1-50, default 25
+    },
+  },
+};
+
+// =========================================================================
 // Registries
 // =========================================================================
 
 export const PROFESSIONAL_AGENT_TOOLS: ToolDefinition[] = [
   SEARCH_JOBS_NEAR_ME, GET_JOB_DETAILS, GET_MY_APPLICATIONS, GET_MY_INVITATIONS,
   GET_SCHEDULED_SHIFTS, GET_COMPLETED_SHIFTS, GET_MY_NEGOTIATIONS,
+  // Escape hatch — see ddbQueryTool.ts. Use only when narrow tools above don't fit.
+  QUERY_DDB_TABLE,
   // Single-shot writes (v1 active set)
   APPLY_TO_JOB, RESPOND_INVITATION,
   // Counter-offer preview/confirm (v1 active set)
@@ -905,6 +946,8 @@ export const CLINIC_AGENT_TOOLS: ToolDefinition[] = [
   GET_MY_CLINICS, GET_ACTION_NEEDED, GET_OPEN_SHIFTS, GET_SCHEDULED_SHIFTS,
   GET_COMPLETED_SHIFTS, LIST_APPLICANTS_FOR_JOB, GET_PROFESSIONAL_INFO,
   GET_CLINIC_FAVORITES, GET_JOB_DETAILS,
+  // Escape hatch — see ddbQueryTool.ts. Use only when narrow tools above don't fit.
+  QUERY_DDB_TABLE,
   PREVIEW_POST_TEMPORARY_JOB, CONFIRM_POST_TEMPORARY_JOB,
   PREVIEW_POST_CONSULTING_JOB, CONFIRM_POST_CONSULTING_JOB,
   PREVIEW_POST_PERMANENT_JOB, CONFIRM_POST_PERMANENT_JOB,

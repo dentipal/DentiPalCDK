@@ -56,7 +56,9 @@ import {
   setPendingPreview,
   clearPendingPreview,
   setRecentSearchResults,
+  getSessionByConnectionId,
 } from "./sessionStore";
+import { runQueryDdbTable, QueryDdbInput } from "./ddbQueryTool";
 import { verifyPreviewBeforeConfirm } from "./previewGate";
 import { getToolDefinition } from "./toolSchemas";
 
@@ -179,33 +181,54 @@ function filterShiftsByDayAndDateRange(
     ["top", "jobs"],
   ];
   let arr: any[] | undefined;
-  let foundIn: ["data" | "top", string] | undefined;
-  for (const [loc, key] of candidates) {
-    const at = loc === "data" ? r.body?.data?.[key] : r.body?.[key];
-    if (Array.isArray(at)) { arr = at; foundIn = [loc, key]; break; }
+  // Flat-array case: `data` is itself the array (no envelope sub-object).
+  // getClinicShifts returns this shape — without this branch the dayOfWeek
+  // filter was a silent no-op and the agent saw unfiltered results.
+  let foundIn: ["data" | "top", string] | "dataArray" | undefined;
+  if (Array.isArray(r.body?.data)) {
+    arr = r.body.data;
+    foundIn = "dataArray";
+  } else {
+    for (const [loc, key] of candidates) {
+      const at = loc === "data" ? r.body?.data?.[key] : r.body?.[key];
+      if (Array.isArray(at)) { arr = at; foundIn = [loc, key]; break; }
+    }
   }
   if (!arr || !foundIn) return r;
 
   const kept = arr.filter((s) => {
-    // Applications / invitations carry the shift date one level down inside
-    // a `jobPosting` / `job` sub-object — direct rows (job postings, shifts)
-    // have it at the top. Probe both layers so this filter works uniformly.
-    const date = extractShiftDate(s);
-    if (!date) return false; // can't filter rows with no parseable date
-    if (from && date < from) return false;
-    if (to && date > to) return false;
+    // A row can carry one OR MANY dates depending on shape:
+    //   - single-day temp/perm postings → `date` OR `start_date` (snake_case
+    //     in DDB; only the `date` field was checked before, silently dropping
+    //     ~85% of postings whose authoring handler wrote start_date instead).
+    //   - multi-day consulting → `dates: [...]` array of every booked day.
+    //     The old probe only looked at `dates[0]`; a Monday at index 3 was
+    //     silently invisible to the day-of-week filter.
+    // Applications/invitations carry these one level down inside `jobPosting`
+    // or `job` — extractShiftDates probes both layers.
+    const dates = extractShiftDates(s);
+    if (!dates.length) return false;
+    const inRange = dates.filter((d) => (!from || d >= from) && (!to || d <= to));
+    if (!inRange.length) return false;
     if (dow !== undefined) {
-      // Construct as local midnight so 'YYYY-MM-DD' doesn't shift across
-      // timezones (Date('YYYY-MM-DD') parses as UTC midnight, which can
-      // land on the prior day in negative-offset locales). Append T00:00:00.
-      const d = new Date(date.length === 10 ? date + "T00:00:00" : date);
-      if (Number.isNaN(d.getTime()) || d.getDay() !== dow) return false;
+      // Match if ANY in-range date lands on the requested weekday. Construct
+      // as local midnight so 'YYYY-MM-DD' doesn't shift across timezones
+      // (Date('YYYY-MM-DD') parses as UTC midnight, which can land on the
+      // prior day in negative-offset locales).
+      const hit = inRange.some((d) => {
+        const dt = new Date(d.length === 10 ? d + "T00:00:00" : d);
+        return !Number.isNaN(dt.getTime()) && dt.getDay() === dow;
+      });
+      if (!hit) return false;
     }
     return true;
   });
 
   const nextBody = { ...r.body };
-  if (foundIn[0] === "data") {
+  if (foundIn === "dataArray") {
+    nextBody.data = kept;
+    if (typeof r.body.totalCount === "number") nextBody.totalCount = kept.length;
+  } else if (foundIn[0] === "data") {
     nextBody.data = { ...r.body.data, [foundIn[1]]: kept };
     if (typeof r.body.data?.totalCount === "number") nextBody.data.totalCount = kept.length;
   } else {
@@ -216,25 +239,43 @@ function filterShiftsByDayAndDateRange(
 }
 
 /**
- * Find a shift date inside a row regardless of which list-shape it came
- * from. Probes (first match wins):
- *   - direct fields:   row.date / row.startDate / row.dates[0]
- *   - nested via job:  row.jobPosting.date / .startDate / .dates[0]
- *                      row.job.date / .startDate / .dates[0]
- * Returns undefined if nothing parseable — caller treats that as "exclude
- * this row from filtered output." Better than guessing a default that could
- * silently mis-bucket records.
+ * Collect EVERY shift date a row carries. A row may have one, the other, or
+ * both of these shapes:
+ *   - single-day:  `date` (legacy) and/or `start_date` (snake_case, current).
+ *                  Note the older `startDate` (camelCase) is also probed for
+ *                  any handler that surfaces it that way.
+ *   - multi-day:   `dates: ["YYYY-MM-DD", ...]` — return all of them so the
+ *                  day-of-week filter can match if ANY date lands on the
+ *                  requested weekday.
+ * Applications/invitations carry these inside `jobPosting`/`job` sub-objects,
+ * so we probe both the direct row and one level down.
+ *
+ * Returns an empty array when nothing parseable is found — caller treats that
+ * as "exclude this row" (we can't filter what we can't date).
  */
-function extractShiftDate(row: any): string | undefined {
-  if (!row || typeof row !== "object") return undefined;
-  const probe = (obj: any): string | undefined => {
-    if (!obj || typeof obj !== "object") return undefined;
-    if (typeof obj.date === "string") return obj.date;
-    if (typeof obj.startDate === "string") return obj.startDate;
-    if (Array.isArray(obj.dates) && typeof obj.dates[0] === "string") return obj.dates[0];
-    return undefined;
+function extractShiftDates(row: any): string[] {
+  if (!row || typeof row !== "object") return [];
+  const probe = (obj: any): string[] => {
+    if (!obj || typeof obj !== "object") return [];
+    const out: string[] = [];
+    if (Array.isArray(obj.dates)) {
+      for (const d of obj.dates) {
+        if (typeof d === "string" && d.length >= 8) out.push(d);
+      }
+    }
+    for (const k of ["date", "start_date", "startDate"]) {
+      const v = obj[k];
+      if (typeof v === "string" && v.length >= 8) out.push(v);
+    }
+    return out;
   };
-  return probe(row) || probe(row.jobPosting) || probe(row.job);
+  const all = [...probe(row), ...probe(row.jobPosting), ...probe(row.job)];
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const d of all) {
+    if (!seen.has(d)) { seen.add(d); deduped.push(d); }
+  }
+  return deduped;
 }
 
 /**
@@ -906,19 +947,37 @@ export async function executeTool(
         return errOrOk(call.toolName, r);
       }
       case "get_open_shifts": {
+        // getClinicShiftsHandler is a tab-switched endpoint: routes off
+        // event.pathParameters.proxy (REST path's trailing segment). Without
+        // proxy="open-shifts" the handler returns data:[].
         const r = await callHandlerInProcess(getClinicShiftsHandler, {
-          method: "GET", pathParameters: { clinicId: call.input.clinicId }, auth,
+          method: "GET",
+          pathParameters: { clinicId: call.input.clinicId, proxy: "open-shifts" },
+          auth,
         });
-        // Server-side filter for dayOfWeek + date range. Doing this here
-        // (not in the LLM) means "open shifts for Monday" can't be wrong
-        // because Haiku miscomputed a calendar day. The agent just passes
-        // the param; we own the calendar math.
+        // Apply dayOfWeek / dateFrom / dateTo filter centrally.
         const filtered = filterShiftsByDayAndDateRange(r, {
           dayOfWeek: call.input.dayOfWeek,
           dateFrom: call.input.dateFrom,
           dateTo: call.input.dateTo,
         });
-        return errOrOk(call.toolName, filtered);
+        if (filtered.status >= 400) {
+          return err(call.toolName, filtered.status, safeBodyToString(filtered.status, filtered.body));
+        }
+        // Reshape to {shifts: [...], totalCount} so the chat widget renders
+        // JobResultsList WITHOUT the apply-checkbox CTA (see ResultCards.tsx:
+        // the `shifts` branch passes no onSendApply, so the "Apply to N"
+        // affordance is hidden — correct for clinic-side, since clinics
+        // OWN these postings rather than applying to them).
+        //
+        // The handler returns {message, data: [array]} which the widget
+        // doesn't know how to display — that's why the agent appeared to
+        // say "Done." with no cards even when the handler returned dozens.
+        const shifts: any[] = Array.isArray(filtered.body?.data) ? filtered.body.data : [];
+        return ok(call.toolName, {
+          shifts,
+          totalCount: shifts.length,
+        });
       }
       case "list_applicants_for_job": {
         // Three modes:
@@ -1391,6 +1450,19 @@ export async function executeTool(
             auth,
           }),
         );
+
+      // ------------------- ESCAPE HATCH: generic DDB read -------------------
+      // Use only when no narrow tool fits. See ddbQueryTool.ts and the plan
+      // make-a-comprehensive-table-joyful-pearl.md. Auth scoping, PII
+      // redaction, and the table allow-list are all enforced inside
+      // runQueryDdbTable — this case is just plumbing.
+      case "query_ddb_table": {
+        const session = await getSessionByConnectionId(connectionId);
+        if (!session) return err(call.toolName, 410, "session_expired");
+        const r = await runQueryDdbTable(call.input as QueryDdbInput, auth, session);
+        if (!r.ok) return err(call.toolName, r.status, r.error);
+        return ok(call.toolName, r.data);
+      }
 
       default:
         return err(call.toolName, 501, `Tool '${call.toolName}' not wired up`);

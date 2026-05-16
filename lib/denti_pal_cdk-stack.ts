@@ -1871,6 +1871,8 @@ export class DentiPalCDKStack extends cdk.Stack {
             'preview_update_notification_preferences',
             'preview_submit_feedback',
             'preview_send_referral',
+            // Escape hatch — analytics/diagnostic/cross-cut only. See ddbQueryTool.ts.
+            'query_ddb_table',
         ];
         // Clinic agent tool list. confirm_* tools are deliberately omitted
         // (see comment above PRO_V1_FUNCTIONS). They still exist in the
@@ -1907,6 +1909,8 @@ export class DentiPalCDKStack extends cdk.Stack {
             'preview_update_clinic_profile',
             'preview_update_notification_preferences',
             'preview_submit_feedback',
+            // Escape hatch — analytics/diagnostic/cross-cut only. See ddbQueryTool.ts.
+            'query_ddb_table',
         ];
 
         const ACTION_GROUP_CHUNK_SIZE = 10;
@@ -2254,6 +2258,35 @@ export class DentiPalCDKStack extends cdk.Stack {
                     referredEmail: STR('Email', true),
                     referredName: STR('Name', true),
                     message: STR('Message'),
+                },
+            },
+            // ESCAPE HATCH — see ddbQueryTool.ts. Used only when a narrow tool
+            // doesn't fit (analytics, diagnostic lookups, cross-cut filters).
+            // Server forces auth scoping; the model cannot read another user's
+            // data. Keep description IDENTICAL to QUERY_DDB_TABLE in toolSchemas.ts.
+            {
+                name: 'query_ddb_table',
+                description:
+                    "FALLBACK reader for analytics / diagnostic / cross-cut questions the narrow tools don't cover " +
+                    "(e.g., 'how many applications did I make last month', 'look up application by id'). " +
+                    'ALWAYS prefer narrow tools (get_my_applications, get_scheduled_shifts, etc.) when one fits. ' +
+                    'NEVER use for writes. Allowed tables: JobPostings, JobApplications, JobInvitations, ' +
+                    'JobNegotiations, ProfessionalProfiles, ClinicProfiles. Server FORCES auth scoping. ' +
+                    'op = query (multiple rows) or getItem (single row).',
+                parameters: {
+                    table: STR('One of: JobPostings, JobApplications, JobInvitations, JobNegotiations, ProfessionalProfiles, ClinicProfiles. Omit the DentiPal-V5- prefix.', true),
+                    op: STR('"query" or "getItem".', true),
+                    indexName: STR('OPTIONAL GSI name. Tool usually infers from keyName.'),
+                    keyName: STR('Partition key attribute. Per-table allow-list; the tool returns the allowed list if you guess wrong.', true),
+                    keyValue: STR('Partition key value.', true),
+                    sortKeyName: STR('OPTIONAL sort-key attribute.'),
+                    sortKeyValue: STR('OPTIONAL sort-key value.'),
+                    sortKeyValueEnd: STR('OPTIONAL end value when sortKeyOp="between".'),
+                    sortKeyOp: STR('OPTIONAL: "=" | "begins_with" | ">" | ">=" | "<" | "<=" | "between".'),
+                    filterStatus: STR('OPTIONAL filter on item.status.'),
+                    filterDateFrom: STR('OPTIONAL inclusive lower bound on item.date (YYYY-MM-DD).'),
+                    filterDateTo: STR('OPTIONAL inclusive upper bound on item.date (YYYY-MM-DD).'),
+                    limit: NUM('OPTIONAL 1-50, default 25.'),
                 },
             },
         ];
@@ -2776,6 +2809,35 @@ export class DentiPalCDKStack extends cdk.Stack {
                     negotiationUpdates: BOOL('Negs'), shiftReminders: BOOL('Reminders'),
                 },
             },
+            // ESCAPE HATCH — see ddbQueryTool.ts. Same description as the pro
+            // agent's entry so both agents present an identical contract to
+            // the model. Server forces auth scoping using session.userContext.clinics.
+            {
+                name: 'query_ddb_table',
+                description:
+                    "FALLBACK reader for analytics / diagnostic / cross-cut questions the narrow tools don't cover " +
+                    "(e.g., 'how many applications across my clinics this month', 'compare pending applicants per clinic', " +
+                    "'look up application by id'). " +
+                    'ALWAYS prefer narrow tools (list_applicants_for_job, get_action_needed, get_open_shifts, etc.) when one fits. ' +
+                    'NEVER use for writes. Allowed tables: JobPostings, JobApplications, JobInvitations, ' +
+                    'JobNegotiations, ProfessionalProfiles, ClinicProfiles. Server FORCES clinicId scoping to clinics you manage. ' +
+                    'op = query (multiple rows) or getItem (single row).',
+                parameters: {
+                    table: STR('One of: JobPostings, JobApplications, JobInvitations, JobNegotiations, ProfessionalProfiles, ClinicProfiles. Omit the DentiPal-V5- prefix.', true),
+                    op: STR('"query" or "getItem".', true),
+                    indexName: STR('OPTIONAL GSI name. Tool usually infers from keyName.'),
+                    keyName: STR('Partition key attribute. Per-table allow-list; the tool returns the allowed list if you guess wrong.', true),
+                    keyValue: STR('Partition key value.', true),
+                    sortKeyName: STR('OPTIONAL sort-key attribute.'),
+                    sortKeyValue: STR('OPTIONAL sort-key value.'),
+                    sortKeyValueEnd: STR('OPTIONAL end value when sortKeyOp="between".'),
+                    sortKeyOp: STR('OPTIONAL: "=" | "begins_with" | ">" | ">=" | "<" | "<=" | "between".'),
+                    filterStatus: STR('OPTIONAL filter on item.status.'),
+                    filterDateFrom: STR('OPTIONAL inclusive lower bound on item.date (YYYY-MM-DD).'),
+                    filterDateTo: STR('OPTIONAL inclusive upper bound on item.date (YYYY-MM-DD).'),
+                    limit: NUM('OPTIONAL 1-50, default 25.'),
+                },
+            },
         ];
 
         const professionalAgent = new bedrock.CfnAgent(this, 'DentiPalProfessionalAgentV2', {
@@ -2827,6 +2889,16 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "send feedback" / "report a bug" / "I want to tell you something" → preview_submit_feedback({type: "general", feedback: "<user\'s message>"}).',
                 '- "refer a friend" / "invite someone" → preview_send_referral with the friend\'s email or phone.',
                 '',
+                '═══ ESCAPE HATCH: query_ddb_table ═══',
+                'query_ddb_table is a FALLBACK. ALWAYS try a narrow tool first (get_my_applications, get_my_invitations, get_my_negotiations, get_scheduled_shifts, get_completed_shifts, search_jobs_near_me, get_job_details).',
+                'Use query_ddb_table ONLY for questions no narrow tool answers:',
+                '  • Analytics — "how many applications did I make last month?", "average rate on my completed shifts", "compare March vs April".',
+                '  • Diagnostic lookups by ID — "look up application a1b2c3 — did it submit?".',
+                '  • Cross-cut filters — "jobs at clinics I\'ve favorited where rate > $60".',
+                'NEVER use it for "show me my apps" (use get_my_applications), "find jobs near me" (use search_jobs_near_me), or any write — writes have dedicated preview_*/confirm_* tools.',
+                'The server FORCES auth scoping; you cannot read another user\'s data.',
+                '═════════════════════════════════════════════════',
+                '',
                 'Reference resolution (no questions):',
                 '- "the first/second/third one", "that job", "the latest" → resolve from the MOST RECENT tool result in your conversation memory. Don\'t ask the user "which one?".',
                 '- "negotiate on my latest" → call get_my_applications first if needed, then use the most recent applicationId + its negotiationId.',
@@ -2835,6 +2907,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'When a tool returns a LIST (search_jobs_near_me, get_my_invitations, get_my_applications, get_my_negotiations, get_scheduled_shifts, get_completed_shifts, get_my_clinics), respond with EXACTLY ONE short sentence and stop. Examples: "Here you go." / "Found 5." / "No pending invitations." The UI renders the cards — your sentence is just a verbal handoff.',
                 'NEVER list, number, bullet, repeat, or recap the items. NEVER use markdown bold or numbered lists. The cards already show the data.',
                 'NEVER respond with an empty turn — always emit one sentence, even if very short.',
+                'EMPTY RESULTS ARE A VALID ANSWER. If a tool returns an empty list (data: [] or count=0), the answer is "none" — say so plainly ("No applications yet.", "No jobs on Monday in your area.") and STOP. NEVER call the same tool again with different parameters hoping for a non-empty result. NEVER iterate across dayOfWeek values or date ranges chasing data. Retrying empty results burns tool-call budget and gets you cut off by the loop cap.',
                 '═════════════════════════════════════════════════',
                 '',
                 'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields. CRITICAL: after a preview_* tool call, NEVER call any other tool in the same turn — the user will click Submit, which fires the confirm independently. Calling a confirm_* tool yourself will fail (the model has no access to confirm_* — they are user-only).',
@@ -2945,6 +3018,16 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "notification settings" / "stop emailing" / "turn off SMS" → preview_update_notification_preferences with only the toggles named.',
                 '- "send feedback" / "report a bug" → preview_submit_feedback.',
                 '',
+                '═══ ESCAPE HATCH: query_ddb_table ═══',
+                'query_ddb_table is a FALLBACK. ALWAYS try a narrow tool first (list_applicants_for_job, get_action_needed, get_open_shifts, get_scheduled_shifts, get_completed_shifts, get_clinic_favorites, get_professional_info, get_job_details, search_professionals).',
+                'Use query_ddb_table ONLY for questions no narrow tool answers:',
+                '  • Analytics — "applications across all my clinics this week", "which clinic gets the most applicants", "month-over-month posting volume".',
+                '  • Diagnostic lookups by ID — "look up application a1b2c3 — what\'s its status?".',
+                '  • Cross-cut filters — "pending applicants on jobs I posted before May 1".',
+                'NEVER use it for "applicants for my job" (use list_applicants_for_job), "what needs my attention" (use get_action_needed), or any write — writes have dedicated preview_*/confirm_* tools.',
+                'The server FORCES clinicId scoping to clinics you manage; you cannot read other clinics\' data.',
+                '═════════════════════════════════════════════════',
+                '',
                 'Resolution rules (no questions):',
                 '- If user manages exactly ONE clinic, auto-pass that clinicId for every tool that needs one. Don\'t ask "which clinic?".',
                 '- Resolve "the first applicant" / "that pro" / "the latest" from the most recent tool result in conversation memory.',
@@ -2956,6 +3039,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'When a tool returns a LIST (get_my_clinics, get_action_needed, list_applicants_for_job, get_open_shifts), respond with EXACTLY ONE short sentence and stop. Examples: "Here you go." / "Found 3 pending applicants." / "No applicants yet." The UI renders the cards — your sentence is just a verbal handoff.',
                 'NEVER list, number, bullet, repeat, or recap the items. NEVER use markdown bold or numbered lists. The cards already show the data.',
                 'NEVER respond with an empty turn — always emit one sentence, even if very short. If you need to ask a follow-up to proceed (e.g., missing rate when posting), do so in ONE sentence.',
+                'EMPTY RESULTS ARE A VALID ANSWER. If a tool returns an empty list (data: [] or count=0), the answer is "none" — say so plainly ("No open shifts on Monday.", "No pending applicants.") and STOP. NEVER call the same tool again with different parameters hoping for a non-empty result. NEVER iterate across clinicIds, dayOfWeek values, or date ranges chasing data. Retrying empty results burns tool-call budget and gets you cut off by the loop cap.',
                 '═════════════════════════════════════════════════',
                 '',
                 'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields. CRITICAL: after a preview_* tool call, NEVER call any other tool in the same turn — the user will click Submit, which fires the confirm independently. Calling a confirm_* tool yourself will fail (the model has no access to confirm_* — they are user-only).',
