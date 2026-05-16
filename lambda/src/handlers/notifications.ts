@@ -10,10 +10,13 @@
 import {
     DynamoDBClient,
     AttributeValue,
+    GetItemCommand,
 } from "@aws-sdk/client-dynamodb";
 
 export const REGION = process.env.AWS_REGION || process.env.REGION || "us-east-1";
 export const NOTIFICATIONS_TABLE = process.env.NOTIFICATIONS_TABLE!;
+/** Optional — only required by the event consumer that fans out to clinic teams. */
+export const CLINICS_TABLE = process.env.CLINICS_TABLE;
 export const ddb = new DynamoDBClient({ region: REGION });
 
 /** Auto-expiry window for notification rows. Keeps the table from growing
@@ -33,6 +36,7 @@ export type NotificationType =
     | "shift_reminder_h24"
     | "shift_reminder_h1"
     | "job_modified"
+    | "application_received"
     | "application_rejected"
     | "invitation_received"
     | "invitation_response"
@@ -114,4 +118,56 @@ export function recordToItem(record: NotificationRecord): Record<string, Attribu
 /** Default TTL = now + 90 days, as a Unix epoch in seconds. */
 export function defaultExpiresAt(now: number = Date.now()): number {
     return Math.floor(now / 1000) + NOTIFICATION_TTL_DAYS * 24 * 60 * 60;
+}
+
+/**
+ * Extract user subs from the `AssociatedUsers` attribute on a Clinics row.
+ * The attribute has been written historically as StringSet (SS), List of {S}
+ * (L), or a single String (S) — accept all three shapes so notification
+ * fan-out doesn't silently miss team members.
+ */
+function extractAssociatedUsers(attr: AttributeValue | undefined): string[] {
+    if (!attr) return [];
+    const a = attr as any;
+    if (Array.isArray(a.SS)) return a.SS as string[];
+    if (Array.isArray(a.L)) {
+        return (a.L as any[])
+            .map((v) => (v && typeof v.S === "string" ? v.S : null))
+            .filter((v): v is string => !!v);
+    }
+    if (typeof a.S === "string") return [a.S];
+    return [];
+}
+
+/**
+ * Resolve the full clinic-team for a clinicId — every user who can see the
+ * clinic's data (Clinics.createdBy + Clinics.AssociatedUsers). One point-read
+ * on the Clinics table, no scan. Returns `[]` if the clinic record is missing,
+ * the table env var isn't wired, or the read fails — callers should treat an
+ * empty list as "no clinic recipients" and skip writing rows rather than
+ * blowing up the consumer.
+ *
+ * This is the same membership definition used by canAccessClinic() in utils.ts;
+ * a user who can't read the clinic also shouldn't receive its notifications.
+ */
+export async function getClinicRecipientSubs(clinicId: string): Promise<string[]> {
+    if (!clinicId || !CLINICS_TABLE) return [];
+    try {
+        const res = await ddb.send(new GetItemCommand({
+            TableName: CLINICS_TABLE,
+            Key: { clinicId: { S: clinicId } },
+            ProjectionExpression: "AssociatedUsers, createdBy",
+        }));
+        if (!res.Item) return [];
+        const subs = new Set<string>();
+        const createdBy = res.Item.createdBy?.S;
+        if (createdBy) subs.add(createdBy);
+        for (const sub of extractAssociatedUsers(res.Item.AssociatedUsers)) {
+            if (sub) subs.add(sub);
+        }
+        return Array.from(subs);
+    } catch (err) {
+        console.error("[getClinicRecipientSubs] read failed for", clinicId, err);
+        return [];
+    }
 }

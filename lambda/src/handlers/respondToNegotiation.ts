@@ -450,10 +450,12 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
     }
 
     // 10b. Negotiation-specific events for the in-app notification feed.
-    //      Only fired when the *clinic* is the actor (so the professional is
-    //      the recipient). The event-to-notification consumer writes one row
-    //      per recipient; clinic-side notifications are out of scope for v1.
-    if (actor === "clinic" && professionalUserSub) {
+    //      Fires for BOTH directions:
+    //        - clinic is actor → professional is the recipient
+    //        - professional is actor → clinic team is the recipient
+    //      The event-to-notification consumer reads `actor` and writes rows
+    //      for the appropriate side(s).
+    if (professionalUserSub) {
       const negotiationEventType =
         body.response === "accepted"
           ? "negotiation-accepted"
@@ -473,6 +475,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
             DetailType: "ShiftEvent",
             Detail: JSON.stringify({
               eventType: negotiationEventType,
+              actor,
               clinicId: negotiationClinicId,
               professionalSub: professionalUserSub,
               negotiationId,
@@ -486,7 +489,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
             }),
           }],
         }));
-        console.log(`EventBridge ShiftEvent (${negotiationEventType}) published for professional notification.`);
+        console.log(`EventBridge ShiftEvent (${negotiationEventType}) published, actor=${actor}.`);
       } catch (ebError: any) {
         console.error(`Failed to publish EventBridge event for ${negotiationEventType}:`, ebError.message);
       }

@@ -1660,28 +1660,27 @@ async function onSendMessage(event: WebSocketAPIGatewayEventV2): Promise<APIGate
 
         // Fan out a `message-received` EventBridge event so the recipient's
         // notification bell + notifications page reflect new inbox messages.
-        // Currently only the professional side has a notification consumer
-        // for `message-received` (see event-to-notification.ts), so we only
-        // publish when a clinic user sends to a professional. Best-effort:
-        // failures are logged but never block the message itself.
-        if (isSenderClinic) {
-            try {
-                await eb.send(new PutEventsCommand({
-                    Entries: [{
-                        Source: "denti-pal.api",
-                        DetailType: "ShiftEvent",
-                        Detail: JSON.stringify({
-                            eventType: "message-received",
-                            clinicId,
-                            clinicName,
-                            professionalSub,
-                            preview: content.slice(0, 140),
-                        }),
-                    }],
-                }));
-            } catch (eventErr) {
-                console.warn("[ws] sendMessage event publish failed (non-fatal):", (eventErr as Error).message);
-            }
+        // Fires for BOTH directions; the event-to-notification consumer reads
+        // `actor` and writes a row for the other side (clinic team or pro).
+        // Best-effort: failures are logged but never block the message itself.
+        try {
+            await eb.send(new PutEventsCommand({
+                Entries: [{
+                    Source: "denti-pal.api",
+                    DetailType: "ShiftEvent",
+                    Detail: JSON.stringify({
+                        eventType: "message-received",
+                        actor: isSenderClinic ? "clinic" : "professional",
+                        clinicId,
+                        clinicName,
+                        professionalSub,
+                        professionalName: profName,
+                        preview: content.slice(0, 140),
+                    }),
+                }],
+            }));
+        } catch (eventErr) {
+            console.warn("[ws] sendMessage event publish failed (non-fatal):", (eventErr as Error).message);
         }
 
         console.log("[ws] sendMessage DONE", {
