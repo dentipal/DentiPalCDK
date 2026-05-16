@@ -229,7 +229,13 @@ export const handler = async (
     // --- 7. Process Response and Conditional Logic ---
     const timestamp: string = new Date().toISOString();
     let applicationId: string | null = null;
+    let negotiationId: string | null = null;
     const jobType: string | undefined = job.job_type?.S;
+    // Resolve pay type the same way createJobApplication.ts does (line 349)
+    // so the invite-negotiate flow stores the exact same payType the open-jobs
+    // negotiate flow stores. The UI uses this to label rates correctly.
+    const jobPayType: string =
+      job.pay_type?.S || job.payType?.S || "per_hour";
 
     console.log(`6. Processing Logic Branch: ${responseData.response}`);
 
@@ -350,8 +356,20 @@ export const handler = async (
       }
 
       applicationId = uuidv4();
-      
-      // Create Application Item
+      negotiationId = uuidv4();
+
+      // Create Application Item — mirror the shape written by
+      // createJobApplication.ts (the open-jobs negotiate path) so the
+      // professional's Pending tab and the clinic's NegotiationsOverviewPage
+      // render this invite-originated negotiation identically to one started
+      // from the open-jobs flow. Specifically:
+      //   - proposedRate / proposedSalaryMin / proposedSalaryMax must be set
+      //     on the APPLICATION (not just on the negotiation) — the Pending tab
+      //     reads job.proposedRate to render the "Your Counter: $X/hr" badge.
+      //   - negotiationId must be set on the application so ReCounterModal
+      //     can find the negotiation to re-counter against.
+      //   - payType must be persisted on both items so the UI labels are
+      //     correct for per_transaction / percentage_of_revenue jobs.
       const applicationItem: any = {
         applicationId: { S: applicationId },
         jobId: { S: jobId },
@@ -364,9 +382,24 @@ export const handler = async (
         applicationMessage: {
           S: responseData.message || "Application submitted with counter-proposal"
         },
+        negotiationId: { S: negotiationId },
+        payType: { S: jobPayType },
         fromInvitation: { BOOL: true },
         invitationResponseDate: { S: timestamp },
       };
+
+      if (jobType === "permanent") {
+        applicationItem.proposedSalaryMin = {
+          N: String(responseData.proposedSalaryMin)
+        };
+        applicationItem.proposedSalaryMax = {
+          N: String(responseData.proposedSalaryMax)
+        };
+      } else {
+        applicationItem.proposedRate = {
+          N: String(responseData.proposedHourlyRate)
+        };
+      }
 
       if (responseData.availabilityNotes) {
         applicationItem.availabilityNotes = { S: responseData.availabilityNotes };
@@ -379,22 +412,32 @@ export const handler = async (
         })
       );
 
-      // Create Negotiation Item
-      const negotiationId = uuidv4();
-      
+      // Create Negotiation Item — also mirrors createJobApplication.ts.
+      // Field name notes:
+      //   - The rate is stored as `proposedRate` (generic, all pay types) —
+      //     NOT `proposedHourlyRate` (the legacy hourly-only name). The
+      //     clinic-side NegotiationsTable and CounterOfferModal read the
+      //     generic name.
+      //   - `professionalUserSub` is stored alongside fromUserSub/toUserSub
+      //     so getAllNegotiations-Prof.ts can query this negotiation by
+      //     professional the same way it queries open-jobs negotiations.
+      //   - fromType/fromUserSub/toUserSub stay for invite-origin metadata
+      //     (used elsewhere to identify who initiated).
       const negotiationItem: any = {
         applicationId: { S: applicationId },
         negotiationId: { S: negotiationId },
         jobId: { S: jobId },
+        professionalUserSub: { S: userSub },
+        clinicId: { S: clinicId },
         fromType: { S: "professional" },
         fromUserSub: { S: userSub },
         toUserSub: { S: clinicUserSub },
-        clinicId: { S: clinicId },
         negotiationStatus: { S: "pending" },
+        payType: { S: jobPayType },
         createdAt: { S: timestamp },
         updatedAt: { S: timestamp },
         message: {
-          S: responseData.counterProposalMessage || "Counter-proposal submitted"
+          S: responseData.counterProposalMessage || responseData.message || "Counter-proposal submitted"
         },
       };
 
@@ -406,7 +449,7 @@ export const handler = async (
           N: String(responseData.proposedSalaryMax)
         };
       } else {
-        negotiationItem.proposedHourlyRate = {
+        negotiationItem.proposedRate = {
           N: String(responseData.proposedHourlyRate)
         };
       }
@@ -489,6 +532,7 @@ export const handler = async (
         jobId,
         response: responseData.response,
         applicationId,
+        negotiationId,
         respondedAt: timestamp,
         jobType: jobType,
         nextSteps:
