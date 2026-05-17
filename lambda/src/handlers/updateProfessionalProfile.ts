@@ -1,6 +1,7 @@
 import {
     DynamoDBClient,
     GetItemCommand,
+    QueryCommand,
     UpdateItemCommand,
     AttributeValue,
     GetItemCommandInput,
@@ -8,6 +9,7 @@ import {
     GetItemCommandOutput,
     UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
+import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 import { corsHeaders } from "./corsHeaders";
@@ -15,7 +17,42 @@ import { corsHeaders } from "./corsHeaders";
 // --- 1. AWS and Environment Setup ---
 const REGION: string = process.env.REGION || 'us-east-1';
 const dynamodb: DynamoDBClient = new DynamoDBClient({ region: REGION });
+const eb: EventBridgeClient = new EventBridgeClient({ region: REGION });
 const PROFESSIONAL_PROFILES_TABLE: string = process.env.PROFESSIONAL_PROFILES_TABLE!;
+const JOB_APPLICATIONS_TABLE: string | undefined = process.env.JOB_APPLICATIONS_TABLE;
+const JOB_INVITATIONS_TABLE: string | undefined = process.env.JOB_INVITATIONS_TABLE;
+
+// Fields whose change is worth a notification to clinics with an active
+// relationship to the pro. Excludes cosmetic / contact fields (avatar, bio,
+// phone) — those would create noise. Keep in sync with whatever the clinic
+// sees on the JobApplicantsPage / pro profile card.
+const MATERIAL_PROFILE_FIELDS = new Set<string>([
+    "first_name",
+    "last_name",
+    "professional_role",
+    "role",
+    "yearsExperience",
+    "hourly_rate",
+    "hourlyRate",
+    "rate",
+    "hygienist_license_file",
+    "license_number",
+]);
+
+// Human-readable label for the notification body. Anything missing falls
+// back to the raw field key.
+const FIELD_LABEL: Record<string, string> = {
+    first_name: "name",
+    last_name: "name",
+    professional_role: "role",
+    role: "role",
+    yearsExperience: "experience",
+    hourly_rate: "rate",
+    hourlyRate: "rate",
+    rate: "rate",
+    hygienist_license_file: "license",
+    license_number: "license",
+};
 
 // --- 2. Validation primitives (mirror dentipal/src/schemas/profileValidation.ts) ---
 const NAME_REGEX = /^[a-zA-Z\s'-]{2,50}$/;
@@ -325,6 +362,87 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const result: UpdateItemCommandOutput = await dynamodb.send(new UpdateItemCommand(updateCommand));
         const updated = result.Attributes;
+
+        // Best-effort: notify clinics with an active relationship to this pro
+        // (open application or open invite) when a *material* field changed —
+        // not on cosmetic edits like avatar/bio/phone. Quietly skip on lookup
+        // failures so a transient blip never breaks the actual profile update.
+        try {
+            const changedKeys = Object.keys(updateData).filter((k) => updateData[k] !== undefined);
+            const materialChanged = changedKeys.filter((k) => MATERIAL_PROFILE_FIELDS.has(k));
+            if (materialChanged.length > 0 && JOB_APPLICATIONS_TABLE && JOB_INVITATIONS_TABLE) {
+                const [appsResp, invitesResp] = await Promise.all([
+                    dynamodb.send(new QueryCommand({
+                        TableName: JOB_APPLICATIONS_TABLE,
+                        IndexName: "ProfessionalIndex",
+                        KeyConditionExpression: "professionalUserSub = :psub",
+                        FilterExpression:
+                            "applicationStatus IN (:pending, :negotiating, :scheduled, :accepted)",
+                        ExpressionAttributeValues: {
+                            ":psub": { S: userSub },
+                            ":pending": { S: "pending" },
+                            ":negotiating": { S: "negotiating" },
+                            ":scheduled": { S: "scheduled" },
+                            ":accepted": { S: "accepted" },
+                        },
+                    })).catch((err) => {
+                        console.warn("[profile-updated] apps lookup failed:", (err as Error).message);
+                        return undefined;
+                    }),
+                    dynamodb.send(new QueryCommand({
+                        TableName: JOB_INVITATIONS_TABLE,
+                        IndexName: "ProfessionalIndex",
+                        KeyConditionExpression: "professionalUserSub = :psub",
+                        FilterExpression:
+                            "attribute_not_exists(invitationStatus) OR invitationStatus IN (:sent, :pending, :negotiating)",
+                        ExpressionAttributeValues: {
+                            ":psub": { S: userSub },
+                            ":sent": { S: "sent" },
+                            ":pending": { S: "pending" },
+                            ":negotiating": { S: "negotiating" },
+                        },
+                    })).catch((err) => {
+                        console.warn("[profile-updated] invites lookup failed:", (err as Error).message);
+                        return undefined;
+                    }),
+                ]);
+
+                const clinicIdSet = new Set<string>();
+                for (const item of appsResp?.Items ?? []) {
+                    const cid = item.clinicId?.S || item.ClinicId?.S;
+                    if (cid) clinicIdSet.add(cid);
+                }
+                for (const item of invitesResp?.Items ?? []) {
+                    const cid = item.clinicId?.S || item.ClinicId?.S;
+                    if (cid) clinicIdSet.add(cid);
+                }
+
+                if (clinicIdSet.size > 0) {
+                    const changedFields = Array.from(new Set(
+                        materialChanged.map((k) => FIELD_LABEL[k] || k)
+                    ));
+                    const proName =
+                        `${updated?.first_name?.S || ""} ${updated?.last_name?.S || ""}`.trim() ||
+                        undefined;
+                    await eb.send(new PutEventsCommand({
+                        Entries: [{
+                            Source: "denti-pal.api",
+                            DetailType: "ShiftEvent",
+                            Detail: JSON.stringify({
+                                eventType: "profile-updated",
+                                actor: "professional",
+                                professionalSub: userSub,
+                                professionalName: proName,
+                                clinicIds: Array.from(clinicIdSet),
+                                changedFields,
+                            }),
+                        }],
+                    }));
+                }
+            }
+        } catch (notifyErr) {
+            console.warn("[updateProfessionalProfile] profile-updated publish failed (non-fatal):", (notifyErr as Error).message);
+        }
 
         return {
             statusCode: 200,

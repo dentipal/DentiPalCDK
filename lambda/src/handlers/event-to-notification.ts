@@ -86,45 +86,53 @@ const CLINIC_INBOX = "/clinic-inbox";
 const CLINIC_NEGOTIATIONS = "/negotiations";
 const CLINIC_PROFILE = "/clinic-profile";
 
-/** Build the clinic-side deepLink for a job-scoped event. Includes
- *  `?clinicId=` because JobApplicantsPage uses it to initialize the clinic
- *  context — without it the page hangs on "Initializing Clinic...". Falls
- *  back to the clinic dashboard if the jobId is missing. */
-function clinicJobDeepLink(jobId: string | undefined, clinicId: string | undefined): string {
-    if (!jobId) return CLINIC_DASHBOARD;
-    const base = `/jobs/${encodeURIComponent(jobId)}/applicants`;
-    return clinicId ? `${base}?clinicId=${encodeURIComponent(clinicId)}` : base;
+/** Build a clinic-dashboard URL pointing at a specific tab. The dashboard
+ *  reads `view` from search params on mount and switches to that tab; it
+ *  also reads `jobId` so the right row inside the tab can be focused. This
+ *  keeps every "clinic needs to act" notification on the dashboard the user
+ *  already knows — no separate applicants page, no overview hop, no
+ *  "Initializing Clinic..." spinner. */
+function clinicDashboardDeepLink(
+    view: "actionNeeded" | "invites" | "scheduled" | "completed" | "open",
+    opts: { clinicId?: string; jobId?: string } = {}
+): string {
+    const params = new URLSearchParams();
+    params.set("view", view);
+    if (opts.clinicId) params.set("clinicId", opts.clinicId);
+    if (opts.jobId) params.set("jobId", opts.jobId);
+    return `${CLINIC_DASHBOARD}?${params.toString()}`;
 }
 
-/** Build the clinic-side deepLink for a negotiation event. Points at the
- *  job's applicants page (NOT the negotiations overview) — that's where the
- *  clinic actually accepts / counters / declines the offer. The overview
- *  page is summary-only and forces a second click to reach the applicants
- *  list anyway, so going straight to applicants is the better UX.
- *
- *  Falls back to `/clinic-dashboard` when jobId is missing. Threads
- *  `clinicId` so JobApplicantsPage can initialize the clinic context, and
- *  the negotiation/application id so the page can scroll-and-highlight the
- *  specific applicant row. */
+/** Job-scoped events (shifts, no-show, job edits) land on the Action Needed
+ *  tab scoped to the relevant job. */
+function clinicJobDeepLink(jobId: string | undefined, clinicId: string | undefined): string {
+    return clinicDashboardDeepLink("actionNeeded", { clinicId, jobId });
+}
+
+/** Negotiation events land on the JobApplicantsPage for the job, with the
+ *  negotiating applicant's card auto-scrolled-to + highlighted via the
+ *  `negotiationId` query param. JobApplicantsPage stamps each card with
+ *  `data-negotiation-id` so the matching one is locatable. We fall back to
+ *  the dashboard's Action Needed tab when we don't know the job (older
+ *  events). */
 function clinicNegotiationDeepLink(
     negotiationId: string | undefined,
-    applicationId: string | undefined,
+    _applicationId: string | undefined,
     jobId: string | undefined,
     clinicId: string | undefined
 ): string {
-    if (!jobId) return CLINIC_DASHBOARD;
+    if (!jobId) return clinicDashboardDeepLink("actionNeeded", { clinicId, jobId });
     const params = new URLSearchParams();
     if (clinicId) params.set("clinicId", clinicId);
     if (negotiationId) params.set("negotiationId", negotiationId);
-    else if (applicationId) params.set("applicationId", applicationId);
     const qs = params.toString();
-    const base = `/jobs/${encodeURIComponent(jobId)}/applicants`;
-    return qs ? `${base}?${qs}` : base;
+    return qs
+        ? `/jobs/${encodeURIComponent(jobId)}/applicants?${qs}`
+        : `/jobs/${encodeURIComponent(jobId)}/applicants`;
 }
 
-// `CLINIC_NEGOTIATIONS` is no longer referenced from negotiation events but
-// is retained for future use (e.g. a summary digest that DOES want the
-// overview page).
+// `CLINIC_NEGOTIATIONS` and `CLINIC_INBOX` are kept for the message-received
+// case below (CLINIC_INBOX) and for any future event that wants the overview.
 void CLINIC_NEGOTIATIONS;
 
 function shiftLineFrom(detail: EventBridgeEvent["detail"]): string {
@@ -411,6 +419,99 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                 });
             }
             return drafts;
+
+        case "application-withdrawn": {
+            // Pro withdrew their application → tell the clinic team so they
+            // don't keep that candidate in their decision pipeline. The pro
+            // is the actor; no row written back to them.
+            const clinicRecipients = await clinicRecipientsExcludingActor(detail.clinicId, undefined);
+            for (const sub of clinicRecipients) {
+                drafts.push({
+                    recipientSub: sub,
+                    type: "application_withdrawn",
+                    title: `${proName} withdrew their application`,
+                    body: shiftLine || undefined,
+                    actorName: proName,
+                    deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
+                    subjectType: "application",
+                    subjectId: detail.applicationId,
+                    clinicId: detail.clinicId,
+                    jobId: detail.jobId,
+                });
+            }
+            return drafts;
+        }
+
+        case "job-deleted": {
+            // Clinic removed a job posting → tell every pro who had skin in
+            // the game (active application OR pending invite). The handler
+            // that deleted the job passes the recipient sub lists in the
+            // event detail so this consumer doesn't re-query the DB.
+            const applicantSubs: string[] = Array.isArray(detail.applicantSubs)
+                ? detail.applicantSubs.filter((s: unknown): s is string => typeof s === "string")
+                : [];
+            const inviteeSubs: string[] = Array.isArray(detail.inviteeSubs)
+                ? detail.inviteeSubs.filter((s: unknown): s is string => typeof s === "string")
+                : [];
+            // De-dupe — a pro could be both an applicant and an invitee.
+            const recipients = Array.from(new Set([...applicantSubs, ...inviteeSubs]));
+            for (const sub of recipients) {
+                drafts.push({
+                    recipientSub: sub,
+                    type: "job_deleted",
+                    title: `${clinicName} cancelled a job posting`,
+                    body: shiftLine || undefined,
+                    actorName: clinicName,
+                    // Job is gone — there's no detail page to deep-link to.
+                    // Pending tab is the natural landing spot (the row will
+                    // disappear from there once the pro's app cache refreshes).
+                    deepLink: PROFESSIONAL_DASHBOARD_PENDING,
+                    subjectType: "job",
+                    subjectId: detail.jobId,
+                });
+            }
+            return drafts;
+        }
+
+        case "profile-updated": {
+            // Pro updated a material field on their profile (rate / role /
+            // license / name). The emitter passes the list of clinicIds with
+            // an active relationship to the pro (active applications + open
+            // invites); we fan each clinicId out to its team here.
+            const clinicIds: string[] = Array.isArray(detail.clinicIds)
+                ? detail.clinicIds.filter((s: unknown): s is string => typeof s === "string")
+                : [];
+            const changedFields: string[] = Array.isArray(detail.changedFields)
+                ? detail.changedFields.filter((s: unknown): s is string => typeof s === "string")
+                : [];
+            const summary = changedFields.length > 0
+                ? `Updated: ${changedFields.join(", ")}`
+                : undefined;
+            const seenSubs = new Set<string>();
+            for (const cid of clinicIds) {
+                // Pro is the actor — no clinic-side actor to exclude.
+                const teamSubs = await clinicRecipientsExcludingActor(cid, undefined);
+                for (const sub of teamSubs) {
+                    if (seenSubs.has(sub)) continue; // multi-clinic dedupe
+                    seenSubs.add(sub);
+                    drafts.push({
+                        recipientSub: sub,
+                        type: "profile_updated",
+                        title: `${proName} updated their profile`,
+                        body: summary,
+                        actorName: proName,
+                        // No clinic-side detail view for a pro's profile; land
+                        // on the dashboard so the user can locate the pro via
+                        // their existing relationships (apps / invites).
+                        deepLink: CLINIC_DASHBOARD,
+                        subjectType: "professional",
+                        subjectId: proSub,
+                        clinicId: cid,
+                    });
+                }
+            }
+            return drafts;
+        }
 
         // -------------------------------------------------------------------
         // Invitations — clinic invites pro, pro responds.
