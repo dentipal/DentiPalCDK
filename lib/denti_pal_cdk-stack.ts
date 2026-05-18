@@ -1676,9 +1676,15 @@ export class DentiPalCDKStack extends cdk.Stack {
         }));
 
         // 3. API Gateway Management API (To send messages back to connections)
-        // This policy allows the handler to send data to any connection within the API
+        // PostToConnection / DeleteConnection / GetConnection on the
+        // @connections/* path require BOTH `execute-api:ManageConnections`
+        // (the documented action) AND `execute-api:Invoke` (what the runtime
+        // actually checks against the @connections resource ARN — without it
+        // the Lambda gets an AccessDeniedException whose message confusingly
+        // names `execute-api:Invoke`, and the client never receives the
+        // conversationsResponse → inbox shows skeleton rows forever).
         webSocketChatHandler.addToRolePolicy(new iam.PolicyStatement({
-            actions: ['execute-api:ManageConnections'],
+            actions: ['execute-api:ManageConnections', 'execute-api:Invoke'],
             resources: [cdk.Arn.format({
                 service: 'execute-api',
                 resource: '*', // '*' scope for resource is standard for this action
@@ -3386,12 +3392,16 @@ export class DentiPalCDKStack extends cdk.Stack {
             environment: {
                 REGION: this.region,
                 NOTIFICATIONS_TABLE: notificationsTable.tableName,
+                // Needed by getClinicRecipientSubs() to fan out clinic-team
+                // notifications (one bell entry per team member).
+                CLINICS_TABLE: clinicsTable.tableName,
             },
             timeout: cdk.Duration.seconds(30),
             memorySize: 256,
         });
 
         notificationsTable.grantWriteData(eventToNotificationHandler);
+        clinicsTable.grantReadData(eventToNotificationHandler);
 
         // Third target on the same rule; EventBridge fans out independently
         // to email, chat, and notification consumers.
