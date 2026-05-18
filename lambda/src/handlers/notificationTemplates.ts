@@ -1,4 +1,19 @@
+import { DB_TO_DISPLAY_MAPPING } from "./professionalRoles";
+
 const APP_URL = process.env.APP_URL || "https://dentipal.com";
+
+function formatRole(role?: string): string {
+    if (!role) return "";
+    const trimmed = role.trim();
+    if (!trimmed) return "";
+    const mapped = DB_TO_DISPLAY_MAPPING[trimmed];
+    if (mapped) return mapped;
+    return trimmed
+        .split(/[_\s-]+/)
+        .filter(Boolean)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join(" ");
+}
 
 export interface ShiftContext {
     professionalName?: string;
@@ -37,7 +52,7 @@ function escapeHtml(s: string): string {
 
 function detailLines(ctx: ShiftContext): Array<[string, string]> {
     const rows: Array<[string, string]> = [];
-    if (ctx.role) rows.push(["Role", ctx.role]);
+    if (ctx.role) rows.push(["Role", formatRole(ctx.role)]);
     if (ctx.clinicName) rows.push(["Clinic", ctx.clinicName]);
     if (ctx.date) rows.push(["Date", ctx.date]);
     if (ctx.startTime && ctx.endTime) rows.push(["Time", `${ctx.startTime} – ${ctx.endTime}`]);
@@ -180,7 +195,7 @@ export function shiftScheduled(ctx: ShiftContext): RenderedEmail {
 }
 
 export function applicationRejected(ctx: ShiftContext): RenderedEmail {
-    const subject = `Application status update${ctx.role ? ` — ${ctx.role}` : ""}`;
+    const subject = `Application status update${ctx.role ? ` — ${formatRole(ctx.role)}` : ""}`;
     const intro = `${greeting(ctx.professionalName)} thank you for submitting your application. After careful consideration, the clinic has chosen to proceed with another candidate for this position. This decision often reflects scheduling fit and specific requirements rather than the quality of your profile.`;
     const { html, text } = layout({
         eyebrow: "Application update",
@@ -194,7 +209,7 @@ export function applicationRejected(ctx: ShiftContext): RenderedEmail {
 }
 
 export function inviteSent(ctx: ShiftContext): RenderedEmail {
-    const subject = `Invitation to apply${ctx.role ? ` — ${ctx.role}` : ""}${ctx.clinicName ? ` at ${ctx.clinicName}` : ""}`;
+    const subject = `Invitation to apply${ctx.role ? ` — ${formatRole(ctx.role)}` : ""}${ctx.clinicName ? ` at ${ctx.clinicName}` : ""}`;
     const intro = `${greeting(ctx.professionalName)} ${ctx.clinicName || "a clinic"} has identified you as a strong match for an upcoming shift and has extended a direct invitation to apply.`;
     const { html, text } = layout({
         eyebrow: "New invitation",
@@ -283,8 +298,8 @@ export function shiftCompleted(ctx: ShiftContext): RenderedEmail {
 
 export function applicationReceived(ctx: ShiftContext): RenderedEmail {
     const who = ctx.professionalName?.trim() || "A professional";
-    const subject = `New application received${ctx.role ? ` — ${ctx.role}` : ""}`;
-    const intro = `${who} has submitted an application for your ${ctx.role ? `${ctx.role} ` : ""}shift. Please review their profile and respond from the Action Needed view to keep the candidate engaged.`;
+    const subject = `New application received${ctx.role ? ` — ${formatRole(ctx.role)}` : ""}`;
+    const intro = `${who} has submitted an application for your ${ctx.role ? `${formatRole(ctx.role)} ` : ""}shift. Please review their profile and respond from the Action Needed view to keep the candidate engaged.`;
     const { html, text } = layout({
         eyebrow: "New application",
         headline: "A new application has been received",
