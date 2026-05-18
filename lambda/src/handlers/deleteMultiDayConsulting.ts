@@ -1,22 +1,25 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { 
-    DynamoDBDocumentClient, 
-    GetCommand, 
-    QueryCommand, 
-    UpdateCommand, 
-    DeleteCommand 
+import {
+    DynamoDBDocumentClient,
+    GetCommand,
+    QueryCommand,
+    UpdateCommand,
+    DeleteCommand
 } from "@aws-sdk/lib-dynamodb";
+import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils";
 import { corsHeaders } from "./corsHeaders";
 
 // --- Configuration and Initialization ---
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-JobApplications";
+const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE || "DentiPal-JobInvitations";
 
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
+const eb = new EventBridgeClient({ region: REGION });
 
 const MULTI_DAY_JOB_TYPE = "multi_day_consulting";
 
@@ -168,6 +171,34 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             await Promise.all(updatePromises);
         }
 
+        // 8b. Collect pros who deserve a heads-up before the row context is gone.
+        // Applicants we just cancelled + invitees with an open invitation row.
+        const applicantSubs = Array.from(new Set(
+            activeApplications
+                .map((a: Record<string, unknown>) => (typeof a.professionalUserSub === "string" ? a.professionalUserSub : ""))
+                .filter((s: string) => s !== "")
+        ));
+        let inviteeSubs: string[] = [];
+        try {
+            const invitesResponse = await ddbDoc.send(new QueryCommand({
+                TableName: JOB_INVITATIONS_TABLE,
+                KeyConditionExpression: "jobId = :jobId",
+                ExpressionAttributeValues: { ":jobId": jobId },
+            }));
+            const invitations = invitesResponse.Items || [];
+            inviteeSubs = Array.from(new Set(
+                invitations
+                    .filter((inv: Record<string, unknown>) => {
+                        const status = String(inv.invitationStatus || "").toLowerCase();
+                        return status !== "declined" && status !== "withdrawn";
+                    })
+                    .map((inv: Record<string, unknown>) => typeof inv.professionalUserSub === "string" ? inv.professionalUserSub : "")
+                    .filter((s: string) => s !== "")
+            ));
+        } catch (invErr) {
+            console.warn("[deleteMultiDayConsulting] invitations lookup failed (non-fatal):", (invErr as Error).message);
+        }
+
         // 9. Delete the job from the postings table
         const deleteJobCommand = new DeleteCommand({
             TableName: JOB_POSTINGS_TABLE,
@@ -177,6 +208,33 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         });
         await ddbDoc.send(deleteJobCommand);
+
+        // 9b. Tell affected pros the job is gone. Best-effort — deletion
+        // already succeeded; a publish failure is non-fatal.
+        if (applicantSubs.length > 0 || inviteeSubs.length > 0) {
+            try {
+                await eb.send(new PutEventsCommand({
+                    Entries: [{
+                        Source: "denti-pal.api",
+                        DetailType: "ShiftEvent",
+                        Detail: JSON.stringify({
+                            eventType: "job-deleted",
+                            actor: "clinic",
+                            clinicId: job.clinicId,
+                            jobId,
+                            applicantSubs,
+                            inviteeSubs,
+                            shiftDetails: {
+                                role: job.professional_role,
+                                jobType: job.job_type,
+                            },
+                        }),
+                    }],
+                }));
+            } catch (ebErr) {
+                console.warn("[deleteMultiDayConsulting] job-deleted publish failed (non-fatal):", (ebErr as Error).message);
+            }
+        }
 
         // 10. Return success
         return json(event, 200, {

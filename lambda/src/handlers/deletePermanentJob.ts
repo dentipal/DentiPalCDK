@@ -1,22 +1,25 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { 
-    DynamoDBDocumentClient, 
-    GetCommand, 
-    QueryCommand, 
-    UpdateCommand, 
-    DeleteCommand 
+import {
+    DynamoDBDocumentClient,
+    GetCommand,
+    QueryCommand,
+    UpdateCommand,
+    DeleteCommand
 } from "@aws-sdk/lib-dynamodb";
+import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils"; 
+import { extractUserFromBearerToken } from "./utils";
 import { corsHeaders } from "./corsHeaders";
 
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-JobApplications";
+const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE || "DentiPal-JobInvitations";
 
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
+const eb = new EventBridgeClient({ region: REGION });
 
 // Allowed groups
 const ALLOWED_GROUPS = new Set(["root", "clinicadmin", "clinicmanager"]);
@@ -146,6 +149,36 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             await Promise.all(updatePromises);
         }
 
+        // 6b. Collect pros to notify before we lose the row contexts.
+        // Applicants whose apps we just cancelled deserve a heads-up; so do
+        // any invitees with an open invitation row (they were waiting on a
+        // job that no longer exists).
+        const applicantSubs = Array.from(new Set(
+            activeApplications
+                .map((a: Record<string, unknown>) => (typeof a.professionalUserSub === "string" ? a.professionalUserSub : ""))
+                .filter((s: string) => s !== "")
+        ));
+        let inviteeSubs: string[] = [];
+        try {
+            const invitesResponse = await ddbDoc.send(new QueryCommand({
+                TableName: JOB_INVITATIONS_TABLE,
+                KeyConditionExpression: "jobId = :jobId",
+                ExpressionAttributeValues: { ":jobId": jobId },
+            }));
+            const invitations = invitesResponse.Items || [];
+            inviteeSubs = Array.from(new Set(
+                invitations
+                    .filter((inv: Record<string, unknown>) => {
+                        const status = String(inv.invitationStatus || "").toLowerCase();
+                        return status !== "declined" && status !== "withdrawn";
+                    })
+                    .map((inv: Record<string, unknown>) => typeof inv.professionalUserSub === "string" ? inv.professionalUserSub : "")
+                    .filter((s: string) => s !== "")
+            ));
+        } catch (invErr) {
+            console.warn("[deletePermanentJob] invitations lookup failed (non-fatal):", (invErr as Error).message);
+        }
+
         // 7. Delete Job
         const deleteCommand = new DeleteCommand({
             TableName: JOB_POSTINGS_TABLE,
@@ -155,6 +188,33 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             },
         });
         await ddbDoc.send(deleteCommand);
+
+        // 7b. Tell affected pros the job is gone. Best-effort — the deletion
+        // already succeeded; a publish failure is non-fatal.
+        if (applicantSubs.length > 0 || inviteeSubs.length > 0) {
+            try {
+                await eb.send(new PutEventsCommand({
+                    Entries: [{
+                        Source: "denti-pal.api",
+                        DetailType: "ShiftEvent",
+                        Detail: JSON.stringify({
+                            eventType: "job-deleted",
+                            actor: "clinic",
+                            clinicId: job.clinicId,
+                            jobId,
+                            applicantSubs,
+                            inviteeSubs,
+                            shiftDetails: {
+                                role: job.professional_role,
+                                jobType: job.job_type,
+                            },
+                        }),
+                    }],
+                }));
+            } catch (ebErr) {
+                console.warn("[deletePermanentJob] job-deleted publish failed (non-fatal):", (ebErr as Error).message);
+            }
+        }
 
         // 8. Response
         return json(event, 200, {

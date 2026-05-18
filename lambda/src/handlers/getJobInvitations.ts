@@ -191,17 +191,20 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
         const job = jobResponse.Items[0];
 
         // Availability gate — same rules as sendJobInvitations / createJobApplication.
-        // If the pro's current availability blocks this job (toggle off, weekday
-        // miss, blocked date, or schedule conflict with another scheduled job),
-        // skip the invite entirely so the pro never sees an invite they can't
-        // accept. Soft-fail on lookup misses so a transient blip never blanks
-        // the whole Invites tab.
+        // When the pro's current availability blocks this job (toggle off, weekday
+        // miss, blocked date, or schedule conflict), we KEEP the invite in the
+        // response and attach a `blockedReason` so the UI can render it as a
+        // disabled row with an explanation. Hiding it silently was misleading —
+        // the bell still shows "you were invited", so the Invites tab must too.
+        // Soft-fail on lookup misses so a transient blip never blanks the tab.
         const blockedReason = jobBlockedByAvailability(
           job,
           availability,
           scheduledOccurrences,
         );
-        if (blockedReason !== null) continue;
+        if (blockedReason !== null) {
+          invitation.blockedReason = blockedReason;
+        }
 
         invitation.jobTitle = job.job_title?.S || "Unknown Job Title";
         invitation.jobType = job.job_type?.S || "Unknown";
