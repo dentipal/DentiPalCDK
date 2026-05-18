@@ -91,6 +91,10 @@ import { handler as reportNoShowHandler } from "./handlers/reportNoShow";
 import { handler as listNoShowReportsHandler } from "./handlers/listNoShowReports";
 import { handler as reviewNoShowReportHandler } from "./handlers/reviewNoShowReport";
 
+// Clinic → professional ratings (one-way, gated on a completed shift).
+import { handler as submitProfessionalRatingHandler } from "./handlers/submitProfessionalRating";
+import { handler as getProfessionalRatingsHandler } from "./handlers/getProfessionalRatings";
+
 // updateCompletedShifts.ts is deprecated — kept on disk for one release as rollback safety,
 // but no longer wired into the router or the scheduled-task path.
 import { handler as getScheduledShiftsHandler } from "./handlers/getScheduledShifts";
@@ -370,6 +374,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         // Shift confirmation (clinic-driven post-shift attestation).
         "POST:/jobs/{jobId}/confirm-completion": confirmShiftCompletionHandler,
         "POST:/jobs/{jobId}/no-show": reportNoShowHandler,
+
+        // Clinic → professional ratings.
+        "POST:/professionals/{userSub}/ratings": submitProfessionalRatingHandler,
+        "GET:/professionals/{userSub}/ratings": getProfessionalRatingsHandler,
 
         // Admin no-show review queue.
         "GET:/admin/no-show-reports": listNoShowReportsHandler,
