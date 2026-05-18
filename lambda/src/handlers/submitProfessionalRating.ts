@@ -38,6 +38,24 @@ function getMethod(event: APIGatewayProxyEvent): string {
     return event.httpMethod || (event.requestContext as any)?.http?.method || "GET";
 }
 
+// The route is /professionals/{userSub}/ratings — pull the sub out of the path.
+// Falls back to a greedy {proxy+} match and finally to parsing the raw path so
+// it works under all the routing shapes API Gateway can present.
+function getProfessionalSubFromPath(event: APIGatewayProxyEvent): string | undefined {
+    if (event.pathParameters?.userSub) return event.pathParameters.userSub;
+    const proxy = event.pathParameters?.proxy;
+    if (proxy) {
+        const parts = proxy.split("/").filter(Boolean);
+        const idx = parts.indexOf("professionals");
+        if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
+    }
+    const raw = event.path || (event.requestContext as any)?.http?.path || "";
+    const segs = raw.split("/").filter(Boolean);
+    const idx = segs.findIndex((s: string) => s === "professionals");
+    if (idx >= 0 && segs[idx + 1]) return segs[idx + 1];
+    return undefined;
+}
+
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     if (getMethod(event) === "OPTIONS") {
         return { statusCode: 200, headers: corsHeaders(event), body: "" };
@@ -70,7 +88,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return json(event, 400, { error: "Invalid JSON body" });
     }
 
-    const professionalUserSub = (body.professionalUserSub || "").trim();
+    // userSub lives in the URL path; body field is accepted as a fallback for older callers.
+    const professionalUserSub =
+        (getProfessionalSubFromPath(event) || body.professionalUserSub || "").trim();
     let jobId = (body.jobId || "").trim();
     const clinicIdFromBody = (body.clinicId || "").trim();
     const ratingNum = typeof body.rating === "string" ? parseInt(body.rating, 10) : Number(body.rating);

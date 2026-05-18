@@ -206,6 +206,7 @@ export const handler = async (
       workLocationType: s(it.work_location_type),
       location: s(it.location) || s(it.addressLine1),
       fullAddress: s(it.fullAddress) || s(it.addressLine1),
+      locationUrl: s(it.locationUrl) || s(it.location_url),
       city: s(it.city),
       state: s(it.state),
       shiftDetails: s(it.shiftDetails),

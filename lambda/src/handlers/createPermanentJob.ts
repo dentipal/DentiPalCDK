@@ -64,6 +64,7 @@ interface ProfileData {
     clinicSoftware: string;
     freeParkingAvailable: boolean;
     parkingType: string;
+    locationUrl: string;
 }
 
 // --- Helpers ---
@@ -430,7 +431,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     freeParkingAvailable: p.free_parking_available ?? false,
                     parkingType: p.parking_type || "N/A",
                     practiceType: p.practiceType || p.practice_type || "General",
-                    primaryPracticeArea: p.primaryPracticeArea || p.primary_practice_area || "General Dentistry"
+                    primaryPracticeArea: p.primaryPracticeArea || p.primary_practice_area || "General Dentistry",
+                    locationUrl: p.locationUrl || p.location_url || ""
                 };
 
                 // Build job posting item
@@ -462,6 +464,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     parkingType: profileData.parkingType,
                     practiceType: profileData.practiceType,
                     primaryPracticeArea: profileData.primaryPracticeArea,
+                    // Denormalized exact Google Maps URL from the clinic
+                    // profile; kept fresh by cascadeClinicDataUpdate.
+                    ...(profileData.locationUrl && { locationUrl: profileData.locationUrl }),
                     // Work location is shared. `rate` is only attached for
                     // non-permanent jobs. `pay_type` is dropped entirely —
                     // permanent jobs ignore it; temp/multi-day flows use it

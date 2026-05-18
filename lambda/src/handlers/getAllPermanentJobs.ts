@@ -292,6 +292,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     state: job.state?.S || '',
                     zipCode: job.pincode?.S || ''
                 },
+                locationUrl: job.locationUrl?.S || job.location_url?.S || '',
                 contactInfo: {
                     email: job.contact_email?.S || '',
                     phone: job.contact_phone?.S || ''

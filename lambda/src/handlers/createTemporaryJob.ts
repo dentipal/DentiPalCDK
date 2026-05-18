@@ -58,6 +58,7 @@ interface ProfileData {
     clinicSoftware: string;
     freeParkingAvailable: boolean;
     parkingType: string;
+    locationUrl: string;
 }
 
 // --- Helpers ---
@@ -329,7 +330,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 freeParkingAvailable: p.free_parking_available ?? false,
                 parkingType: p.parking_type || "N/A",
                 practiceType: p.practice_type || p.practiceType || "General",
-                primaryPracticeArea: p.primary_practice_area || p.primaryPracticeArea || "General Dentistry"
+                primaryPracticeArea: p.primary_practice_area || p.primaryPracticeArea || "General Dentistry",
+                locationUrl: p.location_url || p.locationUrl || ""
             };
 
             // Build item (No {S:}, {N:} needed for DocumentClient)
@@ -365,6 +367,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 parkingType: profileData.parkingType,
                 practiceType: profileData.practiceType,
                 primaryPracticeArea: profileData.primaryPracticeArea,
+                // Denormalized Google Maps URL — pin the clinic chose at
+                // Add Clinic time. Kept fresh by cascadeClinicDataUpdate on
+                // future profile edits.
+                ...(profileData.locationUrl && { locationUrl: profileData.locationUrl }),
                 
                 // Work location
                 ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
