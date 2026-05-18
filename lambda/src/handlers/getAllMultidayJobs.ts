@@ -165,6 +165,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             city: job.city?.S || '',
             state: job.state?.S || '',
             pincode: job.pincode?.S || '',
+            locationUrl: job.locationUrl?.S || job.location_url?.S || '',
             bookingOutPeriod: job.bookingOutPeriod?.S || "immediate",
             clinicSoftware: job.clinicSoftware?.S || "Unknown",
             

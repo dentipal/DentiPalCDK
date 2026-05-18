@@ -209,7 +209,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     state: str(job.state),
                     zipCode: str(job.pincode),
                 },
-            
+                // Clinic-supplied exact Google Maps URL. Denormalized onto
+                // each JobPosting record at create time and kept fresh by the
+                // cascade Lambda. Surfaced flat so the professional dashboard
+                // can wire the pin to the clinic's chosen pin.
+                locationUrl: str(job.locationUrl) || str(job.location_url),
                 contactInfo: {
                     email: str(job.contact_email),
                     phone: str(job.contact_phone),
