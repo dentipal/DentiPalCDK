@@ -955,10 +955,19 @@ export async function executeTool(
           pathParameters: { clinicId: call.input.clinicId, proxy: "open-shifts" },
           auth,
         });
-        // Apply dayOfWeek / dateFrom / dateTo filter centrally.
+        // Default dateFrom to today so past-dated postings don't surface as
+        // "open". The underlying handler considers any active, unfilled
+        // posting as open regardless of date — but a clinic asking "open
+        // shifts" or "open shifts on monday" means upcoming, not historical.
+        // Respect an explicit dateFrom if the model passed one (e.g. user
+        // said "open shifts last week"). For multi-day shifts, the filter
+        // already keeps the row if ANY of its dates falls in range, so a
+        // shift with some past + some future dates still appears.
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const effectiveDateFrom = call.input.dateFrom || todayIso;
         const filtered = filterShiftsByDayAndDateRange(r, {
           dayOfWeek: call.input.dayOfWeek,
-          dateFrom: call.input.dateFrom,
+          dateFrom: effectiveDateFrom,
           dateTo: call.input.dateTo,
         });
         if (filtered.status >= 400) {
