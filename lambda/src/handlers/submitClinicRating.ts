@@ -14,7 +14,10 @@ import { corsHeaders } from "./corsHeaders";
 const REGION = process.env.REGION || "us-east-1";
 const CLINIC_RATINGS_TABLE = process.env.CLINIC_RATINGS_TABLE!;
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE!;
-const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE!;
+// Clinics table is keyed by just clinicId — that's where we denormalize avgRating.
+// ClinicProfiles has a composite key (clinicId + userSub) so it's not suitable
+// for a single-row aggregate.
+const CLINICS_TABLE = process.env.CLINICS_TABLE!;
 const PROFESSIONAL_PROFILES_TABLE = process.env.PROFESSIONAL_PROFILES_TABLE!;
 
 const dynamodb = new DynamoDBClient({ region: REGION });
@@ -165,12 +168,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return json(event, 500, { error: "Save failed" });
     }
 
-    // --- Denormalize avg/count onto ClinicProfiles ---
+    // --- Denormalize avg/count onto Clinics (the only single-PK clinic table) ---
     let avgRating: number | undefined;
     let ratingCount: number | undefined;
     try {
         const updateRes = await dynamodb.send(new UpdateItemCommand({
-            TableName: CLINIC_PROFILES_TABLE,
+            TableName: CLINICS_TABLE,
             Key: { clinicId: { S: clinicId } },
             UpdateExpression:
                 "SET ratingSum = if_not_exists(ratingSum, :zero) + :r, " +
@@ -190,7 +193,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             ratingCount = count;
             avgRating = Math.round((sum / count) * 100) / 100;
             await dynamodb.send(new UpdateItemCommand({
-                TableName: CLINIC_PROFILES_TABLE,
+                TableName: CLINICS_TABLE,
                 Key: { clinicId: { S: clinicId } },
                 UpdateExpression: "SET avgRating = :a",
                 ExpressionAttributeValues: { ":a": { N: String(avgRating) } },

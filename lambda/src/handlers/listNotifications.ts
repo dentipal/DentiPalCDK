@@ -10,8 +10,8 @@ import { corsHeaders } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 import { ddb, NOTIFICATIONS_TABLE, itemToRecord } from "./notifications";
 
-const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
+const DEFAULT_LIMIT = 200;
+const MAX_LIMIT = 500;
 
 const json = (event: APIGatewayProxyEvent, statusCode: number, body: object): APIGatewayProxyResult => ({
     statusCode,
@@ -77,14 +77,14 @@ export const handler = async (
 
         // Best-effort unread count: query for unread items only, but cap the
         // count so a noisy user doesn't blow up Dynamo capacity. The frontend
-        // only renders "99+" beyond 99 anyway.
+        // renders the exact number up to 999, then "999+" beyond.
         const unreadResult = await ddb.send(new QueryCommand({
             TableName: NOTIFICATIONS_TABLE,
             KeyConditionExpression: "userSub = :u",
             ExpressionAttributeValues: { ":u": { S: userSub } },
             FilterExpression: "attribute_not_exists(readAt)",
             Select: "COUNT",
-            Limit: 100,
+            Limit: 1000,
         }));
         const unreadCount = unreadResult.Count || 0;
 
