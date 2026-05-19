@@ -29,6 +29,7 @@ interface UpdateFields {
     description?: string;
     specialties?: string[];
     business_hours?: Record<string, any>;
+    location_url?: string;
     [key: string]: any;
 }
 
@@ -48,7 +49,8 @@ const ALLOWED_FIELDS: ReadonlyArray<keyof UpdateFields> = [
     "clinic_name", "city", "state", "website", "primary_contact_first_name",
     "primary_contact_last_name", "practice_type", "primary_practice_area",
     "number_of_operatories", "booking_out_period", "free_parking_available",
-    "parking_type", "description", "specialties", "business_hours"
+    "parking_type", "description", "specialties", "business_hours",
+    "location_url"
 ];
 
 // Helper to build JSON responses with shared CORS

@@ -39,6 +39,7 @@ const transformBody = (body: any): any => {
         notes: "notes",
         parkingCost: "parking_cost",
         website: "website",
+        locationUrl: "location_url",
         dentalAssociation: "dental_association",
         addressLine1: "addressLine1",
         city: "city",
@@ -163,7 +164,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             "num_hygienists", "number_of_operatories", "parking_type", "parking_cost", "practice_type",
             "primary_contact_first_name", "primary_contact_last_name", "primary_practice_area",
             "software_used", "state", "notes", "website", "dental_association",
-            "clinic_email", "zip_code", "addressLine1", "office_image_key"
+            "clinic_email", "zip_code", "addressLine1", "office_image_key",
+            "location_url"
         ];
 
         const validUpdateFields: any = {};

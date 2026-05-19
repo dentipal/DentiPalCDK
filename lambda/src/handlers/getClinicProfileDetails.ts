@@ -58,6 +58,7 @@ interface DynamoDBClinicItem {
     insurance_plans_accepted?: AttributeValue; // SS
     createdBy?: AttributeValue; // S
     website?: AttributeValue; // S
+    location_url?: AttributeValue; // S — clinic-supplied Google Maps URL
     dental_association?: AttributeValue; // S
     notes?: AttributeValue; // S
     description?: AttributeValue; // S (notes may be stored as description)
@@ -99,6 +100,7 @@ interface ClinicProfile {
     insurancePlansAccepted: string[];
     createdBy: string;
     website: string;
+    locationUrl: string;
     dentalAssociation: string;
     notes: string;
 }
@@ -172,6 +174,7 @@ const unmarshallClinic = (clinic: DynamoDBClinicItem | undefined): ClinicProfile
         insurancePlansAccepted: strArr(clinic.insurance_plans_accepted),
         createdBy: str(clinic.createdBy),
         website: str(clinic.website),
+        locationUrl: str(clinic.location_url),
         dentalAssociation: str(clinic.dental_association),
         notes: str(clinic.notes) || str(clinic.description),
     };

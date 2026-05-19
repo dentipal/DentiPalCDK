@@ -915,6 +915,28 @@ export class DentiPalCDKStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
         });
 
+        // Clinic-rates-professional ratings. One row per (professional, clinic, job)
+        // — dedup is enforced by the (PK,SK) primary key. SK shape `clinicId#jobId`
+        // lets the submit handler use a plain `attribute_not_exists` condition.
+        // The submit handler also writes a denormalized `avgRating`/`ratingCount`
+        // pair onto the matching ProfessionalProfiles row so reads don't need a
+        // second query.
+        const professionalRatingsTable = new dynamodb.Table(this, 'ProfessionalRatingsTable', {
+            tableName: 'DentiPal-V5-ProfessionalRatings',
+            partitionKey: { name: 'professionalUserSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'clinicJobKey', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+        });
+        // "Ratings this clinic has given" — used to drive the ApplicantCard
+        // "already rated" state and to list a clinic's history.
+        professionalRatingsTable.addGlobalSecondaryIndex({
+            indexName: 'clinicId-createdAt-index',
+            partitionKey: { name: 'clinicId', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+            projectionType: dynamodb.ProjectionType.ALL,
+        });
+
         // Notification preferences (smart-notifications feature).
         // PK: userSub (Cognito sub). One row per user. Defaults are all-true so
         // a missing row = "send everything" — the get/update handlers backfill on read.
@@ -1274,7 +1296,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             clinicProfilesTable, clinicFavoritesTable, clinicsTable, connectionsTable,
             conversationsTable, feedbackTable, jobApplicationsTable, jobInvitationsTable,
             jobNegotiationsTable, jobPostingsTable, messagesTable,
-            professionalProfilesTable, referralsTable, userAddressesTable,
+            professionalProfilesTable, professionalRatingsTable, referralsTable, userAddressesTable,
             userClinicAssignmentsTable, jobPromotionsTable,
             leadsTable, leadActivityTable, bansTable,
             passwordOtpTable, sessionInvalidationsTable,
@@ -1417,6 +1439,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
                 MESSAGES_TABLE: messagesTable.tableName,
                 PROFESSIONAL_PROFILES_TABLE: professionalProfilesTable.tableName,
+                PROFESSIONAL_RATINGS_TABLE: professionalRatingsTable.tableName,
                 REFERRALS_TABLE: referralsTable.tableName,
                 USER_ADDRESSES_TABLE: userAddressesTable.tableName,
                 USER_CLINIC_ASSIGNMENTS_TABLE: userClinicAssignmentsTable.tableName,

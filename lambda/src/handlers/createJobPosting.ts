@@ -98,6 +98,7 @@ interface ClinicProfileDetails {
     parkingType: string;
     practiceType: string;
     primaryPracticeArea: string;
+    locationUrl: string;
 }
 
 // --- 4. Validation Functions ---
@@ -357,7 +358,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             freeParkingAvailable: clinicProfile.free_parking_available ?? false,
             parkingType: clinicProfile.parking_type || "N/A",
             practiceType: clinicProfile.practice_type || "General",
-            primaryPracticeArea: clinicProfile.primary_practice_area || "General Dentistry"
+            primaryPracticeArea: clinicProfile.primary_practice_area || "General Dentistry",
+            locationUrl: clinicProfile.location_url || clinicProfile.locationUrl || ""
         };
 
         // 8. Build DynamoDB item (using plain Objects, DocumentClient handles marshalling)
@@ -392,6 +394,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             parkingType: profileDetails.parkingType,
             practiceType: profileDetails.practiceType,
             primaryPracticeArea: profileDetails.primaryPracticeArea,
+            // Denormalized exact Google Maps URL — pin from the clinic profile.
+            ...(profileDetails.locationUrl && { locationUrl: profileDetails.locationUrl }),
             // Work location & pay
             ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
             ...(jobData.pay_type && { pay_type: jobData.pay_type }),
