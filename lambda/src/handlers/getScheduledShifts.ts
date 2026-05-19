@@ -205,6 +205,7 @@ export const handler = async (
 
         status: app.applicationStatus?.S || "Not specified",
         clinicId: clinicId,
+        fromInvitation: Boolean(app.fromInvitation?.BOOL),
       };
     });
 

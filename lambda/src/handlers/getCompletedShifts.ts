@@ -20,6 +20,7 @@ import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
 // --- Configuration ---
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE!; // Use Env Var
+const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
 
 const dynamodb = new DynamoDBClient({ region: REGION });
 
@@ -142,6 +143,32 @@ export const handler = async (
       const bKey = Array.isArray(b.dates) && b.dates[0] ? b.dates[0] : b.startTime || "";
       return String(aKey).localeCompare(String(bKey));
     });
+
+    // 3b. Enrich each completed posting with `fromInvitation` by looking up
+    //     the hire's application row. JobPostings doesn't store this flag —
+    //     it lives on JobApplications (set in respondToInvitation.ts when a
+    //     pro accepts/negotiates an invite). We query by jobId and pick the
+    //     application that became the hire (scheduled/completed/accepted).
+    if (JOB_APPLICATIONS_TABLE && jobs.length > 0) {
+      await Promise.all(jobs.map(async (job: any) => {
+        if (!job.jobId || job.jobId === "No jobId") return;
+        try {
+          const appsRes = await dynamodb.send(new QueryCommand({
+            TableName: JOB_APPLICATIONS_TABLE,
+            KeyConditionExpression: "jobId = :jid",
+            ExpressionAttributeValues: { ":jid": { S: job.jobId } },
+          }));
+          const hire = (appsRes.Items || []).find((it) => {
+            const s = ((it.applicationStatus as any)?.S || "").toLowerCase();
+            return s === "scheduled" || s === "completed" || s === "accepted";
+          });
+          job.fromInvitation = Boolean((hire?.fromInvitation as any)?.BOOL);
+        } catch (joinErr) {
+          // Non-fatal — leave fromInvitation undefined; UI hides the badge.
+          console.warn(`[getCompletedShifts] fromInvitation lookup failed for jobId=${job.jobId}:`, (joinErr as Error)?.message);
+        }
+      }));
+    }
 
     // Additive: refresh address fields on each completed job with the live
     // Clinics-table values. DB rows are NOT mutated; on failure we log and
