@@ -217,6 +217,7 @@ export const handler = async (event: any) => {
           availability: str(item.availability),
           notes: str(item.notes),
           acceptedRate: num(item.acceptedRate),
+          fromInvitation: bool(item.fromInvitation) === true,
         };
 
         // ----- Fetch Job Details -----
