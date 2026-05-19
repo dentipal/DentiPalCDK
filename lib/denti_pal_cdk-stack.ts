@@ -669,6 +669,7 @@ import * as eventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as bedrock from 'aws-cdk-lib/aws-bedrock';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as path from 'path';
 
 export class DentiPalCDKStack extends cdk.Stack {
@@ -884,6 +885,23 @@ export class DentiPalCDKStack extends cdk.Stack {
             indexName: 'connectionId-index',
             partitionKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
             projectionType: dynamodb.ProjectionType.ALL,
+        });
+
+        // 4b. DentiPal-ChatMessages — persistent transcript log for the
+        // user-facing chat history feature (single continuous thread per user).
+        // Separate from AgentCore Memory (which holds compressed summaries for
+        // the AI) and from ChatConnections (which holds 15-min session state).
+        //
+        // Layout: HASH=userSub, RANGE=ts (ISO-8601 ms, lexicographic order
+        // matches chronological order). Query descending + Limit gives
+        // efficient pagination for the "load older messages on scroll up"
+        // pattern. One PutItem per chat turn (user + assistant = 2 writes).
+        const chatMessagesTable = new dynamodb.Table(this, 'ChatMessagesTable', {
+            tableName: 'DentiPal-V5-ChatMessages',
+            partitionKey: { name: 'userSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'ts', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
         });
 
         // 5. DentiPal-Conversations (Used by WebSocket Handler)
@@ -1322,6 +1340,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             passwordOtpTable, sessionInvalidationsTable,
             notificationPreferencesTable,
             notificationsTable,
+            chatMessagesTable,
         ];
 
         // ========================================================================
@@ -1435,6 +1454,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 APP_URL: 'https://dentipal.com',
                 NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
                 NOTIFICATIONS_TABLE: notificationsTable.tableName,
+                CHAT_MESSAGES_TABLE: chatMessagesTable.tableName,
                 SES_REGION: this.region,
                 SES_TO: 'shashitest2004@gmail.com',     // Updated per your env variables
                 SMS_TOPIC_ARN: `arn:aws:sns:${this.region}:${this.account}:DentiPal-SMS-Notifications`, // Dynamic construction
@@ -1771,6 +1791,25 @@ export class DentiPalCDKStack extends cdk.Stack {
             autoDeploy: true,
         });
 
+        // --- Custom domain: wss://ws.dentipal.com ---
+        const wsDomainCertArn = 'arn:aws:acm:us-east-1:489502444760:certificate/8aff342e-17de-4fda-affc-c5edaa3f490a';
+
+        const wsDomain = new apigwv2.DomainName(this, 'WsCustomDomain', {
+            domainName: 'ws.dentipal.com',
+            certificate: acm.Certificate.fromCertificateArn(this, 'WsDomainCert', wsDomainCertArn),
+        });
+
+        new apigwv2.ApiMapping(this, 'WsApiMapping', {
+            api: webSocketApi,
+            domainName: wsDomain,
+            stage: webSocketStage,
+        });
+
+        new cdk.CfnOutput(this, 'WsCustomDomainTarget', {
+            value: wsDomain.regionalDomainName,
+            description: 'Use this as the value for the ws.dentipal.com CNAME record',
+        });
+
         // ========================================================================
         // 6a. Bedrock AgentCore + chatMessage WebSocket route (Phase 1)
         //
@@ -1862,6 +1901,14 @@ export class DentiPalCDKStack extends cdk.Stack {
         // preview/confirm_apply_to_job and preview/confirm_respond_invitation
         // pairs that have been replaced by single-shot apply_to_job and
         // respond_invitation respectively.
+        // confirm_* tools are intentionally NOT in this list. The agent only
+        // calls preview_*, which renders a confirm card; the user clicks
+        // Submit, which sends a `confirmAction` frame that bypasses Bedrock
+        // and runs the confirm_* tool directly. Exposing confirm_* to the
+        // model lets it skip the user-confirm step (call preview AND confirm
+        // in the same turn) — observed 2026-05-14 with confirm_accept_professional.
+        // The toolExecutor switch still handles every confirm_* case for the
+        // confirmAction shortcut path.
         const PRO_V1_FUNCTIONS = [
             // search / info
             'search_jobs_near_me',
@@ -1874,41 +1921,25 @@ export class DentiPalCDKStack extends cdk.Stack {
             // Single-shot writes (no preview/confirm pair).
             'apply_to_job',
             'respond_invitation',
-            // Counter-offer preview/confirm pair — rates need a review step.
+            // Preview-only — confirm fires from the user's Submit click.
             'preview_negotiate',
-            'confirm_negotiate',
-            // Withdraw an application.
             'preview_withdraw_application',
-            'confirm_withdraw_application',
-            // Post-shift attestation (triggers payment processing).
             'preview_attest_completed_shift',
-            'confirm_attest_completed_shift',
-            // Self-service profile / address / preferences edits.
             'preview_update_my_profile',
-            'confirm_update_my_profile',
             'preview_update_home_address',
-            'confirm_update_home_address',
             'preview_update_notification_preferences',
-            'confirm_update_notification_preferences',
-            // Feedback + referrals.
             'preview_submit_feedback',
-            'confirm_submit_feedback',
             'preview_send_referral',
-            'confirm_send_referral',
+            // Escape hatch — analytics/diagnostic/cross-cut only. See ddbQueryTool.ts.
+            'query_ddb_table',
         ];
-        // Clinic agent tool list. All available clinic functions are enabled
-        // (47/50 under the APIs-per-Agent quota).
+        // Clinic agent tool list. confirm_* tools are deliberately omitted
+        // (see comment above PRO_V1_FUNCTIONS). They still exist in the
+        // toolExecutor switch — they're called by the confirmAction shortcut
+        // when the user clicks Submit, which never goes through Bedrock.
         const CLINIC_V1_FUNCTIONS = [
             // info / lookups
             'get_my_clinics',
-            // get_action_needed intentionally REMOVED — it returned a flat
-            // applications array with no profile join and no byJobId grouping,
-            // which the agent kept preferring (via the legacy "what needs my
-            // attention" intent), causing the chat widget to fall back to the
-            // unenriched flat renderer (no name, no Accept / Decline buttons).
-            // list_applicants_for_job (without a jobId) covers the same intent
-            // with profile enrichment + the byJobId shape the widget needs.
-            // 'get_action_needed',
             'list_applicants_for_job',
             'get_professional_info',
             'get_open_shifts',
@@ -1917,50 +1948,28 @@ export class DentiPalCDKStack extends cdk.Stack {
             'get_job_details',
             'get_clinic_favorites',
             'search_professionals',
-            // post temporary / consulting / permanent jobs
+            // Preview-only — confirm fires from the user's Submit click.
             'preview_post_temporary_job',
-            'confirm_post_temporary_job',
             'preview_post_consulting_job',
-            'confirm_post_consulting_job',
             'preview_post_permanent_job',
-            'confirm_post_permanent_job',
-            // accept / reject / negotiate / report-no-show on applicants
             'preview_accept_professional',
-            'confirm_accept_professional',
             'preview_reject_professional',
-            'confirm_reject_professional',
             'preview_negotiate',
-            'confirm_negotiate',
             'preview_mark_shift_completed',
-            'confirm_mark_shift_completed',
             'preview_report_no_show',
-            'confirm_report_no_show',
-            // edit / cancel posted jobs
             'preview_edit_job',
-            'confirm_edit_job',
             'preview_cancel_job',
-            'confirm_cancel_job',
-            // invitations to specific pros
             'preview_send_invitations',
-            'confirm_send_invitations',
-            // favorites + team management
             'preview_add_clinic_favorite',
-            'confirm_add_clinic_favorite',
             'preview_remove_clinic_favorite',
-            'confirm_remove_clinic_favorite',
             'preview_invite_team_member',
-            'confirm_invite_team_member',
             'preview_update_team_member',
-            'confirm_update_team_member',
             'preview_remove_team_member',
-            'confirm_remove_team_member',
-            // clinic-profile / notifications / feedback
             'preview_update_clinic_profile',
-            'confirm_update_clinic_profile',
             'preview_update_notification_preferences',
-            'confirm_update_notification_preferences',
             'preview_submit_feedback',
-            'confirm_submit_feedback',
+            // Escape hatch — analytics/diagnostic/cross-cut only. See ddbQueryTool.ts.
+            'query_ddb_table',
         ];
 
         const ACTION_GROUP_CHUNK_SIZE = 10;
@@ -1998,8 +2007,9 @@ export class DentiPalCDKStack extends cdk.Stack {
                     shiftSpeciality: STR('OPTIONAL. Specialty filter. Only pass if user mentioned one.'),
                     minRate: NUM('OPTIONAL. Minimum rate. Only pass if user specified.'),
                     maxRate: NUM('OPTIONAL. Maximum rate. Only pass if user specified.'),
-                    dateFrom: STR('OPTIONAL. ISO date lower bound. Only pass if user specified a date range.'),
-                    dateTo: STR('OPTIONAL. ISO date upper bound.'),
+                    dateFrom: STR('OPTIONAL. ISO date lower bound (YYYY-MM-DD). Only pass if user specified a date range.'),
+                    dateTo: STR('OPTIONAL. ISO date upper bound (YYYY-MM-DD).'),
+                    dayOfWeek: STR('OPTIONAL. Restrict to a weekday: mon|tue|wed|thu|fri|sat|sun (or full names: monday, tuesday, etc.). Use for queries like "jobs on Monday". Server filters; do NOT filter results yourself.'),
                     assistedHygiene: BOOL('OPTIONAL. Only if user asked for assisted-hygiene-only.'),
                     limit: P('integer', 'OPTIONAL. Max results (default 20, max 50).'),
                 },
@@ -2053,11 +2063,27 @@ export class DentiPalCDKStack extends cdk.Stack {
                 },
             },
             { name: 'get_job_details', description: 'Get full details for a job by jobId.', parameters: { jobId: STR('Job UUID', true) } },
-            { name: 'get_my_applications', description: 'List the professional\'s applications and statuses.', parameters: {} },
-            { name: 'get_my_invitations', description: 'List pending clinic invitations.', parameters: {} },
+            { name: 'get_my_applications', description: 'List the professional\'s applications and statuses. Optional dayOfWeek / dateFrom / dateTo filter by the underlying shift\'s date. Server filters.', parameters: {
+                dayOfWeek: STR('OPTIONAL. mon|tue|wed|thu|fri|sat|sun (or full weekday name). Use for "applications for Monday\'s shifts".'),
+                dateFrom: STR('OPTIONAL. Inclusive YYYY-MM-DD lower bound for the shift date.'),
+                dateTo: STR('OPTIONAL. Inclusive YYYY-MM-DD upper bound for the shift date.'),
+            } },
+            { name: 'get_my_invitations', description: 'List pending clinic invitations. Optional dayOfWeek / dateFrom / dateTo filter by the invited shift\'s date. Server filters.', parameters: {
+                dayOfWeek: STR('OPTIONAL. mon|tue|wed|thu|fri|sat|sun. Use for "invitations for Monday".'),
+                dateFrom: STR('OPTIONAL. Inclusive YYYY-MM-DD lower bound.'),
+                dateTo: STR('OPTIONAL. Inclusive YYYY-MM-DD upper bound.'),
+            } },
             { name: 'get_my_negotiations', description: 'List the pro\'s open negotiations.', parameters: {} },
-            { name: 'get_scheduled_shifts', description: 'List the professional\'s accepted upcoming shifts. No parameters — the pro\'s own applications with status="accepted" or "scheduled" are returned.', parameters: {} },
-            { name: 'get_completed_shifts', description: 'List the professional\'s completed shifts. No parameters — returns the pro\'s own completed applications.', parameters: {} },
+            { name: 'get_scheduled_shifts', description: 'List the professional\'s accepted upcoming shifts. Optional dayOfWeek / dateFrom / dateTo filter by shift date. Server filters.', parameters: {
+                dayOfWeek: STR('OPTIONAL. mon|tue|wed|thu|fri|sat|sun (full names also fine). Use for "scheduled shifts for Monday".'),
+                dateFrom: STR('OPTIONAL. Inclusive YYYY-MM-DD lower bound.'),
+                dateTo: STR('OPTIONAL. Inclusive YYYY-MM-DD upper bound.'),
+            } },
+            { name: 'get_completed_shifts', description: 'List the professional\'s completed shifts. Optional dayOfWeek / dateFrom / dateTo filter by shift date. Server filters.', parameters: {
+                dayOfWeek: STR('OPTIONAL. mon|tue|wed|thu|fri|sat|sun.'),
+                dateFrom: STR('OPTIONAL. Inclusive YYYY-MM-DD lower bound.'),
+                dateTo: STR('OPTIONAL. Inclusive YYYY-MM-DD upper bound.'),
+            } },
             // --- response: apply ---
             {
                 name: 'preview_apply_to_job',
@@ -2293,6 +2319,35 @@ export class DentiPalCDKStack extends cdk.Stack {
                     message: STR('Message'),
                 },
             },
+            // ESCAPE HATCH — see ddbQueryTool.ts. Used only when a narrow tool
+            // doesn't fit (analytics, diagnostic lookups, cross-cut filters).
+            // Server forces auth scoping; the model cannot read another user's
+            // data. Keep description IDENTICAL to QUERY_DDB_TABLE in toolSchemas.ts.
+            {
+                name: 'query_ddb_table',
+                description:
+                    "FALLBACK reader for analytics / diagnostic / cross-cut questions the narrow tools don't cover " +
+                    "(e.g., 'how many applications did I make last month', 'look up application by id'). " +
+                    'ALWAYS prefer narrow tools (get_my_applications, get_scheduled_shifts, etc.) when one fits. ' +
+                    'NEVER use for writes. Allowed tables: JobPostings, JobApplications, JobInvitations, ' +
+                    'JobNegotiations, ProfessionalProfiles, ClinicProfiles. Server FORCES auth scoping. ' +
+                    'op = query (multiple rows) or getItem (single row).',
+                parameters: {
+                    table: STR('One of: JobPostings, JobApplications, JobInvitations, JobNegotiations, ProfessionalProfiles, ClinicProfiles. Omit the DentiPal-V5- prefix.', true),
+                    op: STR('"query" or "getItem".', true),
+                    indexName: STR('OPTIONAL GSI name. Tool usually infers from keyName.'),
+                    keyName: STR('Partition key attribute. Per-table allow-list; the tool returns the allowed list if you guess wrong.', true),
+                    keyValue: STR('Partition key value.', true),
+                    sortKeyName: STR('OPTIONAL sort-key attribute.'),
+                    sortKeyValue: STR('OPTIONAL sort-key value.'),
+                    sortKeyValueEnd: STR('OPTIONAL end value when sortKeyOp="between".'),
+                    sortKeyOp: STR('OPTIONAL: "=" | "begins_with" | ">" | ">=" | "<" | "<=" | "between".'),
+                    filterStatus: STR('OPTIONAL filter on item.status.'),
+                    filterDateFrom: STR('OPTIONAL inclusive lower bound on item.date (YYYY-MM-DD).'),
+                    filterDateTo: STR('OPTIONAL inclusive upper bound on item.date (YYYY-MM-DD).'),
+                    limit: NUM('OPTIONAL 1-50, default 25.'),
+                },
+            },
         ];
 
         // -------- Clinic agent function schemas --------
@@ -2300,9 +2355,24 @@ export class DentiPalCDKStack extends cdk.Stack {
             // --- info ---
             { name: 'get_my_clinics', description: 'List clinics the current user manages. Use BEFORE post_*_job.', parameters: {} },
             { name: 'get_action_needed', description: 'Returns all pending applicants and open negotiations across a clinic\'s job postings. Use this for "recent applicants", "pending applicants", "what needs my attention", "what\'s pending". Pass the clinicId (auto-pick the first if the user manages only one).', parameters: { clinicId: STR('Clinic UUID', true) } },
-            { name: 'get_open_shifts', description: 'List upcoming unfilled shifts for a clinic.', parameters: { clinicId: STR('Clinic UUID', true) } },
-            { name: 'get_scheduled_shifts', description: 'List accepted, future shifts for a clinic.', parameters: { clinicId: STR('Optional clinic filter') } },
-            { name: 'get_completed_shifts', description: 'List completed shifts for a clinic.', parameters: { clinicId: STR('Optional clinic filter') } },
+            { name: 'get_open_shifts', description: 'List upcoming unfilled shifts for a clinic. Use dayOfWeek for "shifts on Monday/Tuesday/..." queries; use dateFrom/dateTo for "shifts next week" style queries. Server filters; do NOT filter results yourself.', parameters: {
+                clinicId: STR('Clinic UUID', true),
+                dayOfWeek: STR('OPTIONAL. Restrict to one weekday. Accepts mon|tue|wed|thu|fri|sat|sun (or full names: monday, tuesday, etc.). Case-insensitive.'),
+                dateFrom: STR('OPTIONAL. Inclusive lower bound for shift date, YYYY-MM-DD.'),
+                dateTo: STR('OPTIONAL. Inclusive upper bound for shift date, YYYY-MM-DD.'),
+            } },
+            { name: 'get_scheduled_shifts', description: 'List accepted, future shifts for a clinic. Optional dayOfWeek / dateFrom / dateTo filter by shift date. Server filters.', parameters: {
+                clinicId: STR('Optional clinic filter'),
+                dayOfWeek: STR('OPTIONAL. mon|tue|wed|thu|fri|sat|sun. Use for "shifts on Monday".'),
+                dateFrom: STR('OPTIONAL. Inclusive YYYY-MM-DD lower bound.'),
+                dateTo: STR('OPTIONAL. Inclusive YYYY-MM-DD upper bound.'),
+            } },
+            { name: 'get_completed_shifts', description: 'List completed shifts for a clinic. Optional dayOfWeek / dateFrom / dateTo filter by shift date. Server filters.', parameters: {
+                clinicId: STR('Optional clinic filter'),
+                dayOfWeek: STR('OPTIONAL. mon|tue|wed|thu|fri|sat|sun.'),
+                dateFrom: STR('OPTIONAL. Inclusive YYYY-MM-DD lower bound.'),
+                dateTo: STR('OPTIONAL. Inclusive YYYY-MM-DD upper bound.'),
+            } },
             { name: 'list_applicants_for_job', description: 'List actionable (pending/negotiating) applicants. Omit BOTH clinicId and jobId to aggregate across every clinic the user manages (preferred for "pending applicants" / "what needs my attention"). Pass clinicId alone to scope to one clinic. Pass clinicId + jobId for a single job.', parameters: { clinicId: STR('Optional clinic UUID. Omit to aggregate across all of the user\'s clinics.'), jobId: STR('Optional jobId. Pass clinicId alongside it.') } },
             { name: 'get_professional_info', description: 'Get a professional\'s public profile.', parameters: { userSub: STR('Pro userSub', true) } },
             { name: 'get_clinic_favorites', description: 'List the clinic\'s favorite pros.', parameters: {} },
@@ -2798,6 +2868,35 @@ export class DentiPalCDKStack extends cdk.Stack {
                     negotiationUpdates: BOOL('Negs'), shiftReminders: BOOL('Reminders'),
                 },
             },
+            // ESCAPE HATCH — see ddbQueryTool.ts. Same description as the pro
+            // agent's entry so both agents present an identical contract to
+            // the model. Server forces auth scoping using session.userContext.clinics.
+            {
+                name: 'query_ddb_table',
+                description:
+                    "FALLBACK reader for analytics / diagnostic / cross-cut questions the narrow tools don't cover " +
+                    "(e.g., 'how many applications across my clinics this month', 'compare pending applicants per clinic', " +
+                    "'look up application by id'). " +
+                    'ALWAYS prefer narrow tools (list_applicants_for_job, get_action_needed, get_open_shifts, etc.) when one fits. ' +
+                    'NEVER use for writes. Allowed tables: JobPostings, JobApplications, JobInvitations, ' +
+                    'JobNegotiations, ProfessionalProfiles, ClinicProfiles. Server FORCES clinicId scoping to clinics you manage. ' +
+                    'op = query (multiple rows) or getItem (single row).',
+                parameters: {
+                    table: STR('One of: JobPostings, JobApplications, JobInvitations, JobNegotiations, ProfessionalProfiles, ClinicProfiles. Omit the DentiPal-V5- prefix.', true),
+                    op: STR('"query" or "getItem".', true),
+                    indexName: STR('OPTIONAL GSI name. Tool usually infers from keyName.'),
+                    keyName: STR('Partition key attribute. Per-table allow-list; the tool returns the allowed list if you guess wrong.', true),
+                    keyValue: STR('Partition key value.', true),
+                    sortKeyName: STR('OPTIONAL sort-key attribute.'),
+                    sortKeyValue: STR('OPTIONAL sort-key value.'),
+                    sortKeyValueEnd: STR('OPTIONAL end value when sortKeyOp="between".'),
+                    sortKeyOp: STR('OPTIONAL: "=" | "begins_with" | ">" | ">=" | "<" | "<=" | "between".'),
+                    filterStatus: STR('OPTIONAL filter on item.status.'),
+                    filterDateFrom: STR('OPTIONAL inclusive lower bound on item.date (YYYY-MM-DD).'),
+                    filterDateTo: STR('OPTIONAL inclusive upper bound on item.date (YYYY-MM-DD).'),
+                    limit: NUM('OPTIONAL 1-50, default 25.'),
+                },
+            },
         ];
 
         const professionalAgent = new bedrock.CfnAgent(this, 'DentiPalProfessionalAgentV2', {
@@ -2849,6 +2948,16 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "send feedback" / "report a bug" / "I want to tell you something" → preview_submit_feedback({type: "general", feedback: "<user\'s message>"}).',
                 '- "refer a friend" / "invite someone" → preview_send_referral with the friend\'s email or phone.',
                 '',
+                '═══ ESCAPE HATCH: query_ddb_table ═══',
+                'query_ddb_table is a FALLBACK. ALWAYS try a narrow tool first (get_my_applications, get_my_invitations, get_my_negotiations, get_scheduled_shifts, get_completed_shifts, search_jobs_near_me, get_job_details).',
+                'Use query_ddb_table ONLY for questions no narrow tool answers:',
+                '  • Analytics — "how many applications did I make last month?", "average rate on my completed shifts", "compare March vs April".',
+                '  • Diagnostic lookups by ID — "look up application a1b2c3 — did it submit?".',
+                '  • Cross-cut filters — "jobs at clinics I\'ve favorited where rate > $60".',
+                'NEVER use it for "show me my apps" (use get_my_applications), "find jobs near me" (use search_jobs_near_me), or any write — writes have dedicated preview_*/confirm_* tools.',
+                'The server FORCES auth scoping; you cannot read another user\'s data.',
+                '═════════════════════════════════════════════════',
+                '',
                 'Reference resolution (no questions):',
                 '- "the first/second/third one", "that job", "the latest" → resolve from the MOST RECENT tool result in your conversation memory. Don\'t ask the user "which one?".',
                 '- "negotiate on my latest" → call get_my_applications first if needed, then use the most recent applicationId + its negotiationId.',
@@ -2857,9 +2966,10 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'When a tool returns a LIST (search_jobs_near_me, get_my_invitations, get_my_applications, get_my_negotiations, get_scheduled_shifts, get_completed_shifts, get_my_clinics), respond with EXACTLY ONE short sentence and stop. Examples: "Here you go." / "Found 5." / "No pending invitations." The UI renders the cards — your sentence is just a verbal handoff.',
                 'NEVER list, number, bullet, repeat, or recap the items. NEVER use markdown bold or numbered lists. The cards already show the data.',
                 'NEVER respond with an empty turn — always emit one sentence, even if very short.',
+                'EMPTY RESULTS ARE A VALID ANSWER. If a tool returns an empty list (data: [] or count=0), the answer is "none" — say so plainly ("No applications yet.", "No jobs on Monday in your area.") and STOP. NEVER call the same tool again with different parameters hoping for a non-empty result. NEVER iterate across dayOfWeek values or date ranges chasing data. Retrying empty results burns tool-call budget and gets you cut off by the loop cap.',
                 '═════════════════════════════════════════════════',
                 '',
-                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields.',
+                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields. CRITICAL: after a preview_* tool call, NEVER call any other tool in the same turn — the user will click Submit, which fires the confirm independently. Calling a confirm_* tool yourself will fail (the model has no access to confirm_* — they are user-only).',
                 '',
                 'When a tool returns a single-shot result (apply_to_job, respond_invitation), one short sentence is fine ("Applied. Status: pending.").',
                 '',
@@ -2946,11 +3056,12 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "favorites" / "starred pros" / "my saved professionals" → get_clinic_favorites.',
                 '- "find a hygienist" / "search pros" / "look up a dentist" → search_professionals with the role/specialty/area the user mentioned.',
                 '- "post a temp shift" / "post a job" → If you have ALL required fields (clinic, role, date, start_time, end_time, rate, shift_speciality), call preview_post_temporary_job IMMEDIATELY. If anything is missing, ask for the missing pieces in ONE short conversational sentence with an inline example — NEVER as a numbered checklist, never with bold markdown, never asking 8 questions at once. Example response when ALL fields are missing: "Sure — clinic, role, date, time window, and rate? e.g., \'Qwerty Clinic, Dental Assistant, May 21 9am–2pm, $50/hr\'". When only the rate is missing: "What rate? e.g., $40/hr".',
-                '- "accept <pro>" / "hire <pro> for job X" → preview_accept_professional → wait for confirm.',
-                '- "reject <pro>" / "decline <pro>" → preview_reject_professional → wait for confirm.',
+                '- "accept <pro>" / "hire <pro> for job X" / "accept this professional" / "hire them" → preview_accept_professional → wait for confirm.',
+                '- "reject <pro>" / "decline <pro>" / "decline this professional" / "pass on them" → preview_reject_professional → wait for confirm.',
                 '- When the user message contains explicit "jobId=<UUID>" and "professionalUserSub=<UUID>" tokens (the applicants list buttons inject these), parse them verbatim and call the tool directly — do NOT ask for confirmation of the IDs.',
+                '- For "accept/decline THIS professional" / "hire them" without inline IDs in the current message: SCAN PRIOR USER MESSAGES IN THIS CONVERSATION for the most recent "userSub=<UUID>" and "jobId=<UUID>" tokens (typically from a "Show me the full profile of …" or "Accept applicant …" message generated by the applicants-list View/Accept/Decline buttons). Use those values verbatim. NEVER ask the user for jobId or userSub if either has appeared in prior turns — it is always recoverable from history. Only ask if both intent and history are completely empty.',
                 '- "post a permanent job" / "post a full-time position" → preview_post_permanent_job (then wait for confirm).',
-                '- "post a consulting gig" / "multi-day consulting" → preview_post_consulting_job (then wait for confirm).',
+                '- "post a consulting gig" / "multi-day consulting" / "post multiday job" → preview_post_consulting_job. DATES rules:\n  • If the user gave a RANGE ("May 21-25", "May 21 to May 25"), pass the WHOLE range string verbatim as the dates field — DO NOT enumerate it yourself (you tend to miscount inclusive ranges; the server expands ranges correctly).\n  • If the user gave specific days ("May 21, 23, 27"), pass an ISO array: dates=["2026-05-21","2026-05-23","2026-05-27"].\n  • DO NOT pass total_days — the server derives it from the resolved dates array.\n  • Default to the current calendar year unless the user said otherwise.',
                 '- "negotiate $X on application Y" / "counter their offer" → preview_negotiate with the rate. The system renders a confirm card.',
                 '- "mark shift complete" / "shift was worked" / "sign off the shift" → preview_mark_shift_completed.',
                 '- "no-show" / "<pro> didn\'t show up" → preview_report_no_show.',
@@ -2966,6 +3077,16 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "notification settings" / "stop emailing" / "turn off SMS" → preview_update_notification_preferences with only the toggles named.',
                 '- "send feedback" / "report a bug" → preview_submit_feedback.',
                 '',
+                '═══ ESCAPE HATCH: query_ddb_table ═══',
+                'query_ddb_table is a FALLBACK. ALWAYS try a narrow tool first (list_applicants_for_job, get_action_needed, get_open_shifts, get_scheduled_shifts, get_completed_shifts, get_clinic_favorites, get_professional_info, get_job_details, search_professionals).',
+                'Use query_ddb_table ONLY for questions no narrow tool answers:',
+                '  • Analytics — "applications across all my clinics this week", "which clinic gets the most applicants", "month-over-month posting volume".',
+                '  • Diagnostic lookups by ID — "look up application a1b2c3 — what\'s its status?".',
+                '  • Cross-cut filters — "pending applicants on jobs I posted before May 1".',
+                'NEVER use it for "applicants for my job" (use list_applicants_for_job), "what needs my attention" (use get_action_needed), or any write — writes have dedicated preview_*/confirm_* tools.',
+                'The server FORCES clinicId scoping to clinics you manage; you cannot read other clinics\' data.',
+                '═════════════════════════════════════════════════',
+                '',
                 'Resolution rules (no questions):',
                 '- If user manages exactly ONE clinic, auto-pass that clinicId for every tool that needs one. Don\'t ask "which clinic?".',
                 '- Resolve "the first applicant" / "that pro" / "the latest" from the most recent tool result in conversation memory.',
@@ -2977,9 +3098,10 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'When a tool returns a LIST (get_my_clinics, get_action_needed, list_applicants_for_job, get_open_shifts), respond with EXACTLY ONE short sentence and stop. Examples: "Here you go." / "Found 3 pending applicants." / "No applicants yet." The UI renders the cards — your sentence is just a verbal handoff.',
                 'NEVER list, number, bullet, repeat, or recap the items. NEVER use markdown bold or numbered lists. The cards already show the data.',
                 'NEVER respond with an empty turn — always emit one sentence, even if very short. If you need to ask a follow-up to proceed (e.g., missing rate when posting), do so in ONE sentence.',
+                'EMPTY RESULTS ARE A VALID ANSWER. If a tool returns an empty list (data: [] or count=0), the answer is "none" — say so plainly ("No open shifts on Monday.", "No pending applicants.") and STOP. NEVER call the same tool again with different parameters hoping for a non-empty result. NEVER iterate across clinicIds, dayOfWeek values, or date ranges chasing data. Retrying empty results burns tool-call budget and gets you cut off by the loop cap.',
                 '═════════════════════════════════════════════════',
                 '',
-                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields.',
+                'For preview cards (confirm_card): respond with ONE short sentence ("Review the details and click Confirm."). Do not retype the fields. CRITICAL: after a preview_* tool call, NEVER call any other tool in the same turn — the user will click Submit, which fires the confirm independently. Calling a confirm_* tool yourself will fail (the model has no access to confirm_* — they are user-only).',
                 '',
                 'When a tool returns a single-shot success (e.g., accept_professional confirmed), one short sentence is fine.',
                 '',
@@ -3158,6 +3280,77 @@ export class DentiPalCDKStack extends cdk.Stack {
         });
         publicAliasBumper.node.addDependency(publicAgentAlias);
 
+        // --- 6a.3b AgentCore Memory — long-term, cross-session user memory ---
+        // Replaces the 15-min Bedrock Agents session memory with persistent
+        // per-user memory. AgentCore Memory runs two managed strategies in
+        // the background:
+        //   - SUMMARIZATION: rolling per-session summaries, scoped per user.
+        //   - USER_PREFERENCE: structured extracted preferences, scoped per
+        //     user across all sessions.
+        // chatMessage Lambda calls CreateEvent on every turn and
+        // RetrieveMemoryRecords on session bootstrap to inject prior summary
+        // and preferences into the first-turn preamble. Bedrock Agents
+        // continues to handle the actual model + tool loop unchanged.
+        //
+        // MemoryExecutionRoleArn is intentionally omitted — AgentCore uses
+        // its service-linked role, which has the right permissions for the
+        // built-in strategies' Bedrock model calls. Providing a custom role
+        // would override that with whatever we wrote, which is fragile.
+
+        // L2/L1 constructs for AWS::BedrockAgentCore::* are not yet in this
+        // CDK version (2.206). Use the generic CfnResource escape hatch — it
+        // renders the CFN resource directly, so AgentCore support requires
+        // no CDK upgrade. Switch to bedrock.CfnMemory once aws-cdk-lib ships it.
+        const chatMemory = new cdk.CfnResource(this, 'DentiPalChatMemory', {
+            type: 'AWS::BedrockAgentCore::Memory',
+            properties: {
+                // Name pattern is ^[a-zA-Z][a-zA-Z0-9_]{0,47}$ — underscores only.
+                Name: 'DentiPal_ChatMemory',
+                Description: 'Long-term chat memory for DentiPal users (per-user summaries and preferences).',
+                // 90 days — long enough for "the agent remembers me a month later"
+                // without retaining indefinitely. Bumpable later without recreating.
+                EventExpiryDuration: 90,
+                MemoryStrategies: [
+                    {
+                        SummaryMemoryStrategy: {
+                            Name: 'sessionSummaries',
+                            Description: 'Rolling per-session conversation summary, scoped per actor (Cognito userSub).',
+                            // Template form — AgentCore expands {actorId} from the
+                            // CreateEvent's actorId field (we pass userSub) and
+                            // {sessionId} from the event's sessionId.
+                            NamespaceTemplates: ['/summaries/{actorId}/{sessionId}/'],
+                        },
+                    },
+                    {
+                        UserPreferenceMemoryStrategy: {
+                            Name: 'userPreferences',
+                            Description: 'Structured user preferences (preferred shifts, roles, locations, etc.), extracted across all sessions for an actor.',
+                            // Per-actor only — preferences merge across sessions,
+                            // not silo per-session.
+                            NamespaceTemplates: ['/preferences/{actorId}/'],
+                        },
+                    },
+                ],
+            },
+        });
+        const chatMemoryId = chatMemory.getAtt('MemoryId').toString();
+        const chatMemoryArn = chatMemory.getAtt('MemoryArn').toString();
+
+        // Wire AgentCore Memory ID + deletion IAM into the monolith REST
+        // Lambda so its account-deletion handlers (deleteOwnAccount.ts,
+        // deleteUser.ts) can call clearUserMemory and actually delete the
+        // user's memory records on account closure. Without this, the
+        // clearUserMemory call silently no-ops and we leave conversational
+        // artifacts behind (GDPR gap).
+        lambdaFunction.addEnvironment('AGENTCORE_MEMORY_ID', chatMemoryId);
+        lambdaFunction.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'bedrock-agentcore:ListMemoryRecords',
+                'bedrock-agentcore:BatchDeleteMemoryRecords',
+            ],
+            resources: [chatMemoryArn],
+        }));
+
         // --- 6a.4 chatMessage Lambda — handles the new WebSocket route ---
         const chatMessageHandler = new lambda.Function(this, 'ChatMessageHandler', {
             functionName: 'DentiPal-Chat-Message',
@@ -3177,6 +3370,14 @@ export class DentiPalCDKStack extends cdk.Stack {
                 BEDROCK_CLINIC_AGENT_ALIAS_ID: clinicAgentAlias.attrAgentAliasId,
                 BEDROCK_PUBLIC_AGENT_ID: publicAgent.attrAgentId,
                 BEDROCK_PUBLIC_AGENT_ALIAS_ID: publicAgentAlias.attrAgentAliasId,
+                // AgentCore Memory — multi-day per-user memory. The chat
+                // Lambda reads this on session bootstrap and writes events
+                // on every turn. Bedrock Agents still runs the actual loop.
+                AGENTCORE_MEMORY_ID: chatMemoryId,
+                // User-facing chat history transcript (single continuous
+                // thread per user). Written from this Lambda after each turn;
+                // read by the monolith via GET /chat/history.
+                CHAT_MESSAGES_TABLE: chatMessagesTable.tableName,
                 // Tables read/written by the refactored run* functions called from toolExecutor
                 JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
                 APPLICATIONS_TABLE: jobApplicationsTable.tableName,
@@ -3194,6 +3395,11 @@ export class DentiPalCDKStack extends cdk.Stack {
                 PREFS_TABLE: notificationPreferencesTable.tableName, // legacy alias used by some handlers
                 FEEDBACK_TABLE: feedbackTable.tableName,
                 REFERRALS_TABLE: referralsTable.tableName,
+                // Raw WebSocket API ID — needed because the management API
+                // (PostToConnection) does NOT accept the custom domain
+                // `ws.dentipal.com`. The Lambda uses this to construct the
+                // raw `<api-id>.execute-api.<region>.amazonaws.com` host.
+                WEBSOCKET_API_ID: webSocketApi.apiId,
             },
             timeout: cdk.Duration.seconds(60), // Bedrock streaming + multi-loop tool exec
             memorySize: 1024,
@@ -3224,6 +3430,11 @@ export class DentiPalCDKStack extends cdk.Stack {
         notificationPreferencesTable.grantReadWriteData(chatMessageHandler);
         feedbackTable.grantReadWriteData(chatMessageHandler);
         referralsTable.grantReadWriteData(chatMessageHandler);
+        // User-facing chat transcript log (write-only from this Lambda; reads
+        // happen on the REST monolith via GET /chat/history). Granted full
+        // RW because the same Lambda may also clear a user's thread when
+        // they hit "Start fresh" in the future.
+        chatMessagesTable.grantReadWriteData(chatMessageHandler);
 
         // Cognito access — AdminGetUser for given_name/family_name (used by
         // refactored handlers like createTemporaryJob), AdminListGroupsForUser
@@ -3274,6 +3485,34 @@ export class DentiPalCDKStack extends cdk.Stack {
                 `arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
                 `arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
             ],
+        }));
+
+        // AgentCore Memory data-plane access — chatMessage Lambda calls
+        // CreateEvent on every turn and RetrieveMemoryRecords on session
+        // bootstrap. clearUserMemory (called from account-deletion path)
+        // lists then batch-deletes a user's records.
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'bedrock-agentcore:CreateEvent',
+                'bedrock-agentcore:RetrieveMemoryRecords',
+                'bedrock-agentcore:ListMemoryRecords',
+                'bedrock-agentcore:DeleteMemoryRecord',
+                'bedrock-agentcore:BatchDeleteMemoryRecords',
+                'bedrock-agentcore:ListEvents',
+                'bedrock-agentcore:DeleteEvent',
+            ],
+            resources: [chatMemoryArn],
+        }));
+
+        // EventBridge PutEvents — handlers like acceptProf / rejectProf /
+        // confirmShiftCompletion / etc. publish ShiftEvent so the inbox
+        // event-to-message Lambda can write a system message into the
+        // applicant's conversation. Without this, in-process invocations from
+        // the chatbot fail with AccessDenied on PutEvents and surface as a
+        // generic 500 "Failed to accept applicant".
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['events:PutEvents'],
+            resources: ['*'],
         }));
 
         // PostToConnection — push streamed frames back to the client.

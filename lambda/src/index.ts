@@ -214,6 +214,11 @@ import { handler as listNotificationsHandler } from "./handlers/listNotification
 import { handler as markNotificationsReadHandler } from "./handlers/markNotificationsRead";
 import { handler as deleteNotificationsHandler } from "./handlers/deleteNotifications";
 
+// Persistent chat transcript — backs the "scroll up to see prior chats" UI
+// (single continuous thread per user). Writes happen on the chat WebSocket
+// Lambda; this reads.
+import { handler as getChatHistoryHandler } from "./handlers/chat/getChatHistory";
+
 import { corsHeaders } from "./handlers/corsHeaders";
 
 // Inline handler — the frontend calls GET /jobs/user-clinics from useHeaderData,
@@ -529,6 +534,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/notifications": listNotificationsHandler,
         "POST:/notifications/read": markNotificationsReadHandler,
         "POST:/notifications/delete": deleteNotificationsHandler,
+
+        // Chat transcript — paginated user-facing history (scroll up to see
+        // prior chats). Writes happen on the chat WebSocket Lambda.
+        "GET:/chat/history": getChatHistoryHandler,
 
     };
 
