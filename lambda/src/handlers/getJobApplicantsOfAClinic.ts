@@ -537,7 +537,13 @@ export const handler = async (
         : null;
 
       const inviteKey = `${app.jobId}|${app.professionalUserSub}`;
-      const isFromInvitation = Boolean(app.fromInvitation) || invitedPairs.has(inviteKey);
+      // Three independent signals — any one of them means this application
+      // originated from a clinic invitation. We OR them so the badge survives
+      // missing data in any single source.
+      const isFromInvitation =
+        Boolean(app.fromInvitation) ||
+        Boolean(app.invitationResponseDate) ||
+        invitedPairs.has(inviteKey);
 
       return {
         application: {
@@ -551,6 +557,7 @@ export const handler = async (
           proposedRate: app.proposedRate ?? null,
           negotiationId: app.negotiationId ?? null,
           fromInvitation: isFromInvitation,
+          invitationResponseDate: app.invitationResponseDate ?? null,
         },
         negotiation: nego,
         // `job` lives on byJobId[jobId].job so it's not duplicated per applicant in the flat list.
