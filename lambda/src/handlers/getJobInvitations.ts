@@ -133,11 +133,12 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
       TableName: process.env.JOB_INVITATIONS_TABLE!,
       IndexName: "ProfessionalIndex",
       KeyConditionExpression: "professionalUserSub = :userSub",
-      FilterExpression: "attribute_not_exists(invitationStatus) OR (invitationStatus <> :accepted AND invitationStatus <> :declined)",
+      FilterExpression: "attribute_not_exists(invitationStatus) OR (invitationStatus <> :accepted AND invitationStatus <> :declined AND invitationStatus <> :negotiating)",
       ExpressionAttributeValues: {
         ":userSub": { S: professionalUserSub },
         ":accepted": { S: "accepted" },
         ":declined": { S: "declined" },
+        ":negotiating": { S: "negotiating" },
       },
       ExclusiveStartKey: lastKey,
     };
