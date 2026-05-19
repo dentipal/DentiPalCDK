@@ -509,6 +509,7 @@ export const handler = async (
           updatedAt: app.updatedAt,
           proposedRate: app.proposedRate ?? null,
           negotiationId: app.negotiationId ?? null,
+          fromInvitation: Boolean(app.fromInvitation),
         },
         negotiation: nego,
         // `job` lives on byJobId[jobId].job so it's not duplicated per applicant in the flat list.
