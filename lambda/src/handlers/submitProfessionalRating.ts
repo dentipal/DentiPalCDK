@@ -16,7 +16,9 @@ const REGION = process.env.REGION || "us-east-1";
 const RATINGS_TABLE = process.env.PROFESSIONAL_RATINGS_TABLE!;
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE!;
 const PROFESSIONAL_PROFILES_TABLE = process.env.PROFESSIONAL_PROFILES_TABLE!;
-const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE!;
+// Clinics is keyed by just clinicId; ClinicProfiles has a composite key
+// (clinicId + userSub) so it can't be GetItem'd with clinicId alone.
+const CLINICS_TABLE = process.env.CLINICS_TABLE!;
 
 const dynamodb = new DynamoDBClient({ region: REGION });
 
@@ -217,19 +219,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const now = new Date().toISOString();
     const clinicJobKey = `${clinicId}#${jobId}`;
 
-    // Look up clinic name for display (best-effort).
+    // Look up clinic name for display (best-effort). Use the Clinics table
+    // (single-PK), not ClinicProfiles (composite key — would 400 here).
     let clinicName = "";
     try {
-        const clinicProfile = await dynamodb.send(new GetItemCommand({
-            TableName: CLINIC_PROFILES_TABLE,
+        const clinicRow = await dynamodb.send(new GetItemCommand({
+            TableName: CLINICS_TABLE,
             Key: { clinicId: { S: clinicId } },
-            ProjectionExpression: "clinic_name, clinicName, name",
+            ProjectionExpression: "#n",
+            ExpressionAttributeNames: { "#n": "name" },
         }));
-        clinicName =
-            clinicProfile.Item?.clinic_name?.S
-            || clinicProfile.Item?.clinicName?.S
-            || clinicProfile.Item?.name?.S
-            || "";
+        clinicName = clinicRow.Item?.name?.S || "";
     } catch (err) {
         console.warn("[submitProfessionalRating] clinic name lookup failed (non-fatal)", (err as Error)?.message);
     }

@@ -11,7 +11,8 @@ import { corsHeaders } from "./corsHeaders";
 
 const REGION = process.env.REGION || "us-east-1";
 const CLINIC_RATINGS_TABLE = process.env.CLINIC_RATINGS_TABLE!;
-const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE!;
+// Avg is denormalized onto Clinics (single-PK), not ClinicProfiles (composite).
+const CLINICS_TABLE = process.env.CLINICS_TABLE!;
 
 const dynamodb = new DynamoDBClient({ region: REGION });
 
@@ -75,7 +76,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 ScanIndexForward: false,
             })),
             dynamodb.send(new GetItemCommand({
-                TableName: CLINIC_PROFILES_TABLE,
+                TableName: CLINICS_TABLE,
                 Key: { clinicId: { S: clinicId } },
                 ProjectionExpression: "avgRating, ratingCount",
             })),

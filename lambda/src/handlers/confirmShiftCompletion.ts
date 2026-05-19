@@ -138,10 +138,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // version of acceptProf / respondToNegotiation. Treat both as
         // confirmable so old rows aren't stuck.
         const CONFIRMABLE_STATUSES = new Set(["scheduled", "accepted"]);
-        if (!CONFIRMABLE_STATUSES.has(currentStatus)) {
+        if (!currentStatus || !CONFIRMABLE_STATUSES.has(currentStatus)) {
             return json(event, 409, {
                 error: "Invalid status transition",
-                message: `Shift cannot be confirmed from status '${currentStatus}'. Expected 'scheduled' or 'accepted'.`,
+                message: `Shift cannot be confirmed from status '${currentStatus ?? "unknown"}'. Expected 'scheduled' or 'accepted'.`,
             });
         }
 
