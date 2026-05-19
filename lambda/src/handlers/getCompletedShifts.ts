@@ -4,6 +4,7 @@ import {
   DynamoDBClient,
   QueryCommand, // Changed from ScanCommand to QueryCommand
   QueryCommandOutput,
+  BatchGetItemCommand,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import {
@@ -21,6 +22,7 @@ import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE!; // Use Env Var
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
+const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE;
 
 const dynamodb = new DynamoDBClient({ region: REGION });
 
@@ -144,12 +146,19 @@ export const handler = async (
       return String(aKey).localeCompare(String(bKey));
     });
 
-    // 3b. Enrich each completed posting with `fromInvitation` by looking up
-    //     the hire's application row. JobPostings doesn't store this flag —
-    //     it lives on JobApplications (set in respondToInvitation.ts when a
-    //     pro accepts/negotiates an invite). We query by jobId and pick the
-    //     application that became the hire (scheduled/completed/accepted).
+    // 3b. Enrich each completed posting with `fromInvitation`.
+    //     Two-step lookup:
+    //       1. Query JobApplications by jobId to find the hire (the
+    //          scheduled/completed/accepted application) and grab its
+    //          professionalUserSub + any pre-existing `fromInvitation` flag.
+    //       2. BatchGet against JobInvitations using the (jobId, professionalUserSub)
+    //          pairs we just collected. A row in JobInvitations is the
+    //          authoritative signal that this shift originated from an invite
+    //          — even for legacy applications that predate the flag and for
+    //          accept-branch applications that didn't historically write it.
     if (JOB_APPLICATIONS_TABLE && jobs.length > 0) {
+      // Step 1: find the hire's professionalUserSub for each completed job.
+      const hireBy: Record<string, { sub?: string; flag?: boolean }> = {};
       await Promise.all(jobs.map(async (job: any) => {
         if (!job.jobId || job.jobId === "No jobId") return;
         try {
@@ -162,12 +171,56 @@ export const handler = async (
             const s = ((it.applicationStatus as any)?.S || "").toLowerCase();
             return s === "scheduled" || s === "completed" || s === "accepted";
           });
-          job.fromInvitation = Boolean((hire?.fromInvitation as any)?.BOOL);
+          hireBy[job.jobId] = {
+            sub: (hire?.professionalUserSub as any)?.S,
+            flag: Boolean((hire?.fromInvitation as any)?.BOOL),
+          };
+          // Seed the field with whatever the application row says — the
+          // invitations lookup below will override to `true` if it finds a
+          // matching invite row.
+          job.fromInvitation = hireBy[job.jobId].flag === true;
+          if (hireBy[job.jobId].sub) job.professionalUserSub = hireBy[job.jobId].sub;
         } catch (joinErr) {
-          // Non-fatal — leave fromInvitation undefined; UI hides the badge.
-          console.warn(`[getCompletedShifts] fromInvitation lookup failed for jobId=${job.jobId}:`, (joinErr as Error)?.message);
+          console.warn(`[getCompletedShifts] hire lookup failed for jobId=${job.jobId}:`, (joinErr as Error)?.message);
         }
       }));
+
+      // Step 2: batch lookup JobInvitations for each (jobId, sub) pair.
+      if (JOB_INVITATIONS_TABLE) {
+        const inviteKeys = Object.entries(hireBy)
+          .filter(([, v]) => v.sub)
+          .map(([jid, v]) => ({
+            jobId: { S: jid },
+            professionalUserSub: { S: v.sub! },
+          }));
+        const invitedPairs = new Set<string>();
+        for (let i = 0; i < inviteKeys.length; i += 100) {
+          const chunk = inviteKeys.slice(i, i + 100);
+          try {
+            const resp = await dynamodb.send(new BatchGetItemCommand({
+              RequestItems: {
+                [JOB_INVITATIONS_TABLE]: {
+                  Keys: chunk,
+                  ProjectionExpression: "jobId, professionalUserSub",
+                },
+              },
+            }));
+            for (const item of (resp.Responses?.[JOB_INVITATIONS_TABLE] || [])) {
+              const jid = (item.jobId as any)?.S;
+              const sub = (item.professionalUserSub as any)?.S;
+              if (jid && sub) invitedPairs.add(`${jid}|${sub}`);
+            }
+          } catch (err: any) {
+            console.warn("[getCompletedShifts] fromInvitation lookup failed:", err?.message);
+          }
+        }
+        for (const job of jobs as any[]) {
+          const sub = hireBy[job.jobId]?.sub;
+          if (sub && invitedPairs.has(`${job.jobId}|${sub}`)) {
+            job.fromInvitation = true;
+          }
+        }
+      }
     }
 
     // Additive: refresh address fields on each completed job with the live
