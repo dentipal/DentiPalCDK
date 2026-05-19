@@ -56,7 +56,9 @@ import {
   setPendingPreview,
   clearPendingPreview,
   setRecentSearchResults,
+  getSessionByConnectionId,
 } from "./sessionStore";
+import { runQueryDdbTable, QueryDdbInput } from "./ddbQueryTool";
 import { verifyPreviewBeforeConfirm } from "./previewGate";
 import { getToolDefinition } from "./toolSchemas";
 
@@ -140,6 +142,165 @@ function filterApplicationsByStatusInResult(
 }
 
 /**
+ * Server-side filter for `get_open_shifts` (and any sibling shift-list tool).
+ * Removes the LLM from the day-of-week / date-range reasoning loop:
+ *   - dayOfWeek: "mon" | "monday" | "MON" | ... → restrict to that weekday
+ *   - dateFrom / dateTo: inclusive YYYY-MM-DD bounds
+ *
+ * The shifts handler returns its list in either `body.data.jobPostings`
+ * (newer envelope) or `body.jobPostings` (flat) or `body.shifts`. We probe
+ * each, filter in place, and rewrite the envelope with an updated count.
+ * No-op on error responses or when no filters are supplied.
+ */
+function filterShiftsByDayAndDateRange(
+  r: { status: number; body: any },
+  opts: { dayOfWeek?: any; dateFrom?: any; dateTo?: any },
+): { status: number; body: any } {
+  if (r.status >= 400 || !r.body || typeof r.body !== "object") return r;
+  const dow = normalizeDayOfWeek(opts.dayOfWeek);
+  const from = typeof opts.dateFrom === "string" ? opts.dateFrom : undefined;
+  const to = typeof opts.dateTo === "string" ? opts.dateTo : undefined;
+  // If no filters requested, return as-is — pure pass-through.
+  if (dow === undefined && !from && !to) return r;
+
+  // Where the array lives in the handler's response. We pick the first
+  // matching field; the assignment back uses the same key so the envelope
+  // stays consistent. Order matters — probe data.<field> before top.<field>
+  // because handlers using the data envelope often also have a flat field
+  // alongside it for backwards compat.
+  const candidates: Array<["data" | "top", string]> = [
+    ["data", "jobPostings"],
+    ["data", "shifts"],
+    ["data", "applications"],
+    ["data", "invitations"],
+    ["data", "jobs"],
+    ["top", "jobPostings"],
+    ["top", "shifts"],
+    ["top", "applications"],
+    ["top", "invitations"],
+    ["top", "jobs"],
+  ];
+  let arr: any[] | undefined;
+  // Flat-array case: `data` is itself the array (no envelope sub-object).
+  // getClinicShifts returns this shape — without this branch the dayOfWeek
+  // filter was a silent no-op and the agent saw unfiltered results.
+  let foundIn: ["data" | "top", string] | "dataArray" | undefined;
+  if (Array.isArray(r.body?.data)) {
+    arr = r.body.data;
+    foundIn = "dataArray";
+  } else {
+    for (const [loc, key] of candidates) {
+      const at = loc === "data" ? r.body?.data?.[key] : r.body?.[key];
+      if (Array.isArray(at)) { arr = at; foundIn = [loc, key]; break; }
+    }
+  }
+  if (!arr || !foundIn) return r;
+
+  const kept = arr.filter((s) => {
+    // A row can carry one OR MANY dates depending on shape:
+    //   - single-day temp/perm postings → `date` OR `start_date` (snake_case
+    //     in DDB; only the `date` field was checked before, silently dropping
+    //     ~85% of postings whose authoring handler wrote start_date instead).
+    //   - multi-day consulting → `dates: [...]` array of every booked day.
+    //     The old probe only looked at `dates[0]`; a Monday at index 3 was
+    //     silently invisible to the day-of-week filter.
+    // Applications/invitations carry these one level down inside `jobPosting`
+    // or `job` — extractShiftDates probes both layers.
+    const dates = extractShiftDates(s);
+    if (!dates.length) return false;
+    const inRange = dates.filter((d) => (!from || d >= from) && (!to || d <= to));
+    if (!inRange.length) return false;
+    if (dow !== undefined) {
+      // Match if ANY in-range date lands on the requested weekday. Construct
+      // as local midnight so 'YYYY-MM-DD' doesn't shift across timezones
+      // (Date('YYYY-MM-DD') parses as UTC midnight, which can land on the
+      // prior day in negative-offset locales).
+      const hit = inRange.some((d) => {
+        const dt = new Date(d.length === 10 ? d + "T00:00:00" : d);
+        return !Number.isNaN(dt.getTime()) && dt.getDay() === dow;
+      });
+      if (!hit) return false;
+    }
+    return true;
+  });
+
+  const nextBody = { ...r.body };
+  if (foundIn === "dataArray") {
+    nextBody.data = kept;
+    if (typeof r.body.totalCount === "number") nextBody.totalCount = kept.length;
+  } else if (foundIn[0] === "data") {
+    nextBody.data = { ...r.body.data, [foundIn[1]]: kept };
+    if (typeof r.body.data?.totalCount === "number") nextBody.data.totalCount = kept.length;
+  } else {
+    nextBody[foundIn[1]] = kept;
+    if (typeof r.body.totalCount === "number") nextBody.totalCount = kept.length;
+  }
+  return { status: r.status, body: nextBody };
+}
+
+/**
+ * Collect EVERY shift date a row carries. A row may have one, the other, or
+ * both of these shapes:
+ *   - single-day:  `date` (legacy) and/or `start_date` (snake_case, current).
+ *                  Note the older `startDate` (camelCase) is also probed for
+ *                  any handler that surfaces it that way.
+ *   - multi-day:   `dates: ["YYYY-MM-DD", ...]` — return all of them so the
+ *                  day-of-week filter can match if ANY date lands on the
+ *                  requested weekday.
+ * Applications/invitations carry these inside `jobPosting`/`job` sub-objects,
+ * so we probe both the direct row and one level down.
+ *
+ * Returns an empty array when nothing parseable is found — caller treats that
+ * as "exclude this row" (we can't filter what we can't date).
+ */
+function extractShiftDates(row: any): string[] {
+  if (!row || typeof row !== "object") return [];
+  const probe = (obj: any): string[] => {
+    if (!obj || typeof obj !== "object") return [];
+    const out: string[] = [];
+    if (Array.isArray(obj.dates)) {
+      for (const d of obj.dates) {
+        if (typeof d === "string" && d.length >= 8) out.push(d);
+      }
+    }
+    for (const k of ["date", "start_date", "startDate"]) {
+      const v = obj[k];
+      if (typeof v === "string" && v.length >= 8) out.push(v);
+    }
+    return out;
+  };
+  const all = [...probe(row), ...probe(row.jobPosting), ...probe(row.job)];
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const d of all) {
+    if (!seen.has(d)) { seen.add(d); deduped.push(d); }
+  }
+  return deduped;
+}
+
+/**
+ * Map a user-supplied weekday string to a JS Date.getDay() index (0=Sun..6=Sat).
+ * Accepts case-insensitive 3-letter abbreviations or full names. Returns
+ * undefined for any value we don't recognize so the caller skips the filter
+ * rather than producing wrong results.
+ */
+function normalizeDayOfWeek(v: any): number | undefined {
+  if (typeof v !== "string") return undefined;
+  const key = v.trim().toLowerCase();
+  if (!key) return undefined;
+  const map: Record<string, number> = {
+    sun: 0, sunday: 0,
+    mon: 1, monday: 1,
+    tue: 2, tues: 2, tuesday: 2,
+    wed: 3, weds: 3, wednesday: 3,
+    thu: 4, thur: 4, thurs: 4, thursday: 4,
+    fri: 5, friday: 5,
+    sat: 6, saturday: 6,
+  };
+  return key in map ? map[key] : undefined;
+}
+
+/**
  * Mirror the dashboard's "Action Needed" filter on the chat side.
  *
  * `getJobApplicantsOfAClinic` (the Lambda behind `list_applicants_for_job`)
@@ -201,6 +362,146 @@ function clampLimit(n: any): number {
   const v = typeof n === "number" ? n : parseInt(n);
   if (!Number.isFinite(v) || v <= 0) return 20;
   return Math.min(v, 50);
+}
+
+/**
+ * Coerce a single date input (any shape the agent might send) into a
+ * `YYYY-MM-DD` string. Returns null when nothing parseable is left.
+ *
+ * Accepted inputs:
+ *   - "2026-05-21"                  → unchanged
+ *   - "2026-05-21T..."              → date portion only
+ *   - "May 21" / "May 21 2026"      → resolved against current year
+ *   - "21" / "21 May" / "21/5"      → best-effort
+ */
+function toIsoDate(raw: any, fallbackYear: number): string | null {
+  if (raw == null) return null;
+  if (typeof raw !== "string") raw = String(raw);
+  const s = raw.trim();
+  if (!s) return null;
+  // Already ISO?
+  const isoMatch = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoMatch) return isoMatch[1];
+  // Try Date.parse with the year appended if missing.
+  const hasYear = /\b(20|19)\d{2}\b/.test(s);
+  const candidate = hasYear ? s : `${s} ${fallbackYear}`;
+  const d = new Date(candidate);
+  if (Number.isNaN(d.getTime())) return null;
+  // If the year is missing AND the parsed date is more than 30d in the past,
+  // bump it to next year (intent was almost certainly future).
+  if (!hasYear) {
+    const now = new Date();
+    if (d.getTime() < now.getTime() - 30 * 24 * 3600 * 1000) {
+      d.setFullYear(d.getFullYear() + 1);
+    }
+  }
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
+ * Expand a textual date range like "may 21-24" or "May 21 - May 23 2026"
+ * into a list of ISO dates. Returns null when no clear start/end can be
+ * extracted (caller falls back to single-date parse).
+ */
+function expandDateRange(raw: string, fallbackYear: number): string[] | null {
+  // Pattern A: same month — "may 21-24" / "May 21-24 2026"
+  const m1 = raw.match(/^(.+?)\s*(\d{1,2})\s*[-–to]+\s*(\d{1,2})\b(.*)$/i);
+  if (m1) {
+    const [, prefix, startDay, endDay, suffix] = m1;
+    const start = toIsoDate(`${prefix.trim()} ${startDay} ${suffix.trim()}`.trim(), fallbackYear);
+    const end = toIsoDate(`${prefix.trim()} ${endDay} ${suffix.trim()}`.trim(), fallbackYear);
+    if (start && end) return enumerateDates(start, end);
+  }
+  // Pattern B: full-date range — "2026-05-21 to 2026-05-23" / "May 21 - May 23 2026"
+  const m2 = raw.match(/^(.+?)\s*(?:to|through|-)\s*(.+)$/i);
+  if (m2) {
+    const start = toIsoDate(m2[1], fallbackYear);
+    const end = toIsoDate(m2[2], fallbackYear);
+    if (start && end) return enumerateDates(start, end);
+  }
+  return null;
+}
+
+function enumerateDates(startIso: string, endIso: string): string[] {
+  const out: string[] = [];
+  const start = new Date(startIso + "T00:00:00");
+  const end = new Date(endIso + "T00:00:00");
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return [startIso];
+  if (end.getTime() < start.getTime()) return [startIso];
+  // Cap at a reasonable consulting-gig length so a typo can't generate 1000 entries.
+  const MAX = 60;
+  let cur = start;
+  while (cur.getTime() <= end.getTime() && out.length < MAX) {
+    const yyyy = cur.getFullYear();
+    const mm = String(cur.getMonth() + 1).padStart(2, "0");
+    const dd = String(cur.getDate()).padStart(2, "0");
+    out.push(`${yyyy}-${mm}-${dd}`);
+    cur = new Date(cur.getTime() + 24 * 3600 * 1000);
+  }
+  return out;
+}
+
+/**
+ * Mutates `input` in place: turns the agent's `dates` field (array, comma-
+ * separated string, or range) into a clean `string[]` of ISO dates, and
+ * auto-derives `total_days` from the resulting list when the agent forgot.
+ * Used by both preview_post_consulting_job and confirm_post_consulting_job.
+ */
+function normalizeDatesInPlace(input: any): void {
+  if (!input) return;
+  const fallbackYear = new Date().getFullYear();
+  let dates: string[] = [];
+
+  if (Array.isArray(input.dates)) {
+    dates = (input.dates as any[])
+      .map((d: any) => toIsoDate(d, fallbackYear))
+      .filter((d: string | null): d is string => !!d);
+  } else if (typeof input.dates === "string") {
+    const raw = input.dates.trim();
+    // Range first (handles "may 21-24" before splitting on `-`).
+    const expanded = expandDateRange(raw, fallbackYear);
+    if (expanded) {
+      dates = expanded;
+    } else if (raw.includes(",")) {
+      // "may 21,22,23" — propagate the prefix (month name) onto bare numbers.
+      const parts = raw.split(",").map((p: string) => p.trim()).filter(Boolean);
+      let lastPrefix = "";
+      const expandedParts: string[] = [];
+      for (const p of parts) {
+        // If part is bare number, prepend last prefix (e.g. "may ").
+        if (/^\d{1,2}$/.test(p) && lastPrefix) {
+          expandedParts.push(`${lastPrefix} ${p}`);
+        } else {
+          expandedParts.push(p);
+          // Capture the month-word prefix for later bare-number parts.
+          const prefixMatch = p.match(/^([A-Za-z]+)\s+\d/);
+          if (prefixMatch) lastPrefix = prefixMatch[1];
+        }
+      }
+      dates = expandedParts
+        .map((p) => toIsoDate(p, fallbackYear))
+        .filter((d): d is string => !!d);
+    } else {
+      const single = toIsoDate(raw, fallbackYear);
+      if (single) dates = [single];
+    }
+  }
+
+  // Dedupe + sort for stability (and so total_days reflects unique days).
+  dates = Array.from(new Set(dates)).sort();
+  input.dates = dates;
+
+  // ALWAYS overwrite total_days from the resolved dates array — the dates
+  // list is the source of truth. The agent frequently miscounts inclusive
+  // ranges (e.g. "May 21–25" = 5 days, not 4). Letting the agent's stale
+  // total_days through here trips the handler's "Dates count must match
+  // total_days" validator and cancels the post.
+  if (dates.length > 0) {
+    input.total_days = dates.length;
+  }
 }
 
 /**
@@ -449,6 +750,21 @@ export async function executeTool(
             return p;
           }).sort((a: any, b: any) => (a.distanceMiles ?? 9999) - (b.distanceMiles ?? 9999));
         }
+
+        // Day-of-week filter applied AFTER the handler returns and BEFORE
+        // the limit slice — otherwise we'd cap at requestedLimit, then
+        // filter, and end up with far fewer than the user asked for. The
+        // handler already honored dateFrom/dateTo via qs.start/end so those
+        // are server-side at the underlying handler level.
+        const dow = normalizeDayOfWeek(call.input.dayOfWeek);
+        if (dow !== undefined) {
+          finalPostings = finalPostings.filter((p: any) => {
+            const date: string | undefined = p?.date || (Array.isArray(p?.dates) ? p.dates[0] : undefined);
+            if (!date || typeof date !== "string") return false;
+            const d = new Date(date.length === 10 ? date + "T00:00:00" : date);
+            return !Number.isNaN(d.getTime()) && d.getDay() === dow;
+          });
+        }
         finalPostings = finalPostings.slice(0, requestedLimit);
 
         await setRecentSearchResults(auth.userSub, connectionId, finalPostings.slice(0, 20));
@@ -467,11 +783,21 @@ export async function executeTool(
       }
       case "get_my_applications": {
         const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
-        return errOrOk(call.toolName, r);
+        const filtered = filterShiftsByDayAndDateRange(r, {
+          dayOfWeek: call.input.dayOfWeek,
+          dateFrom: call.input.dateFrom,
+          dateTo: call.input.dateTo,
+        });
+        return errOrOk(call.toolName, filtered);
       }
       case "get_my_invitations": {
         const r = await runGetJobInvitations(auth);
-        return errOrOk(call.toolName, r);
+        const filtered = filterShiftsByDayAndDateRange(r, {
+          dayOfWeek: call.input.dayOfWeek,
+          dateFrom: call.input.dateFrom,
+          dateTo: call.input.dateTo,
+        });
+        return errOrOk(call.toolName, filtered);
       }
       case "get_my_negotiations": {
         const r = await callHandlerInProcess(getAllNegotiationsProfHandler, { method: "GET", auth });
@@ -482,30 +808,42 @@ export async function executeTool(
         // in-place to match the dashboard's "Scheduled" tab — anything where
         // applicationStatus is scheduled / accepted / hired / confirmed.
         // Clinics: dedicated clinic-side handler returns already-filtered.
+        const dateOpts = {
+          dayOfWeek: call.input.dayOfWeek,
+          dateFrom: call.input.dateFrom,
+          dateTo: call.input.dateTo,
+        };
         const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
         if (isPro || !call.input.clinicId) {
           const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
-          return errOrOk(call.toolName, filterApplicationsByStatusInResult(r, ["scheduled", "accepted", "hired", "confirmed"]));
+          const byStatus = filterApplicationsByStatusInResult(r, ["scheduled", "accepted", "hired", "confirmed"]);
+          return errOrOk(call.toolName, filterShiftsByDayAndDateRange(byStatus, dateOpts));
         }
         const r = await callHandlerInProcess(getScheduledShiftsHandler, {
           method: "GET",
           pathParameters: { clinicId: call.input.clinicId },
           auth,
         });
-        return errOrOk(call.toolName, r);
+        return errOrOk(call.toolName, filterShiftsByDayAndDateRange(r, dateOpts));
       }
       case "get_completed_shifts": {
+        const dateOpts = {
+          dayOfWeek: call.input.dayOfWeek,
+          dateFrom: call.input.dateFrom,
+          dateTo: call.input.dateTo,
+        };
         const isPro = (auth.userType || "").toLowerCase().startsWith("prof");
         if (isPro || !call.input.clinicId) {
           const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
-          return errOrOk(call.toolName, filterApplicationsByStatusInResult(r, ["completed"]));
+          const byStatus = filterApplicationsByStatusInResult(r, ["completed"]);
+          return errOrOk(call.toolName, filterShiftsByDayAndDateRange(byStatus, dateOpts));
         }
         const r = await callHandlerInProcess(getCompletedShiftsHandler, {
           method: "GET",
           pathParameters: { clinicId: call.input.clinicId },
           auth,
         });
-        return errOrOk(call.toolName, r);
+        return errOrOk(call.toolName, filterShiftsByDayAndDateRange(r, dateOpts));
       }
 
       // ------------------- PROFESSIONAL: single-shot writes (v1) -------------------
@@ -609,10 +947,46 @@ export async function executeTool(
         return errOrOk(call.toolName, r);
       }
       case "get_open_shifts": {
+        // getClinicShiftsHandler is a tab-switched endpoint: routes off
+        // event.pathParameters.proxy (REST path's trailing segment). Without
+        // proxy="open-shifts" the handler returns data:[].
         const r = await callHandlerInProcess(getClinicShiftsHandler, {
-          method: "GET", pathParameters: { clinicId: call.input.clinicId }, auth,
+          method: "GET",
+          pathParameters: { clinicId: call.input.clinicId, proxy: "open-shifts" },
+          auth,
         });
-        return errOrOk(call.toolName, r);
+        // Default dateFrom to today so past-dated postings don't surface as
+        // "open". The underlying handler considers any active, unfilled
+        // posting as open regardless of date — but a clinic asking "open
+        // shifts" or "open shifts on monday" means upcoming, not historical.
+        // Respect an explicit dateFrom if the model passed one (e.g. user
+        // said "open shifts last week"). For multi-day shifts, the filter
+        // already keeps the row if ANY of its dates falls in range, so a
+        // shift with some past + some future dates still appears.
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const effectiveDateFrom = call.input.dateFrom || todayIso;
+        const filtered = filterShiftsByDayAndDateRange(r, {
+          dayOfWeek: call.input.dayOfWeek,
+          dateFrom: effectiveDateFrom,
+          dateTo: call.input.dateTo,
+        });
+        if (filtered.status >= 400) {
+          return err(call.toolName, filtered.status, safeBodyToString(filtered.status, filtered.body));
+        }
+        // Reshape to {shifts: [...], totalCount} so the chat widget renders
+        // JobResultsList WITHOUT the apply-checkbox CTA (see ResultCards.tsx:
+        // the `shifts` branch passes no onSendApply, so the "Apply to N"
+        // affordance is hidden — correct for clinic-side, since clinics
+        // OWN these postings rather than applying to them).
+        //
+        // The handler returns {message, data: [array]} which the widget
+        // doesn't know how to display — that's why the agent appeared to
+        // say "Done." with no cards even when the handler returned dozens.
+        const shifts: any[] = Array.isArray(filtered.body?.data) ? filtered.body.data : [];
+        return ok(call.toolName, {
+          shifts,
+          totalCount: shifts.length,
+        });
       }
       case "list_applicants_for_job": {
         // Three modes:
@@ -649,15 +1023,37 @@ export async function executeTool(
 
         let r: { status: number; body: any };
         const clinicIdGiven = call.input.clinicId && typeof call.input.clinicId === "string";
-        const userClinics = (userContext?.clinics || [])
+        let userClinics: string[] = (userContext?.clinics || [])
           .map((c: any) => c.clinicId)
-          .filter(Boolean);
+          .filter((id: any) => typeof id === "string" && id.length > 0);
 
-        if (clinicIdGiven || userClinics.length <= 1) {
-          // Single-clinic path. Explicit param wins; otherwise fall back to
-          // the user's sole clinic. Handler will 400 if neither resolves.
-          const cid = clinicIdGiven ? call.input.clinicId : userClinics[0];
-          r = await callOne(cid);
+        // Session context only fetches from UserClinicAssignments — a user
+        // who CREATED a clinic but never wrote an assignment row will show up
+        // with zero clinics here even though they own one. Live-fetch via the
+        // same handler get_my_clinics uses (scans Clinics for createdBy +
+        // AssociatedUsers membership) so the fan-out has something to chew on.
+        if (userClinics.length === 0 && !clinicIdGiven && !call.input.jobId) {
+          try {
+            const cr = await callHandlerInProcess(getUsersClinicsHandler, { method: "GET", auth });
+            if (cr.status < 400 && Array.isArray(cr.body?.clinics)) {
+              userClinics = cr.body.clinics
+                .map((c: any) => c?.clinicId)
+                .filter((id: any) => typeof id === "string" && id.length > 0);
+              console.log(`[list_applicants_for_job] live-fetched ${userClinics.length} clinics (session had 0)`);
+            }
+          } catch (e: any) {
+            console.warn("[list_applicants_for_job] live clinic fetch failed:", e?.message || e);
+          }
+        }
+
+        if (!clinicIdGiven && userClinics.length === 0) {
+          return err(call.toolName, 400, "No clinics found for this user. Ask them to set one up first.");
+        }
+
+        if (clinicIdGiven) {
+          r = await callOne(call.input.clinicId);
+        } else if (userClinics.length === 1) {
+          r = await callOne(userClinics[0]);
         } else {
           // Multi-clinic fan-out. Run in parallel; surface 200 even if some
           // clinics fail — chat is best-effort visible, not all-or-nothing.
@@ -746,9 +1142,12 @@ export async function executeTool(
       case "preview_post_consulting_job":
         normalizeClinicIdsInPlace(call.input, userContext);
         normalizeProfessionalRoleInPlace(call.input);
+        normalizeDatesInPlace(call.input);
         return genericPreview(call.toolName, auth, connectionId, call.input, (i) => {
           if (!Array.isArray(i.clinicIds) || i.clinicIds.length === 0) return "clinicIds required (array of UUIDs)";
-          if (!Array.isArray(i.dates) || i.dates.length === 0) return "dates required";
+          if (!Array.isArray(i.dates) || i.dates.length === 0) {
+            return `dates required (got: ${JSON.stringify(call.input.dates)}). Pass an array of ISO dates like ["2026-05-21","2026-05-22"] OR a string like "may 21-24".`;
+          }
           if (typeof i.total_days !== "number") return "total_days required";
           if (typeof i.hours_per_day !== "number") return "hours_per_day required";
           return null;
@@ -756,9 +1155,11 @@ export async function executeTool(
       case "confirm_post_consulting_job":
         normalizeClinicIdsInPlace(call.input, userContext);
         normalizeProfessionalRoleInPlace(call.input);
+        normalizeDatesInPlace(call.input);
         return genericConfirm(call.toolName, auth, connectionId, call.input, (p) => {
           normalizeClinicIdsInPlace(p, userContext);
           normalizeProfessionalRoleInPlace(p);
+          normalizeDatesInPlace(p);
           return callHandlerInProcess(createMultiDayConsultingHandler, { method: "POST", body: p, auth });
         });
 
@@ -1059,6 +1460,19 @@ export async function executeTool(
           }),
         );
 
+      // ------------------- ESCAPE HATCH: generic DDB read -------------------
+      // Use only when no narrow tool fits. See ddbQueryTool.ts and the plan
+      // make-a-comprehensive-table-joyful-pearl.md. Auth scoping, PII
+      // redaction, and the table allow-list are all enforced inside
+      // runQueryDdbTable — this case is just plumbing.
+      case "query_ddb_table": {
+        const session = await getSessionByConnectionId(connectionId);
+        if (!session) return err(call.toolName, 410, "session_expired");
+        const r = await runQueryDdbTable(call.input as QueryDdbInput, auth, session);
+        if (!r.ok) return err(call.toolName, r.status, r.error);
+        return ok(call.toolName, r.data);
+      }
+
       default:
         return err(call.toolName, 501, `Tool '${call.toolName}' not wired up`);
     }
@@ -1067,3 +1481,4 @@ export async function executeTool(
     return err(call.toolName, 500, e?.message || "Tool execution failed");
   }
 }
+

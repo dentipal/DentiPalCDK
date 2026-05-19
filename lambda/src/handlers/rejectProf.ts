@@ -211,11 +211,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       });
     }
 
+    const detail = error instanceof Error ? error.message : String(error);
     return json(event, 500, {
       status: "error",
       statusCode: 500,
       error: "Internal Server Error",
-      message: "Failed to reject job application",
+      message: `Failed to reject job application: ${detail}`,
     });
   }
 };

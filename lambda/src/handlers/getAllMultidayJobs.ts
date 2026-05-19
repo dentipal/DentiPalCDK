@@ -61,6 +61,7 @@ interface MultidayJobResponse {
     city: string;
     state: string;
     pincode: string;
+    locationUrl: string;
     bookingOutPeriod: string;
     clinicSoftware: string;
     freeParkingAvailable: boolean;

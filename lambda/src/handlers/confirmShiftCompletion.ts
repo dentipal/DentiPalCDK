@@ -134,10 +134,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        if (currentStatus !== "scheduled") {
+        // "accepted" is a legacy spelling of "scheduled" from an earlier
+        // version of acceptProf / respondToNegotiation. Treat both as
+        // confirmable so old rows aren't stuck.
+        const CONFIRMABLE_STATUSES = new Set(["scheduled", "accepted"]);
+        if (!CONFIRMABLE_STATUSES.has(currentStatus)) {
             return json(event, 409, {
                 error: "Invalid status transition",
-                message: `Shift cannot be confirmed from status '${currentStatus}'. Expected 'scheduled'.`,
+                message: `Shift cannot be confirmed from status '${currentStatus}'. Expected 'scheduled' or 'accepted'.`,
             });
         }
 
@@ -154,10 +158,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 "SET applicationStatus = :completed, actualHoursWorked = :hours, " +
                 "confirmedByUserSub = :clinicUser, confirmedAt = :now, updatedAt = :now" +
                 (clinicNotes ? ", clinicNotes = :notes" : ""),
-            ConditionExpression: "applicationStatus = :scheduled",
+            ConditionExpression: "applicationStatus = :scheduled OR applicationStatus = :accepted",
             ExpressionAttributeValues: {
                 ":completed": { S: "completed" },
                 ":scheduled": { S: "scheduled" },
+                ":accepted": { S: "accepted" },
                 ":hours": { N: String(hoursNum) },
                 ":clinicUser": { S: clinicUserSub },
                 ":now": { S: now },

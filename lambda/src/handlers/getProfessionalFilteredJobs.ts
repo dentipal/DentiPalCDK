@@ -877,7 +877,21 @@ export const handler = async (
       return obj;
     };
 
-    const jobs = pageJobs.map(toJobObject);
+    // Organic bucket: strip promotion fields so the badge never renders on
+    // organic-positioned cards and clicks/impressions aren't mis-attributed
+    // to the promotion. The merchant paid for the Promoted section slot
+    // (page-1-only), not for incidental organic appearances on later pages
+    // or when a job slipped past the 50-mile promoted-radius gate.
+    const jobs = pageJobs.map((entry) => {
+      const obj = toJobObject(entry);
+      if (obj.isPromoted) {
+        obj.isPromoted = false;
+        delete obj.promotionId;
+        delete obj.promotionPlanId;
+        delete obj.promotionExpiresAt;
+      }
+      return obj;
+    });
     // Promoted jobs are page-1-only (gated by isFirstPage above) and capped by
     // the 50-mile relevance radius — the geographic gate replaces a numeric
     // count cap, so we surface every promoted job that qualifies.
