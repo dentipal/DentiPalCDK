@@ -457,18 +457,34 @@ const hardPurgeClinic = async (clinicId: string) => {
 
     // 5. Feedback (ratings) — table shape varies; try several common key shapes
     await collectScanByClinicId(FEEDBACK_TABLE, clinicId, deletes, (item) => {
-        if (item.feedbackId?.S) return { feedbackId: { S: item.feedbackId.S } };
-        if (item.ratingId?.S) return { ratingId: { S: item.ratingId.S } };
-        if (item.id?.S) return { id: { S: item.id.S } };
+        const key: Record<string, AttributeValue> = {};
+        if (item.feedbackId?.S) {
+            key.feedbackId = { S: item.feedbackId.S };
+            return key;
+        }
+        if (item.ratingId?.S) {
+            key.ratingId = { S: item.ratingId.S };
+            return key;
+        }
+        if (item.id?.S) {
+            key.id = { S: item.id.S };
+            return key;
+        }
         return null;
     });
 
     // 6. Notifications referencing this clinic
     await collectScanByClinicId(NOTIFICATIONS_TABLE, clinicId, deletes, (item) => {
+        const key: Record<string, AttributeValue> = {};
         if (item.notificationId?.S && item.userSub?.S) {
-            return { userSub: { S: item.userSub.S }, notificationId: { S: item.notificationId.S } };
+            key.userSub = { S: item.userSub.S };
+            key.notificationId = { S: item.notificationId.S };
+            return key;
         }
-        if (item.notificationId?.S) return { notificationId: { S: item.notificationId.S } };
+        if (item.notificationId?.S) {
+            key.notificationId = { S: item.notificationId.S };
+            return key;
+        }
         return null;
     });
 
