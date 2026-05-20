@@ -46,7 +46,7 @@ const transformBody = (body: any): any => {
         state: "state",
         zipCode: "zip_code",
         phone: "clinic_phone",
-        email: "clinic_email",
+        email: "contact_email",
         officeImage: "office_image_key"
     };
 
@@ -58,7 +58,7 @@ const transformBody = (body: any): any => {
     }
     if (body.contactInfo) {
         if (body.contactInfo.phone) transformed.clinic_phone = body.contactInfo.phone;
-        if (body.contactInfo.email) transformed.clinic_email = body.contactInfo.email;
+        if (body.contactInfo.email) transformed.contact_email = body.contactInfo.email;
     }
 
     for (const [key, value] of Object.entries(body)) {
@@ -164,7 +164,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             "num_hygienists", "number_of_operatories", "parking_type", "parking_cost", "practice_type",
             "primary_contact_first_name", "primary_contact_last_name", "primary_practice_area",
             "software_used", "state", "notes", "website", "dental_association",
-            "clinic_email", "zip_code", "addressLine1", "office_image_key",
+            "contact_email", "zip_code", "addressLine1", "office_image_key",
             "location_url"
         ];
 

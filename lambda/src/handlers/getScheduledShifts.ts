@@ -221,7 +221,12 @@ export const handler = async (
       const jid = app.jobId?.S || "";
       const d = detailsMap.get(jid) || {};
       const sub = app.professionalUserSub?.S || "";
-      const isFromInvitation = Boolean(app.fromInvitation?.BOOL) || invitedPairs.has(`${jid}|${sub}`);
+      // Three independent signals (flag, invitation-response date, JobInvitations row) —
+      // OR them so the badge survives missing data in any single source.
+      const isFromInvitation =
+        Boolean(app.fromInvitation?.BOOL) ||
+        Boolean(app.invitationResponseDate?.S) ||
+        invitedPairs.has(`${jid}|${sub}`);
 
       return {
         jobId: jid || "No jobId",

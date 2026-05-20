@@ -76,6 +76,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             TableName: process.env.CLINICS_TABLE!,
             Limit: limit,
             ExclusiveStartKey: cursor,
+            // Hide soft-deleted clinics from the admin clinics list — they appear
+            // only in the dedicated /clinics/deleted view.
+            FilterExpression: "attribute_not_exists(deletedAt)",
         }));
 
         let rows: ClinicRow[] = (scan.Items || [])

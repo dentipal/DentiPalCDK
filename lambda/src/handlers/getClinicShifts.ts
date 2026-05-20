@@ -4,6 +4,7 @@ import {
   DynamoDBClient,
   QueryCommand,
   GetItemCommand,
+  BatchGetItemCommand,
   QueryCommandInput,
   QueryCommandOutput,
   AttributeValue,
@@ -22,6 +23,7 @@ const USER_POOL_ID = process.env.USER_POOL_ID || "";
 
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE;
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
+const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE;
 
 // Optional envs (defaults provided)
 const JOB_APPLICATIONS_CLINIC_GSI =
@@ -263,6 +265,41 @@ export const handler = async (
       });
     }
 
+    // 5a. JobInvitations lookup — build the set of (jobId, professionalUserSub)
+    //     pairs that exist in JobInvitations. Any application matching one of
+    //     these pairs originated from a clinic invite, regardless of whether
+    //     the application row carries the `fromInvitation` flag (legacy rows
+    //     and accept-branch rows historically didn't).
+    const invitedPairs = new Set<string>();
+    if (JOB_INVITATIONS_TABLE && applicationItems.length > 0) {
+      const inviteKeys = applicationItems
+        .filter((it) => s(it.jobId) && s(it.professionalUserSub))
+        .map((it) => ({
+          jobId: { S: s(it.jobId) },
+          professionalUserSub: { S: s(it.professionalUserSub) },
+        }));
+      for (let i = 0; i < inviteKeys.length; i += 100) {
+        const chunk = inviteKeys.slice(i, i + 100);
+        try {
+          const resp = await dynamodb.send(new BatchGetItemCommand({
+            RequestItems: {
+              [JOB_INVITATIONS_TABLE]: {
+                Keys: chunk,
+                ProjectionExpression: "jobId, professionalUserSub",
+              },
+            },
+          }));
+          for (const item of (resp.Responses?.[JOB_INVITATIONS_TABLE] || [])) {
+            const jid = (item.jobId as any)?.S;
+            const sub = (item.professionalUserSub as any)?.S;
+            if (jid && sub) invitedPairs.add(`${jid}|${sub}`);
+          }
+        } catch (err: any) {
+          console.warn("[getClinicShifts] fromInvitation lookup failed:", err?.message);
+        }
+      }
+    }
+
     // 5. Enrich Applications with Job Data
     const appsEnriched = applicationItems.map((it) => {
       const jobId = s(it.jobId);
@@ -273,13 +310,20 @@ export const handler = async (
       const acceptedRate = n(it.acceptedHourlyRate) ?? n(it.acceptedRate) ?? n(it.accepted_hourly_rate) ?? n(it.accepted_rate);
       const finalRate = acceptedRate ?? job.rate ?? null;
 
+      // Three independent signals — any one means this row is invite-originated.
+      const sub = s(it.professionalUserSub);
+      const fromInvitationFlag = Boolean((it.fromInvitation as any)?.BOOL);
+      const invitationDate = s(it.invitationResponseDate);
+      const isFromInvitation =
+        fromInvitationFlag || Boolean(invitationDate) || invitedPairs.has(`${jobId}|${sub}`);
+
       return {
         ...job, // Bring in all job properties
 
         applicationId: s(it.applicationId),
         clinicId: s(it.clinicId),
         jobId,
-        professionalUserSub: s(it.professionalUserSub),
+        professionalUserSub: sub,
         professionalName: s(it.professionalName) || "Professional",
         applicationStatus: status,
         appliedAt: s(it.appliedAt),
@@ -290,6 +334,8 @@ export const handler = async (
         jobTitle: job.jobTitle || "No Title",
         rate: finalRate,
         payType: job.payType || "per_hour",
+        fromInvitation: isFromInvitation,
+        invitationResponseDate: invitationDate || null,
       };
     });
 

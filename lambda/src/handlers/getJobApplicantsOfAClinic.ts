@@ -549,7 +549,13 @@ export const handler = async (
         : null;
 
       const inviteKey = `${app.jobId}|${app.professionalUserSub}`;
-      const isFromInvitation = Boolean(app.fromInvitation) || invitedPairs.has(inviteKey);
+      // Three independent signals — any one of them means this application
+      // originated from a clinic invitation. We OR them so the badge survives
+      // missing data in any single source.
+      const isFromInvitation =
+        Boolean(app.fromInvitation) ||
+        Boolean(app.invitationResponseDate) ||
+        invitedPairs.has(inviteKey);
 
       return {
         application: {
@@ -563,6 +569,7 @@ export const handler = async (
           proposedRate: app.proposedRate ?? null,
           negotiationId: app.negotiationId ?? null,
           fromInvitation: isFromInvitation,
+          invitationResponseDate: app.invitationResponseDate ?? null,
           // Audit trail of status transitions. The Query at line ~427 fetches
           // all attributes (no ProjectionExpression), so unmarshall has already
           // produced a plain JS array here — just pass it through. Older rows

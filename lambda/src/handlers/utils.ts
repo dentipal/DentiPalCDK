@@ -173,9 +173,14 @@ export const canAccessClinic = async (
         const response: GetItemCommandOutput = await dynamoClient.send(new GetItemCommand({
             TableName: CLINICS_TABLE,
             Key: { clinicId: { S: clinicId } },
-            ProjectionExpression: "AssociatedUsers, createdBy",
+            ProjectionExpression: "AssociatedUsers, createdBy, deletedAt",
         }));
         if (!response.Item) return false;
+
+        // Soft-deleted clinics are invisible to every active operation. They
+        // only come back via restoreClinic, which reads the row directly and
+        // bypasses this gate.
+        if (response.Item.deletedAt?.S) return false;
 
         const createdBy = response.Item.createdBy?.S;
         if (createdBy && createdBy === userSub) return true;
@@ -190,11 +195,10 @@ export const canAccessClinic = async (
 
 /**
  * WRITE gate: may this user perform `action` on the given clinic?
- * Same membership check as canAccessClinic, plus a role → capability matrix:
- *   root / clinicadmin / clinicmanager → every write action
+ * Role → capability matrix:
+ *   root → every write action on every clinic (platform superuser on the clinic side)
+ *   clinicadmin / clinicmanager → every write action, but only on clinics they're a member of
  *   clinicviewer → no write actions
- * Root no longer bypasses the membership check: a Root user may only write to
- * clinics they own (createdBy) or are associated with (AssociatedUsers).
  */
 export const canWriteClinic = async (
     userSub: string,
@@ -203,7 +207,29 @@ export const canWriteClinic = async (
     _action: ClinicWriteAction
 ): Promise<boolean> => {
     const role = getClinicRole(groups);
+    console.log("[canWriteClinic] decided role:", role, "for groups:", JSON.stringify(groups), "clinicId:", clinicId);
     if (!role || role === "clinicviewer") return false;
+
+    // Even Root cannot write to a soft-deleted clinic — they must restore it
+    // first. canAccessClinic already returns false for soft-deleted rows, so
+    // we reuse it as the existence + soft-delete gate before the Root bypass.
+    if (role === "root") {
+        if (!CLINICS_TABLE) return true; // misconfig: fall back to legacy behavior
+        try {
+            const resp: GetItemCommandOutput = await dynamoClient.send(new GetItemCommand({
+                TableName: CLINICS_TABLE,
+                Key: { clinicId: { S: clinicId } },
+                ProjectionExpression: "deletedAt",
+            }));
+            if (!resp.Item) return false;
+            if (resp.Item.deletedAt?.S) return false;
+            return true;
+        } catch (error) {
+            console.error(`[canWriteClinic] Error checking soft-delete for clinic=${clinicId}:`, error);
+            return false;
+        }
+    }
+
     return canAccessClinic(userSub, groups, clinicId);
 };
 
@@ -233,7 +259,8 @@ export const listAccessibleClinicIds = async (
         do {
             const input: ScanCommandInput = {
                 TableName: CLINICS_TABLE,
-                FilterExpression: "contains(AssociatedUsers, :sub) OR createdBy = :sub",
+                FilterExpression:
+                    "(contains(AssociatedUsers, :sub) OR createdBy = :sub) AND attribute_not_exists(deletedAt)",
                 ExpressionAttributeValues: { ":sub": { S: userSub } },
                 ProjectionExpression: "clinicId",
                 ExclusiveStartKey,
