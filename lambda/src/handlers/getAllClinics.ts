@@ -103,6 +103,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         void groups;
         filterExpressions.push("(createdBy = :userSub OR contains(AssociatedUsers, :userSub))");
         expressionAttributeValues[":userSub"] = { S: userSub };
+        // Hide soft-deleted clinics from every listing — they only surface via
+        // the dedicated /clinics/deleted endpoint for Root/Admin.
+        filterExpressions.push("attribute_not_exists(deletedAt)");
         console.log(`[getAllClinics] Scoping to createdBy/AssociatedUsers for user ${userSub}.`);
         
         // 4. Create DynamoDB Scan Command Input
