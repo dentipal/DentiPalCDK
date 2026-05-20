@@ -173,9 +173,14 @@ export const canAccessClinic = async (
         const response: GetItemCommandOutput = await dynamoClient.send(new GetItemCommand({
             TableName: CLINICS_TABLE,
             Key: { clinicId: { S: clinicId } },
-            ProjectionExpression: "AssociatedUsers, createdBy",
+            ProjectionExpression: "AssociatedUsers, createdBy, deletedAt",
         }));
         if (!response.Item) return false;
+
+        // Soft-deleted clinics are invisible to every active operation. They
+        // only come back via restoreClinic, which reads the row directly and
+        // bypasses this gate.
+        if (response.Item.deletedAt?.S) return false;
 
         const createdBy = response.Item.createdBy?.S;
         if (createdBy && createdBy === userSub) return true;
@@ -203,7 +208,27 @@ export const canWriteClinic = async (
 ): Promise<boolean> => {
     const role = getClinicRole(groups);
     if (!role || role === "clinicviewer") return false;
-    if (role === "root") return true;
+
+    // Even Root cannot write to a soft-deleted clinic — they must restore it
+    // first. canAccessClinic already returns false for soft-deleted rows, so
+    // we reuse it as the existence + soft-delete gate before the Root bypass.
+    if (role === "root") {
+        if (!CLINICS_TABLE) return true; // misconfig: fall back to legacy behavior
+        try {
+            const resp: GetItemCommandOutput = await dynamoClient.send(new GetItemCommand({
+                TableName: CLINICS_TABLE,
+                Key: { clinicId: { S: clinicId } },
+                ProjectionExpression: "deletedAt",
+            }));
+            if (!resp.Item) return false;
+            if (resp.Item.deletedAt?.S) return false;
+            return true;
+        } catch (error) {
+            console.error(`[canWriteClinic] Error checking soft-delete for clinic=${clinicId}:`, error);
+            return false;
+        }
+    }
+
     return canAccessClinic(userSub, groups, clinicId);
 };
 
@@ -233,7 +258,8 @@ export const listAccessibleClinicIds = async (
         do {
             const input: ScanCommandInput = {
                 TableName: CLINICS_TABLE,
-                FilterExpression: "contains(AssociatedUsers, :sub) OR createdBy = :sub",
+                FilterExpression:
+                    "(contains(AssociatedUsers, :sub) OR createdBy = :sub) AND attribute_not_exists(deletedAt)",
                 ExpressionAttributeValues: { ":sub": { S: userSub } },
                 ProjectionExpression: "clinicId",
                 ExclusiveStartKey,

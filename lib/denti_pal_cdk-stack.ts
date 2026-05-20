@@ -838,8 +838,37 @@ export class DentiPalCDKStack extends cdk.Stack {
             billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
             // Stream feeds the cascadeClinicDataUpdate Lambda — keeps denormalized
-            // clinic address fields on JobPostings in sync after address edits.
+            // clinic address fields on JobPostings in sync after address edits,
+            // and runs the hard-cascade purge when TTL deletes a soft-deleted row.
             stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
+            // Soft-delete uses `ttl` (unix epoch seconds, +30 days at delete time).
+            // DynamoDB removes the row at TTL, which emits a REMOVE stream event
+            // that the cascade Lambda turns into a full purge of related data.
+            timeToLiveAttribute: 'ttl',
+        });
+
+        // Snapshots of clinics that have been soft-deleted. Lives forever —
+        // used by the professional-side fallback UI to render "Clinic no
+        // longer available" with the last-known name/logo even after the
+        // 30-day TTL physically removes the Clinics row.
+        const deletedClinicSnapshotsTable = new dynamodb.Table(this, 'DeletedClinicSnapshotsTable', {
+            tableName: 'DentiPal-V5-DeletedClinicSnapshots',
+            partitionKey: { name: 'clinicId', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
+        });
+
+        // Audit log for every clinic restore action — captures who, when, why,
+        // and against whom (the original deleter). Append-only, retained
+        // forever so a restore can never be quietly reversed without trace.
+        // Keyed by (clinicId PK, restoredAt SK) so a single clinic can be
+        // restored more than once over its lifetime and we keep every event.
+        const clinicRestoreAuditTable = new dynamodb.Table(this, 'ClinicRestoreAuditTable', {
+            tableName: 'DentiPal-V5-ClinicRestoreAudit',
+            partitionKey: { name: 'clinicId', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'restoredAt', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
         });
         clinicsTable.addGlobalSecondaryIndex({
             indexName: 'CreatedByIndex',
@@ -1341,6 +1370,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             notificationPreferencesTable,
             notificationsTable,
             chatMessagesTable,
+            deletedClinicSnapshotsTable,
         ];
 
         // ========================================================================
@@ -1470,6 +1500,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 CLINIC_PROFILES_TABLE: clinicProfilesTable.tableName,
                 CLINIC_FAVORITES_TABLE: clinicFavoritesTable.tableName,
                 CLINICS_TABLE: clinicsTable.tableName,
+                DELETED_CLINIC_SNAPSHOTS_TABLE: deletedClinicSnapshotsTable.tableName,
                 CONNECTIONS_TABLE: connectionsTable.tableName,
                 CONVERSATIONS_TABLE: conversationsTable.tableName,
                 FEEDBACK_TABLE: feedbackTable.tableName,
@@ -1660,18 +1691,40 @@ export class DentiPalCDKStack extends cdk.Stack {
             runtime: lambda.Runtime.NODEJS_18_X,
             handler: 'dist/handlers/cascadeClinicDataUpdate.handler',
             code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
-            timeout: cdk.Duration.seconds(60),
             memorySize: 256,
             environment: {
                 REGION: this.region,
                 JOB_POSTINGS_TABLE: jobPostingsTable.tableName,
                 CLINICS_TABLE: clinicsTable.tableName,
                 CLINIC_PROFILES_TABLE: clinicProfilesTable.tableName,
+                // Needed by the REMOVE branch (TTL-triggered hard purge of
+                // every clinic-scoped table + the office-image S3 prefix).
+                JOB_APPLICATIONS_TABLE: jobApplicationsTable.tableName,
+                JOB_INVITATIONS_TABLE: jobInvitationsTable.tableName,
+                JOB_NEGOTIATIONS_TABLE: jobNegotiationsTable.tableName,
+                USER_CLINIC_ASSIGNMENTS_TABLE: userClinicAssignmentsTable.tableName,
+                CLINIC_FAVORITES_TABLE: clinicFavoritesTable.tableName,
+                FEEDBACK_TABLE: feedbackTable.tableName,
+                NOTIFICATIONS_TABLE: notificationsTable.tableName,
+                CLINIC_OFFICE_IMAGES_BUCKET: clinicOfficeImagesBucket.bucketName,
             },
+            // Hard purge across 8 tables + S3 for a busy clinic can take a while;
+            // bump from 60s so the BatchWriteItem retry loop has room.
+            timeout: cdk.Duration.minutes(5),
         });
 
         // Read jobs by ClinicIdIndex; update jobs by primary key.
         jobPostingsTable.grantReadWriteData(cascadeClinicDataFn);
+        // Hard-purge grants — read for Query/Scan, write for BatchWriteItem deletes.
+        clinicProfilesTable.grantReadWriteData(cascadeClinicDataFn);
+        jobApplicationsTable.grantReadWriteData(cascadeClinicDataFn);
+        jobInvitationsTable.grantReadWriteData(cascadeClinicDataFn);
+        jobNegotiationsTable.grantReadWriteData(cascadeClinicDataFn);
+        userClinicAssignmentsTable.grantReadWriteData(cascadeClinicDataFn);
+        clinicFavoritesTable.grantReadWriteData(cascadeClinicDataFn);
+        feedbackTable.grantReadWriteData(cascadeClinicDataFn);
+        notificationsTable.grantReadWriteData(cascadeClinicDataFn);
+        clinicOfficeImagesBucket.grantReadWrite(cascadeClinicDataFn);
 
         // Wire each source table's stream as an event source for the cascade.
         cascadeClinicDataFn.addEventSource(new eventSources.DynamoEventSource(clinicsTable, {

@@ -76,6 +76,9 @@ export const handler = async (
       expressionAttributeNames["#name"] = "name";
     }
 
+    // Always hide soft-deleted clinics from this listing.
+    filterExpressions.push("attribute_not_exists(deletedAt)");
+
     const baseScan: ScanCommandInput = {
       TableName: process.env.CLINICS_TABLE,
       FilterExpression: filterExpressions.join(" AND "),

@@ -16,6 +16,9 @@ import { handler as getAllClinicsHandler } from "./handlers/getAllClinics";
 import { handler as getClinicHandler } from "./handlers/getClinic";
 import { handler as updateClinicHandler } from "./handlers/updateClinic";
 import { handler as deleteClinicHandler } from "./handlers/deleteClinic";
+import { handler as restoreClinicHandler } from "./handlers/restoreClinic";
+import { handler as listDeletedClinicsHandler } from "./handlers/listDeletedClinics";
+import { handler as getClinicSnapshotHandler } from "./handlers/getClinicSnapshot";
 import { handler as getClinicAddressHandler } from "./handlers/getClinicAddress";
 
 import { handler as createAssignmentHandler } from "./handlers/createAssignment";
@@ -265,9 +268,14 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "POST:/clinics": createClinicHandler,
         "GET:/clinics-user": getUsersClinicsHandler,
         "GET:/clinics": getAllClinicsHandler,
+        // Exact-match routes registered BEFORE the {clinicId} pattern so the
+        // dispatcher tries them first.
+        "GET:/clinics/deleted": listDeletedClinicsHandler,
         "GET:/clinics/{clinicId}": getClinicHandler,
         "PUT:/clinics/{clinicId}": updateClinicHandler,
         "DELETE:/clinics/{clinicId}": deleteClinicHandler,
+        "POST:/clinics/{clinicId}/restore": restoreClinicHandler,
+        "GET:/clinics/{clinicId}/snapshot": getClinicSnapshotHandler,
 
         // Assignment management routes
         "POST:/assignments": createAssignmentHandler,
