@@ -137,20 +137,67 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // 4. Update DynamoDB
+    // Append a statusHistory entry in the same UpdateItem so the audit trail
+    // is consistent with the status flip. `if_not_exists` covers legacy
+    // applications created before the statusHistory rollout. The
+    // ConditionExpression makes this idempotent — re-clicking Reject on an
+    // already-rejected applicant lands in the catch branch and skips the
+    // EventBridge fan-out below.
+    const nowIso = new Date().toISOString();
     const updateParams: UpdateItemCommandInput = {
       TableName: process.env.JOB_APPLICATIONS_TABLE || "DentiPal-V5-JobApplications",
       Key: {
         jobId: { S: jobId },
         professionalUserSub: { S: professionalUserSub }
       },
-      UpdateExpression: "SET applicationStatus = :rejected",
+      UpdateExpression:
+        "SET applicationStatus = :rejected, updatedAt = :now, " +
+        "statusHistory = list_append(if_not_exists(statusHistory, :empty), :entry)",
+      ConditionExpression: "applicationStatus <> :rejected",
       ExpressionAttributeValues: {
-        ":rejected": { S: "rejected" }
-      }
+        ":rejected": { S: "rejected" },
+        ":now": { S: nowIso },
+        ":empty": { L: [] },
+        ":entry": {
+          L: [
+            {
+              M: {
+                status: { S: "rejected" },
+                at: { S: nowIso },
+                actorId: { S: userInfo.sub || "clinic" },
+                actorRole: { S: "clinic" },
+              },
+            },
+          ],
+        },
+      },
     };
 
-    const updateCommand = new UpdateItemCommand(updateParams);
-    await dynamodb.send(updateCommand);
+    let alreadyRejected = false;
+    try {
+      await dynamodb.send(new UpdateItemCommand(updateParams));
+    } catch (e) {
+      if ((e as { name?: string })?.name === "ConditionalCheckFailedException") {
+        alreadyRejected = true;
+        console.log("[rejectProf] Application already rejected; treating as no-op", {
+          jobId,
+          professionalUserSub,
+        });
+      } else {
+        throw e;
+      }
+    }
+
+    if (alreadyRejected) {
+      return json(event, 200, {
+        status: "success",
+        statusCode: 200,
+        message: "Job application already rejected — no changes applied",
+        data: { jobId, professionalUserSub },
+        idempotent: true,
+        timestamp: nowIso,
+      });
+    }
 
     console.log(`Application for job ${jobId} by professional ${professionalUserSub} rejected successfully.`);
 

@@ -170,7 +170,18 @@ export const handler = async (
 
     const profiles = items.map((it) => unmarshallMap(it));
 
-    return json(event, 200, { profile: profiles[0] || null });
+    // Defense in depth: if the rating denorm step missed avgRating but ratingSum
+    // and ratingCount are present, compute it on the fly so the UI gets a number.
+    const first = profiles[0];
+    if (first && typeof first.avgRating !== "number") {
+      const count = typeof first.ratingCount === "number" ? first.ratingCount : 0;
+      const sum = typeof first.ratingSum === "number" ? first.ratingSum : 0;
+      if (count > 0) {
+        first.avgRating = Math.round((sum / count) * 100) / 100;
+      }
+    }
+
+    return json(event, 200, { profile: first || null });
 
   } catch (error: any) {
     console.error("Error getting public professional profile:", error);

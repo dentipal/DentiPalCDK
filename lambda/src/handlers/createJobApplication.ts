@@ -319,15 +319,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         const isNegotiating = hasProposedRate || hasSalaryRange;
 
+        const initialStatus = isNegotiating ? "negotiating" : "pending";
         const applicationItem: Record<string, any> = {
             jobId: jobId,               // Partition Key
             professionalUserSub: userSub, // Sort Key
             applicationId: applicationId,
             clinicId: clinicIdFromJob,
             // Status logic: 'negotiating' if rate or salary range proposed, else 'pending'
-            applicationStatus: isNegotiating ? "negotiating" : "pending",
+            applicationStatus: initialStatus,
             appliedAt: timestamp,
             updatedAt: timestamp,
+            // Append-only timeline of status transitions. The first entry mirrors
+            // the initial applicationStatus; subsequent transitions are appended
+            // in acceptProf / rejectProf / respondToInvitation via list_append.
+            statusHistory: [
+                {
+                    status: initialStatus,
+                    at: timestamp,
+                    actorId: userSub,
+                    actorRole: "professional",
+                },
+            ],
 
             // Optional Fields
             applicationMessage: applicationData.message || null,
