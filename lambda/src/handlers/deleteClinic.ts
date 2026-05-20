@@ -49,14 +49,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const rawClinicId =
             event.pathParameters?.clinicId || event.pathParameters?.proxy;
 
-        // Defensive normalization — URL-decode, trim whitespace, strip any
-        // trailing slash. If the frontend ever sends an encoded UUID or
-        // accidental trailing characters, GetItem will silently miss and we'd
-        // wrongly return 404.
+        // Defensive normalization. Three things can corrupt the clinicId
+        // before it hits DynamoDB:
+        //   1. The router passes `pathParameters.proxy` which under the
+        //      catch-all REST proxy integration contains the FULL path
+        //      after the API root, including the "clinics/" prefix
+        //      (e.g. "clinics/4fc550c1-..."). DynamoDB then looks up
+        //      `clinicId = "clinics/4fc550c1-..."` and finds nothing.
+        //      We strip everything up to and including the last "/" so the
+        //      key is just the trailing segment (the UUID).
+        //   2. URL-encoding (e.g. trailing %0A from copy-paste).
+        //   3. Whitespace or trailing slashes.
         let clinicId: string | undefined = rawClinicId;
         if (clinicId) {
             try { clinicId = decodeURIComponent(clinicId); } catch { /* not encoded */ }
             clinicId = clinicId.trim().replace(/\/+$/, "");
+            const lastSlash = clinicId.lastIndexOf("/");
+            if (lastSlash >= 0) clinicId = clinicId.slice(lastSlash + 1);
         }
 
         console.log("[deleteClinic] auth+id resolved", {

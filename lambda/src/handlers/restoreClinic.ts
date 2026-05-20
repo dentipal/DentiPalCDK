@@ -54,8 +54,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        const clinicId: string | undefined =
+        // Normalize: the catch-all REST proxy integration passes the full
+        // path under pathParameters.proxy (including any "clinics/" prefix).
+        // Strip everything before the last "/" so the lookup uses just the
+        // trailing UUID segment.
+        let clinicId: string | undefined =
             event.pathParameters?.clinicId || event.pathParameters?.proxy;
+        if (clinicId) {
+            try { clinicId = decodeURIComponent(clinicId); } catch { /* not encoded */ }
+            clinicId = clinicId.trim().replace(/\/+$/, "");
+            const lastSlash = clinicId.lastIndexOf("/");
+            if (lastSlash >= 0) clinicId = clinicId.slice(lastSlash + 1);
+            // Restore route is /clinics/{id}/restore — after stripping to the
+            // last segment we'd get "restore". Reach back one segment if so.
+            if (clinicId === "restore") {
+                const parts = (event.pathParameters?.proxy || "").split("/").filter(Boolean);
+                clinicId = parts[parts.length - 2];
+            }
+        }
 
         if (!clinicId) {
             return json(event, 400, {

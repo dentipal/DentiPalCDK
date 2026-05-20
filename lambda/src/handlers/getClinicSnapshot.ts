@@ -29,8 +29,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     try {
-        const clinicId: string | undefined =
+        // Normalize: the catch-all REST proxy integration passes the full
+        // path under pathParameters.proxy (including any "clinics/" prefix).
+        // Strip everything before the last "/" so the lookup uses just the
+        // trailing segment. /clinics/{id}/snapshot ends with "snapshot" after
+        // stripping — reach back one segment when that happens.
+        let clinicId: string | undefined =
             event.pathParameters?.clinicId || event.pathParameters?.proxy;
+        if (clinicId) {
+            try { clinicId = decodeURIComponent(clinicId); } catch { /* not encoded */ }
+            clinicId = clinicId.trim().replace(/\/+$/, "");
+            const lastSlash = clinicId.lastIndexOf("/");
+            if (lastSlash >= 0) clinicId = clinicId.slice(lastSlash + 1);
+            if (clinicId === "snapshot") {
+                const parts = (event.pathParameters?.proxy || "").split("/").filter(Boolean);
+                clinicId = parts[parts.length - 2];
+            }
+        }
 
         if (!clinicId) {
             return json(event, 400, {
