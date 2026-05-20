@@ -104,6 +104,10 @@ interface ProfileResponseItem {
     zipcode: string;
     lat: number | null;
     lng: number | null;
+    // Denormalized rating aggregates stored on the profile row by
+    // submitProfessionalRating. Null/0 when the pro has no ratings yet.
+    avgRating: number | null;
+    ratingCount: number;
 }
 
 // Helper: parse a DynamoDB N attribute as a finite number, else null
@@ -255,6 +259,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             const specialties: string[] = item.specialties?.SS || [];
             const yearsOfExperience: number = item.years_of_experience?.N ? parseInt(item.years_of_experience.N, 10) : 0;
 
+            // Denormalized rating aggregates written by submitProfessionalRating.
+            // Read straight off the profile row — same source of truth used by
+            // the applicant list and YourRatingBanner.
+            const avgRating = parseNumOrNull(item.avgRating);
+            const ratingCountRaw = parseNumOrNull(item.ratingCount);
+            const ratingCount = ratingCountRaw != null ? Math.trunc(ratingCountRaw) : 0;
+
             // Return the structured profile
             return {
                 userSub: currentSub,
@@ -269,7 +280,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 state: state,
                 zipcode: zipcode,
                 lat,
-                lng
+                lng,
+                avgRating,
+                ratingCount
             };
         }));
 

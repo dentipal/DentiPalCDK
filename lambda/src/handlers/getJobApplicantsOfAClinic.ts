@@ -454,8 +454,10 @@ export const handler = async (
     // Project only the fields the applicants list needs. The profile modal re-fetches the full
     // profile on open, so bio/certificates/skills/specializations/videos don't need to ride along
     // with every applicant card — that was inflating response size ~10x for no visible gain.
+    // avgRating/ratingCount/ratingSum included so the card can render the star summary
+    // without a per-applicant follow-up call.
     const PROFILE_LIST_PROJECTION =
-      "userSub, firstName, first_name, lastName, last_name, professional_role, professionalRole, #role, yearsExperience, years_of_experience, yearsOfExperience, profile_image_url, profileImageKey";
+      "userSub, firstName, first_name, lastName, last_name, professional_role, professionalRole, #role, yearsExperience, years_of_experience, yearsOfExperience, profile_image_url, profileImageKey, avgRating, ratingCount, ratingSum";
     const PROFILE_LIST_EXPR_NAMES = { "#role": "role" };
 
     // 4. Invitation lookup — for each (jobId, professionalUserSub) pair on the
@@ -521,7 +523,17 @@ export const handler = async (
     );
 
     const profileByUserSub = new Map(
-      profilesRaw.filter((p): p is NonNullable<typeof p> => Boolean(p)).map((p) => [p.userSub, p])
+      profilesRaw.filter((p): p is NonNullable<typeof p> => Boolean(p)).map((p) => {
+        // Defense in depth: derive avgRating on the fly from ratingSum/ratingCount
+        // if the denorm step didn't land it on the row. Keeps the applicant card
+        // honest without requiring a backfill.
+        if (typeof p.avgRating !== "number") {
+          const c = typeof p.ratingCount === "number" ? p.ratingCount : 0;
+          const s = typeof p.ratingSum === "number" ? p.ratingSum : 0;
+          if (c > 0) p.avgRating = Math.round((s / c) * 100) / 100;
+        }
+        return [p.userSub, p];
+      })
     );
 
     const applicationsJoined = applications.map((app) => {
@@ -551,6 +563,11 @@ export const handler = async (
           proposedRate: app.proposedRate ?? null,
           negotiationId: app.negotiationId ?? null,
           fromInvitation: isFromInvitation,
+          // Audit trail of status transitions. The Query at line ~427 fetches
+          // all attributes (no ProjectionExpression), so unmarshall has already
+          // produced a plain JS array here — just pass it through. Older rows
+          // created before the rollout simply don't carry this field.
+          statusHistory: Array.isArray(app.statusHistory) ? app.statusHistory : null,
         },
         negotiation: nego,
         // `job` lives on byJobId[jobId].job so it's not duplicated per applicant in the flat list.

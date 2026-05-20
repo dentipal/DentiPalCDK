@@ -281,6 +281,20 @@ export const handler = async (
               applicationMessage: { S: responseData.message || "" },
               fromInvitation: { BOOL: true },
               invitationResponseDate: { S: timestamp },
+              // Seed the audit trail with the initial transition. Subsequent
+              // transitions append via list_append in acceptProf / rejectProf.
+              statusHistory: {
+                L: [
+                  {
+                    M: {
+                      status: { S: "pending" },
+                      at: { S: timestamp },
+                      actorId: { S: userSub },
+                      actorRole: { S: "professional" },
+                    },
+                  },
+                ],
+              },
             },
           })
         );
@@ -388,6 +402,21 @@ export const handler = async (
         payType: { S: jobPayType },
         fromInvitation: { BOOL: true },
         invitationResponseDate: { S: timestamp },
+        // Seed the audit trail. Invite-originated negotiations enter at
+        // "negotiating" rather than "pending" because the counter-proposal IS
+        // the initial application state.
+        statusHistory: {
+          L: [
+            {
+              M: {
+                status: { S: "negotiating" },
+                at: { S: timestamp },
+                actorId: { S: userSub },
+                actorRole: { S: "professional" },
+              },
+            },
+          ],
+        },
       };
 
       if (jobType === "permanent") {

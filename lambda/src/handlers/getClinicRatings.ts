@@ -78,18 +78,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             dynamodb.send(new GetItemCommand({
                 TableName: CLINICS_TABLE,
                 Key: { clinicId: { S: clinicId } },
-                ProjectionExpression: "avgRating, ratingCount",
+                ProjectionExpression: "avgRating, ratingCount, ratingSum",
             })),
         ]);
 
         const ratings = (ratingsRes.Items || []).map(unmarshallItem);
 
-        const avgRating = profileRes.Item?.avgRating?.N
+        const storedAvg = profileRes.Item?.avgRating?.N
             ? Number(profileRes.Item.avgRating.N)
             : null;
         const ratingCount = profileRes.Item?.ratingCount?.N
             ? Number(profileRes.Item.ratingCount.N)
             : 0;
+        const ratingSum = profileRes.Item?.ratingSum?.N
+            ? Number(profileRes.Item.ratingSum.N)
+            : 0;
+
+        // Fallback: if avgRating isn't denormalized on the row (e.g., the
+        // second write step in the submit handler didn't land), compute it
+        // here from sum/count so reads still surface the right number.
+        const avgRating = storedAvg ?? (
+            ratingCount > 0
+                ? Math.round((ratingSum / ratingCount) * 100) / 100
+                : null
+        );
 
         return json(event, 200, {
             clinicId,

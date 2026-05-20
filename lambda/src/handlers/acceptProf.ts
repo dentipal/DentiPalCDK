@@ -92,6 +92,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // --- Step 1: Authentication ---
+        // Captured here so the statusHistory entry written in step 7 can
+        // record which clinic user actually triggered the transition.
+        let acceptingUserSub = "clinic";
         try {
             const authHeader = event.headers?.Authorization || event.headers?.authorization;
             const userInfo = extractUserFromBearerToken(authHeader);
@@ -103,6 +106,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             if (!isAllowed) {
                 return json(event, 403, { status: "error", statusCode: 403, error: "Forbidden", message: "Access denied: insufficient permissions" });
             }
+            if (userInfo.sub) acceptingUserSub = userInfo.sub;
         } catch (authError) {
             console.error("Authentication failed:", authError instanceof Error ? authError.message : authError);
             return json(event, 401, { status: "error", statusCode: 401, error: "Unauthorized", message: "Authentication required" });
@@ -291,11 +295,34 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // --- Step 7: Update Application (status + acceptedRate when resolved) ---
+        // Append a statusHistory entry in the same UpdateItem so the audit
+        // trail and the status flip are atomic. `if_not_exists` covers legacy
+        // applications created before the statusHistory rollout — they get an
+        // array seeded with this one transition. The ConditionExpression makes
+        // the operation idempotent: re-clicking Accept on an already-scheduled
+        // applicant lands in the catch branch below and we skip the side
+        // effects (EventBridge, job posting "filled" update) cleanly.
+        const nowIso = new Date().toISOString();
         const updateAttrValues: { [key: string]: AttributeValue } = {
             ":status": { S: "scheduled" },
-            ":now": { S: new Date().toISOString() },
+            ":now": { S: nowIso },
+            ":empty": { L: [] },
+            ":entry": {
+                L: [
+                    {
+                        M: {
+                            status: { S: "scheduled" },
+                            at: { S: nowIso },
+                            actorId: { S: acceptingUserSub },
+                            actorRole: { S: "clinic" },
+                        },
+                    },
+                ],
+            },
         };
-        let updateExpr = "SET applicationStatus = :status, updatedAt = :now";
+        let updateExpr =
+            "SET applicationStatus = :status, updatedAt = :now, " +
+            "statusHistory = list_append(if_not_exists(statusHistory, :empty), :entry)";
         if (acceptedRate != null) {
             updateExpr += ", acceptedRate = :acceptedRate";
             updateAttrValues[":acceptedRate"] = { N: String(acceptedRate) };
@@ -307,10 +334,36 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 professionalUserSub: { S: professionalUserSub }
             },
             UpdateExpression: updateExpr,
+            ConditionExpression: "applicationStatus <> :status",
             ExpressionAttributeValues: updateAttrValues,
         };
 
-        await dynamo.send(new UpdateItemCommand(updateCommandInput));
+        let alreadyScheduled = false;
+        try {
+            await dynamo.send(new UpdateItemCommand(updateCommandInput));
+        } catch (e) {
+            if ((e as { name?: string })?.name === "ConditionalCheckFailedException") {
+                // Already scheduled — treat as idempotent success and skip the
+                // side effects below so we don't double-fan-out notifications.
+                alreadyScheduled = true;
+                console.log("[acceptProf] Application already scheduled; treating as no-op", {
+                    jobId,
+                    professionalUserSub,
+                });
+            } else {
+                throw e;
+            }
+        }
+
+        if (alreadyScheduled) {
+            return json(event, 200, {
+                message: "Professional already scheduled — no changes applied",
+                jobId,
+                professionalUserSub,
+                inboxMessageSent: false,
+                idempotent: true,
+            });
+        }
 
         // --- Step 8: Emit EventBridge Event (triggers inbox conversation) ---
         const clinicIdFromClaims = getClinicIdFromEvent(event);
