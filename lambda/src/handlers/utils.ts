@@ -190,11 +190,10 @@ export const canAccessClinic = async (
 
 /**
  * WRITE gate: may this user perform `action` on the given clinic?
- * Same membership check as canAccessClinic, plus a role → capability matrix:
- *   root / clinicadmin / clinicmanager → every write action
+ * Role → capability matrix:
+ *   root → every write action on every clinic (platform superuser on the clinic side)
+ *   clinicadmin / clinicmanager → every write action, but only on clinics they're a member of
  *   clinicviewer → no write actions
- * Root no longer bypasses the membership check: a Root user may only write to
- * clinics they own (createdBy) or are associated with (AssociatedUsers).
  */
 export const canWriteClinic = async (
     userSub: string,
@@ -204,6 +203,7 @@ export const canWriteClinic = async (
 ): Promise<boolean> => {
     const role = getClinicRole(groups);
     if (!role || role === "clinicviewer") return false;
+    if (role === "root") return true;
     return canAccessClinic(userSub, groups, clinicId);
 };
 

@@ -58,7 +58,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(event, 403, {
                 error: "Forbidden",
                 statusCode: 403,
-                message: "Only Root, ClinicAdmin, or ClinicManager users can delete clinics",
+                message: "You are not authorized to delete this clinic. Root users can delete any clinic; ClinicAdmin and ClinicManager users can only delete clinics they are a member of.",
                 details: { requiredGroup: ["Root", "ClinicAdmin", "ClinicManager"] },
                 timestamp: new Date().toISOString()
             });
