@@ -104,27 +104,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         filterExpressions.push("(createdBy = :userSub OR contains(AssociatedUsers, :userSub))");
         expressionAttributeValues[":userSub"] = { S: userSub };
         console.log(`[getAllClinics] Scoping to createdBy/AssociatedUsers for user ${userSub}.`);
-        
-        // 4. Create DynamoDB Scan Command Input
-        const scanCommand: ScanCommandInput = {
-            TableName: process.env.CLINICS_TABLE,
-            Limit: limit,
-        };
 
-        if (filterExpressions.length > 0) {
-            scanCommand.FilterExpression = filterExpressions.join(" AND ");
-            scanCommand.ExpressionAttributeValues = expressionAttributeValues;
-            
-            // Only include ExpressionAttributeNames if necessary (keys exist)
-            if (Object.keys(expressionAttributeNames).length > 0) {
-                scanCommand.ExpressionAttributeNames = expressionAttributeNames;
-            }
+        // 4. Paginated Scan. DynamoDB applies `Limit` BEFORE `FilterExpression`,
+        //    so a single Scan call with a 50-item Limit and a userSub filter can
+        //    drop most matches and the next-page key is the only way back. Loop
+        //    with `ExclusiveStartKey` until either the user's `limit` of matched
+        //    items is satisfied or the table is exhausted.
+        const baseScan: ScanCommandInput = {
+            TableName: process.env.CLINICS_TABLE,
+            FilterExpression: filterExpressions.join(" AND "),
+            ExpressionAttributeValues: expressionAttributeValues,
+        };
+        if (Object.keys(expressionAttributeNames).length > 0) {
+            baseScan.ExpressionAttributeNames = expressionAttributeNames;
         }
 
-        // 5. Fetch clinics from DynamoDB
-        const response: ScanCommandOutput = await dynamoClient.send(new ScanCommand(scanCommand));
+        const collectedItems: DynamoDBClinicItem[] = [];
+        let ExclusiveStartKey: Record<string, AttributeValue> | undefined = undefined;
+        do {
+            const response: ScanCommandOutput = await dynamoClient.send(new ScanCommand({
+                ...baseScan,
+                ExclusiveStartKey,
+            }));
+            if (response.Items?.length) {
+                collectedItems.push(...(response.Items as DynamoDBClinicItem[]));
+            }
+            ExclusiveStartKey = response.LastEvaluatedKey;
+        } while (ExclusiveStartKey && collectedItems.length < limit);
 
-        if (!response.Items || response.Items.length === 0) {
+        const cappedItems = collectedItems.slice(0, limit);
+
+        if (cappedItems.length === 0) {
             return {
                 statusCode: 200,
                 headers: corsHeaders(event),
@@ -147,10 +157,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             };
         }
 
-        console.log("🔍 Raw items from DynamoDB:", JSON.stringify(response.Items, null, 2));
+        console.log("🔍 Raw items from DynamoDB:", JSON.stringify(cappedItems, null, 2));
 
         // 6. Map and Transform Items
-        const clinics: ClinicResponseItem[] = (response.Items as DynamoDBClinicItem[]).map(item => {
+        const clinics: ClinicResponseItem[] = cappedItems.map(item => {
             // Extract raw values
             const createdBy = item.createdBy?.S || null;
             

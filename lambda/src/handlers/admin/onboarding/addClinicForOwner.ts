@@ -37,6 +37,12 @@ interface AddClinicBody {
     state?: string;
     pincode?: string;
     country?: string;
+    // Clinic-level contact + optional Google Maps URL — added to match the
+    // clinic-dashboard /add-clinic flow so admin-onboarded clinics carry the
+    // same profile data as self-signup clinics.
+    office_phone?: string;
+    office_email?: string;
+    location_url?: string;
     practice_type?: string;
     primary_practice_area?: string;
     primary_contact_title?: string;
@@ -102,6 +108,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             !clinic.city && "city",
             !clinic.state && "state",
             !clinic.pincode && "pincode",
+            !clinic.office_phone && "office_phone",
+            !clinic.office_email && "office_email",
         ].filter(Boolean);
         if (missing.length > 0) {
             return json(event, 400, {
@@ -214,7 +222,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             clinic.software_used?.length ||
             clinic.parking_type || clinic.free_parking_available !== undefined ||
             clinic.parking_cost !== undefined ||
-            clinic.dental_association || clinic.notes || clinic.website;
+            clinic.dental_association || clinic.notes || clinic.website ||
+            clinic.office_phone || clinic.office_email || clinic.location_url;
 
         let clinicProfileCreated = false;
         if (hasProfileFields && process.env.CLINIC_PROFILES_TABLE) {
@@ -242,6 +251,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 if (clinic.parking_cost !== undefined)          profileItem.parking_cost          = { N: String(clinic.parking_cost) };
                 if (clinic.notes)                               profileItem.notes                 = { S: clinic.notes };
                 if (clinic.website)                             profileItem.website               = { S: clinic.website };
+                if (clinic.office_phone) {
+                    const digits = clinic.office_phone.replace(/\D/g, "");
+                    profileItem.office_phone = { S: digits || clinic.office_phone };
+                }
+                if (clinic.office_email)                        profileItem.office_email          = { S: clinic.office_email };
+                if (clinic.location_url)                        profileItem.location_url          = { S: clinic.location_url };
                 profileItem.addressLine1 = { S: clinic.addressLine1! };
                 profileItem.city         = { S: clinic.city! };
                 profileItem.state        = { S: clinic.state! };

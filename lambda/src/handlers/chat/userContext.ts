@@ -1,4 +1,4 @@
-import { DynamoDBClient, QueryCommand, GetItemCommand } from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient, QueryCommand, GetItemCommand, type AttributeValue, type QueryCommandOutput } from "@aws-sdk/client-dynamodb";
 import { geocodeAddressParts, Coordinates } from "../geo";
 import type { AgentType } from "./sessionStore";
 
@@ -109,16 +109,23 @@ async function fetchClinicContext(userSub: string): Promise<ClinicContext> {
     ctx.lastName = S(profile.last_name);
   }
 
-  // 1. Find clinic assignments for this user.
-  let assignmentRows: Array<Record<string, any>> = [];
+  // 1. Find clinic assignments for this user. Paginate via LastEvaluatedKey —
+  //    a hard `Limit: 25` here silently truncated the chatbot's view of a
+  //    user's clinics, so users with more than 25 assignments only saw the
+  //    first page.
+  const assignmentRows: Array<Record<string, any>> = [];
+  let ExclusiveStartKey: Record<string, AttributeValue> | undefined = undefined;
   try {
-    const res = await ddb.send(new QueryCommand({
-      TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
-      KeyConditionExpression: "userSub = :u",
-      ExpressionAttributeValues: { ":u": { S: userSub } },
-      Limit: 25,
-    }));
-    assignmentRows = res.Items || [];
+    do {
+      const res: QueryCommandOutput = await ddb.send(new QueryCommand({
+        TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
+        KeyConditionExpression: "userSub = :u",
+        ExpressionAttributeValues: { ":u": { S: userSub } },
+        ExclusiveStartKey,
+      }));
+      if (res.Items?.length) assignmentRows.push(...res.Items);
+      ExclusiveStartKey = res.LastEvaluatedKey;
+    } while (ExclusiveStartKey);
   } catch (e) {
     console.warn("[userContext] failed to fetch assignments", e);
   }

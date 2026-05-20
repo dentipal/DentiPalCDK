@@ -6,7 +6,9 @@ import {
 import {
   DynamoDBClient,
   ScanCommand,
-  ScanCommandInput
+  ScanCommandInput,
+  type AttributeValue,
+  type ScanCommandOutput
 } from "@aws-sdk/client-dynamodb";
 
 import { extractUserFromBearerToken, isRoot } from "./utils";
@@ -44,8 +46,18 @@ export const handler = async (
     const city = queryParams.city || undefined;
     const name = queryParams.name || undefined;
 
-    const filterExpressions: string[] = [];
-    const expressionAttributeValues: Record<string, { S: string }> = {};
+    // Membership scoping pushed into the Scan FilterExpression so DynamoDB
+    // doesn't return clinics the caller can't see. Previously this filter
+    // ran in JS after the Scan returned, which combined with the unpaginated
+    // 50-item Limit silently dropped almost everyone's clinics — the table
+    // is scanned in hash order, so the user's rows usually weren't even in
+    // the first page.
+    const filterExpressions: string[] = [
+      "(createdBy = :userSub OR contains(AssociatedUsers, :userSub))"
+    ];
+    const expressionAttributeValues: Record<string, AttributeValue> = {
+      ":userSub": { S: userSub }
+    };
     const expressionAttributeNames: Record<string, string> = {};
 
     if (state) {
@@ -64,23 +76,34 @@ export const handler = async (
       expressionAttributeNames["#name"] = "name";
     }
 
-    const scanCommand: ScanCommandInput = {
+    const baseScan: ScanCommandInput = {
       TableName: process.env.CLINICS_TABLE,
-      Limit: limit
+      FilterExpression: filterExpressions.join(" AND "),
+      ExpressionAttributeValues: expressionAttributeValues
     };
-
-    if (filterExpressions.length > 0) {
-      scanCommand.FilterExpression = filterExpressions.join(" AND ");
-      scanCommand.ExpressionAttributeValues = expressionAttributeValues;
-
-      if (Object.keys(expressionAttributeNames).length > 0) {
-        scanCommand.ExpressionAttributeNames = expressionAttributeNames;
-      }
+    if (Object.keys(expressionAttributeNames).length > 0) {
+      baseScan.ExpressionAttributeNames = expressionAttributeNames;
     }
 
-    const response = await dynamoClient.send(new ScanCommand(scanCommand));
+    // Paginate the Scan. DynamoDB applies `Limit` BEFORE `FilterExpression`,
+    // so a single Scan call with a membership filter can return zero items
+    // while the user actually has matches further into the table.
+    const collectedItems: Record<string, AttributeValue>[] = [];
+    let ExclusiveStartKey: Record<string, AttributeValue> | undefined = undefined;
+    do {
+      const resp: ScanCommandOutput = await dynamoClient.send(new ScanCommand({
+        ...baseScan,
+        ExclusiveStartKey
+      }));
+      if (resp.Items?.length) {
+        collectedItems.push(...(resp.Items as Record<string, AttributeValue>[]));
+      }
+      ExclusiveStartKey = resp.LastEvaluatedKey;
+    } while (ExclusiveStartKey && collectedItems.length < limit);
 
-    if (!response.Items || response.Items.length === 0) {
+    const cappedItems = collectedItems.slice(0, limit);
+
+    if (cappedItems.length === 0) {
       return json(event, 200, {
         status: "success",
         clinics: [],
@@ -91,10 +114,10 @@ export const handler = async (
 
     console.log(
       "🔍 Raw items from DynamoDB:",
-      JSON.stringify(response.Items, null, 2)
+      JSON.stringify(cappedItems, null, 2)
     );
 
-    const clinics = response.Items.map((item: any) => {
+    const accessibleClinics = cappedItems.map((item: any) => {
       const createdBy = item.createdBy?.S || null;
       const associatedUsersRaw = item.AssociatedUsers?.L || [];
       const associatedUsers = associatedUsersRaw.map((u: any) => u.S);
@@ -114,14 +137,6 @@ export const handler = async (
         associatedUsers
       };
     });
-
-    // Every user — including Root — is scoped to clinics they own (createdBy)
-    // or are associated with. No platform-wide "see everything" tier.
-    const accessibleClinics = clinics.filter(
-      clinic =>
-        clinic.createdBy === userSub ||
-        clinic.associatedUsers.includes(userSub)
-    );
 
     console.log(
       `[getUsersClinics] Scoped to ${accessibleClinics.length} accessible clinics for user ${userSub}`
