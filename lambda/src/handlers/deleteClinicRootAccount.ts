@@ -166,29 +166,60 @@ const scanByFilter = async (
 };
 
 // Batch-delete with UnprocessedItems retry loop. Caller passes
-// { TableName, Key } pairs; we group + chunk and retry up to 5 times.
+// { TableName, Key } pairs; we group by table and chunk per-table.
+//
+// Isolation strategy: each table is batched separately. If one table has a
+// key-schema mismatch, only THAT table's batch throws — so the catch block
+// reports the exact TableName and the key shapes that were rejected, rather
+// than burying the bug in a generic "schema mismatch" error from a mixed
+// batch. Non-fatal: a single table failing does NOT abort the whole purge —
+// other tables continue and we collect the failure list at the end.
 type DeleteKey = { TableName: string; Key: Record<string, AttributeValue> };
-const sendBatchDeletes = async (deletes: DeleteKey[]) => {
-    if (deletes.length === 0) return;
-    const CHUNK = 25;
-    for (let i = 0; i < deletes.length; i += CHUNK) {
-        const batch = deletes.slice(i, i + CHUNK);
-        const RequestItems: Record<string, { DeleteRequest: { Key: Record<string, AttributeValue> } }[]> = {};
-        for (const d of batch) {
-            (RequestItems[d.TableName] ||= []).push({ DeleteRequest: { Key: d.Key } });
+type FailedBatch = { TableName: string; sampleKey: Record<string, AttributeValue>; error: string };
+
+const sendBatchDeletes = async (deletes: DeleteKey[]): Promise<FailedBatch[]> => {
+    const failures: FailedBatch[] = [];
+    if (deletes.length === 0) return failures;
+
+    // Group by TableName first.
+    const byTable: Record<string, Record<string, AttributeValue>[]> = {};
+    for (const d of deletes) {
+        (byTable[d.TableName] ||= []).push(d.Key);
+    }
+
+    for (const [tableName, keys] of Object.entries(byTable)) {
+        console.log(`[deleteClinicRootAccount] batch-delete table=${tableName} count=${keys.length}`);
+        if (keys.length > 0) {
+            console.log(`[deleteClinicRootAccount] sample key for ${tableName}:`, JSON.stringify(keys[0]));
         }
-        let unprocessed = RequestItems;
-        for (let attempt = 0; attempt < 5; attempt++) {
-            const resp = await ddb.send(new BatchWriteItemCommand({ RequestItems: unprocessed }));
-            const left = resp.UnprocessedItems || {};
-            if (Object.keys(left).length === 0) break;
-            await new Promise(r => setTimeout(r, 100 * Math.pow(2, attempt)));
-            unprocessed = left as any;
-            if (attempt === 4) {
-                console.error("[deleteClinicRootAccount] UnprocessedItems remain after 5 retries", { left });
+        const CHUNK = 25;
+        for (let i = 0; i < keys.length; i += CHUNK) {
+            const chunk = keys.slice(i, i + CHUNK);
+            const RequestItems = {
+                [tableName]: chunk.map(Key => ({ DeleteRequest: { Key } })),
+            };
+            let unprocessed = RequestItems;
+            try {
+                for (let attempt = 0; attempt < 5; attempt++) {
+                    const resp = await ddb.send(new BatchWriteItemCommand({ RequestItems: unprocessed }));
+                    const left = resp.UnprocessedItems || {};
+                    if (Object.keys(left).length === 0) break;
+                    await new Promise(r => setTimeout(r, 100 * Math.pow(2, attempt)));
+                    unprocessed = left as any;
+                    if (attempt === 4) {
+                        console.error(`[deleteClinicRootAccount] UnprocessedItems remain after 5 retries for ${tableName}`, { left });
+                    }
+                }
+            } catch (err) {
+                const msg = (err as Error).message;
+                console.error(`[deleteClinicRootAccount] batch FAILED for table=${tableName}:`, msg, "sample key:", JSON.stringify(chunk[0]));
+                failures.push({ TableName: tableName, sampleKey: chunk[0], error: msg });
+                // Skip remaining chunks for this table — they'll fail the same way.
+                break;
             }
         }
     }
+    return failures;
 };
 
 // S3 helpers ─────────────────────────────────────────────────────────────────
@@ -762,7 +793,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
-        await sendBatchDeletes(deletes);
+        console.log(`[deleteClinicRootAccount] starting batch deletes, total keys queued: ${deletes.length}`);
+        const failedBatches = await sendBatchDeletes(deletes);
+        if (failedBatches.length > 0) {
+            console.error("[deleteClinicRootAccount] One or more table batches failed:", JSON.stringify(failedBatches, null, 2));
+            // Continue with S3 + Clinics deletes + Cognito anyway — the backup
+            // row is the source of truth; orphan rows in failed tables can be
+            // cleaned up later from the backup.
+        }
 
         // Live S3 wipe — only AFTER all DynamoDB child rows are gone.
         if (PROFILE_IMAGES_BUCKET) {
