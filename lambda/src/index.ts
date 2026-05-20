@@ -19,6 +19,8 @@ import { handler as deleteClinicHandler } from "./handlers/deleteClinic";
 import { handler as restoreClinicHandler } from "./handlers/restoreClinic";
 import { handler as listDeletedClinicsHandler } from "./handlers/listDeletedClinics";
 import { handler as getClinicSnapshotHandler } from "./handlers/getClinicSnapshot";
+import { handler as deleteClinicRootAccountHandler } from "./handlers/deleteClinicRootAccount";
+import { handler as getClinicRootAccountBackupHandler } from "./handlers/getClinicRootAccountBackup";
 import { handler as getClinicAddressHandler } from "./handlers/getClinicAddress";
 
 import { handler as createAssignmentHandler } from "./handlers/createAssignment";
@@ -276,6 +278,13 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "DELETE:/clinics/{clinicId}": deleteClinicHandler,
         "POST:/clinics/{clinicId}/restore": restoreClinicHandler,
         "GET:/clinics/{clinicId}/snapshot": getClinicSnapshotHandler,
+
+        // Delete Clinic Root Account — nuclear flow for a Root user to wipe
+        // their entire footprint after a backup is captured. Backup retrieval
+        // is Root/Admin only for compliance/legal export.
+        "POST:/clinic-root-account/delete": deleteClinicRootAccountHandler,
+        "GET:/clinic-root-account/backups/{ownerSub}": getClinicRootAccountBackupHandler,
+        "GET:/clinic-root-account/backups/{ownerSub}/{deletedAt}": getClinicRootAccountBackupHandler,
 
         // Assignment management routes
         "POST:/assignments": createAssignmentHandler,

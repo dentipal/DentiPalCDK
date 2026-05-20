@@ -51,20 +51,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        const isAuthorized = await canWriteClinic(userSub, groups, clinicId, "manageClinic");
-        if (!isAuthorized) {
-            return json(event, 403, {
-                error: "Forbidden",
-                statusCode: 403,
-                message:
-                    "You are not authorized to delete this clinic. Root users can delete any clinic; ClinicAdmin and ClinicManager users can only delete clinics they are a member of.",
-                details: { requiredGroup: ["Root", "ClinicAdmin", "ClinicManager"] },
-                timestamp: new Date().toISOString(),
-            });
-        }
-
-        // Load the row so we can (a) refuse double-deletes and (b) snapshot the
-        // display fields for fallback UI after the row is gone.
+        // Load the clinic FIRST. The auth gate (canWriteClinic) also does a
+        // GetItem internally and returns false if the row is missing or
+        // soft-deleted — which produces a misleading 403. By looking the row
+        // up here first, we can return precise 404/409 errors and reserve the
+        // 403 for actual permission failures.
         const existing = await dynamoClient.send(new GetItemCommand({
             TableName: CLINICS_TABLE,
             Key: { clinicId: { S: clinicId } },
@@ -74,7 +65,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(event, 404, {
                 error: "Not Found",
                 statusCode: 404,
-                message: "Clinic not found",
+                message: "This clinic no longer exists. It may have already been permanently removed.",
                 timestamp: new Date().toISOString(),
             });
         }
@@ -83,13 +74,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             return json(event, 409, {
                 error: "Conflict",
                 statusCode: 409,
-                message: "Clinic is already deleted and pending permanent removal.",
+                message:
+                    "This clinic is already deleted and is waiting to be permanently removed. " +
+                    "Open Settings → Restore Clinics to bring it back, or wait for permanent removal.",
                 details: {
                     deletedAt: existing.Item.deletedAt.S,
                     purgeAt: existing.Item.ttl?.N
                         ? new Date(parseInt(existing.Item.ttl.N, 10) * 1000).toISOString()
                         : null,
                 },
+                timestamp: new Date().toISOString(),
+            });
+        }
+
+        // Now the permission check. At this point we know the clinic exists
+        // and isn't soft-deleted, so a false result is purely a role/membership
+        // problem — accurate to surface as 403.
+        const isAuthorized = await canWriteClinic(userSub, groups, clinicId, "manageClinic");
+        if (!isAuthorized) {
+            return json(event, 403, {
+                error: "Forbidden",
+                statusCode: 403,
+                message:
+                    "You are not authorized to delete this clinic. Root users can delete any clinic; ClinicAdmin and ClinicManager users can only delete clinics they are a member of.",
+                details: { requiredGroup: ["Root", "ClinicAdmin", "ClinicManager"] },
                 timestamp: new Date().toISOString(),
             });
         }

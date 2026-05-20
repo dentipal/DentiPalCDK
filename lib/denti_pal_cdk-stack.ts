@@ -858,6 +858,20 @@ export class DentiPalCDKStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.RETAIN,
         });
 
+        // Backup table for the "Delete clinic account" flow. Stores a single
+        // frozen snapshot of the owner's identity, all their clinics, profiles,
+        // members, ratings, and an account-summary rollup at delete time.
+        // Composite key lets the same email/owner re-create an account later
+        // and still delete it again without overwriting the prior backup row.
+        // RETAIN policy so this table survives even if the stack is destroyed.
+        const clinicAccountBackupTable = new dynamodb.Table(this, 'ClinicAccountBackupTable', {
+            tableName: 'DentiPal-V5-ClinicAccountBackup',
+            partitionKey: { name: 'ownerSub', type: dynamodb.AttributeType.STRING },
+            sortKey: { name: 'deletedAt', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
+        });
+
         // Audit log for every clinic restore action — captures who, when, why,
         // and against whom (the original deleter). Append-only, retained
         // forever so a restore can never be quietly reversed without trace.
@@ -1371,6 +1385,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             notificationsTable,
             chatMessagesTable,
             deletedClinicSnapshotsTable,
+            clinicAccountBackupTable,
         ];
 
         // ========================================================================
@@ -1454,6 +1469,20 @@ export class DentiPalCDKStack extends cdk.Stack {
             cors: BUCKET_CORS,
         });
 
+        // Backup bucket for the "Delete clinic account" flow. Holds copies
+        // of every media file the owner had at delete time (their profile
+        // image + every owned clinic's office images). Private, versioned,
+        // SSE-S3 managed encryption. RETAIN so the bucket survives stack
+        // destruction — backups are the last-resort safety net.
+        // No CORS — backend reads only via API; browser never hits this directly.
+        const clinicAccountBackupBucket = new s3.Bucket(this, 'ClinicAccountBackupBucket', {
+            removalPolicy: cdk.RemovalPolicy.RETAIN,
+            encryption: s3.BucketEncryption.S3_MANAGED,
+            blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+            versioned: true,
+            enforceSSL: true,
+        });
+
         // Tables used specifically by the WebSocket handler
         const chatTables = [
             connectionsTable,
@@ -1533,6 +1562,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                 DRIVING_LICENSES_BUCKET: drivingLicensesBucket.bucketName,
                 PROFESSIONAL_LICENSES_BUCKET: professionalLicensesBucket.bucketName,
                 CLINIC_OFFICE_IMAGES_BUCKET: clinicOfficeImagesBucket.bucketName,
+                CLINIC_ACCOUNT_BACKUP_BUCKET: clinicAccountBackupBucket.bucketName,
             },
             timeout: cdk.Duration.seconds(60),
             // Lambda CPU scales with memory. The monolith init (imports every handler + AWS SDK v3)
@@ -1604,6 +1634,10 @@ export class DentiPalCDKStack extends cdk.Stack {
         drivingLicensesBucket.grantReadWrite(lambdaFunction);
         professionalLicensesBucket.grantReadWrite(lambdaFunction);
         clinicOfficeImagesBucket.grantReadWrite(lambdaFunction);
+        // Backup flow needs to CopyObject from live buckets → backup bucket,
+        // then DeleteObject from live buckets. Read/Write on backup bucket
+        // covers the CopyObject target + later GetObject for retrieval.
+        clinicAccountBackupBucket.grantReadWrite(lambdaFunction);
 
 
         // Additional permission for dynamodb:Scan on JobPostings table
