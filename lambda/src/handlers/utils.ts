@@ -207,6 +207,7 @@ export const canWriteClinic = async (
     _action: ClinicWriteAction
 ): Promise<boolean> => {
     const role = getClinicRole(groups);
+    console.log("[canWriteClinic] decided role:", role, "for groups:", JSON.stringify(groups), "clinicId:", clinicId);
     if (!role || role === "clinicviewer") return false;
 
     // Even Root cannot write to a soft-deleted clinic — they must restore it
