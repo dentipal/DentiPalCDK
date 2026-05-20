@@ -5,7 +5,7 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken, isRoot } from "./utils"; 
+import { extractUserFromBearerToken, isRoot, canWriteClinic } from "./utils"; 
 // Import shared CORS headers
 import { corsHeaders } from "./corsHeaders";
 
@@ -53,13 +53,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // Step 3: Authorization check
-        // Note: isRoot(groups) is an external utility function assumed to be imported from './utils'.
-        if (!isRoot(groups)) {
+        const isAuthorized = await canWriteClinic(userSub, groups, clinicId, "manageClinic");
+        if (!isAuthorized) {
             return json(event, 403, {
                 error: "Forbidden",
                 statusCode: 403,
-                message: "Only Root users can delete clinics",
-                details: { requiredGroup: "Root" },
+                message: "Only Root, ClinicAdmin, or ClinicManager users can delete clinics",
+                details: { requiredGroup: ["Root", "ClinicAdmin", "ClinicManager"] },
                 timestamp: new Date().toISOString()
             });
         }
