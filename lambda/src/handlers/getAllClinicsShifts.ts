@@ -4,6 +4,7 @@ import {
   DynamoDBClient,
   QueryCommand,
   GetItemCommand,
+  BatchGetItemCommand,
   QueryCommandInput,
   QueryCommandOutput,
   AttributeValue,
@@ -19,6 +20,7 @@ const USER_POOL_ID = process.env.USER_POOL_ID || "";
 
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE;
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
+const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE;
 
 // Optional envs (defaults provided)
 const JOB_APPLICATIONS_CLINIC_GSI =
@@ -206,6 +208,7 @@ export const handler = async (
       workLocationType: s(it.work_location_type),
       location: s(it.location) || s(it.addressLine1),
       fullAddress: s(it.fullAddress) || s(it.addressLine1),
+      locationUrl: s(it.locationUrl) || s(it.location_url),
       city: s(it.city),
       state: s(it.state),
       shiftDetails: s(it.shiftDetails),
@@ -272,6 +275,41 @@ export const handler = async (
       console.log(`[getAllClinicsShifts] Sweeper detected exactly 0 clinics for this user. Application fetch skipped.`);
     }
 
+    // 3b. JobInvitations lookup — build the set of (jobId, professionalUserSub)
+    //     pairs that exist in JobInvitations. Any application matching one of
+    //     these pairs is invite-originated, regardless of whether the
+    //     application row itself carries the `fromInvitation` flag (legacy and
+    //     accept-branch rows historically didn't).
+    const invitedPairs = new Set<string>();
+    if (JOB_INVITATIONS_TABLE && applicationItems.length > 0) {
+      const inviteKeys = applicationItems
+        .filter((it) => s(it.jobId) && s(it.professionalUserSub))
+        .map((it) => ({
+          jobId: { S: s(it.jobId) },
+          professionalUserSub: { S: s(it.professionalUserSub) },
+        }));
+      for (let i = 0; i < inviteKeys.length; i += 100) {
+        const chunk = inviteKeys.slice(i, i + 100);
+        try {
+          const resp = await dynamodb.send(new BatchGetItemCommand({
+            RequestItems: {
+              [JOB_INVITATIONS_TABLE]: {
+                Keys: chunk,
+                ProjectionExpression: "jobId, professionalUserSub",
+              },
+            },
+          }));
+          for (const item of (resp.Responses?.[JOB_INVITATIONS_TABLE] || [])) {
+            const jid = (item.jobId as any)?.S;
+            const sub = (item.professionalUserSub as any)?.S;
+            if (jid && sub) invitedPairs.add(`${jid}|${sub}`);
+          }
+        } catch (err: any) {
+          console.warn("[getAllClinicsShifts] fromInvitation lookup failed:", err?.message);
+        }
+      }
+    }
+
     // 4. Enrich Applications with Job Data
     console.log(`[getAllClinicsShifts] Initializing mapping unification to tie shifts to application entities...`);
     const appsEnriched = applicationItems.map((it) => {
@@ -283,6 +321,13 @@ export const handler = async (
       const acceptedRate = n(it.acceptedHourlyRate) ?? n(it.acceptedRate) ?? n(it.accepted_hourly_rate) ?? n(it.accepted_rate);
       const finalRate = acceptedRate ?? job.rate ?? null;
 
+      // Three independent signals — any one means this row is invite-originated.
+      const sub = s(it.professionalUserSub);
+      const fromInvitationFlag = Boolean((it.fromInvitation as any)?.BOOL);
+      const invitationDate = s(it.invitationResponseDate);
+      const isFromInvitation =
+        fromInvitationFlag || Boolean(invitationDate) || invitedPairs.has(`${jobId}|${sub}`);
+
       return {
         ...job, // Bring in all job properties
 
@@ -290,7 +335,7 @@ export const handler = async (
         applicationId: s(it.applicationId),
         clinicId: s(it.clinicId),
         jobId,
-        professionalUserSub: s(it.professionalUserSub),
+        professionalUserSub: sub,
         professionalName: s(it.professionalName) || "Professional",
         applicationStatus: status,
         appliedAt: s(it.appliedAt),
@@ -302,6 +347,8 @@ export const handler = async (
         jobTitle: job.jobTitle || "No Title",
         rate: finalRate,
         payType: job.payType || "per_hour",
+        fromInvitation: isFromInvitation,
+        invitationResponseDate: invitationDate || null,
       };
     });
 

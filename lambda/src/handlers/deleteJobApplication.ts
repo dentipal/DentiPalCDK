@@ -5,6 +5,10 @@ import {
     DeleteItemCommand,
     AttributeValue
 } from "@aws-sdk/client-dynamodb";
+import {
+    EventBridgeClient,
+    PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
 import { extractUserFromBearerToken } from "./utils"; // Assumed dependency
 
 // ✅ ADDED THIS LINE:
@@ -25,6 +29,7 @@ interface ApplicationItem {
 // --- Initialization ---
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+const eb = new EventBridgeClient({ region: process.env.REGION });
 
 
 
@@ -150,6 +155,38 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
         console.log(`[DB] Deleting job application ${applicationId} for user ${userSub}`);
         await dynamodb.send(deleteCommand);
+
+        // 7b. Emit `application-withdrawn` so the clinic gets a notification.
+        // Best-effort: a publish failure is non-fatal, the withdrawal itself
+        // already succeeded. The clinic-side notification handler queries the
+        // clinic recipient set from clinicId, so we pass whatever clinicId
+        // the application row carried.
+        try {
+            const clinicId = applicationFound.clinicId?.S || applicationFound.ClinicId?.S;
+            const shiftDate = applicationFound.date?.S || applicationFound.startDate?.S || applicationFound.start_date?.S;
+            const shiftRole = applicationFound.professional_role?.S || applicationFound.professionalRole?.S;
+            await eb.send(new PutEventsCommand({
+                Entries: [{
+                    Source: "denti-pal.api",
+                    DetailType: "ShiftEvent",
+                    Detail: JSON.stringify({
+                        eventType: "application-withdrawn",
+                        actor: "professional",
+                        clinicId,
+                        professionalSub: userSub,
+                        jobId: jobIdFound,
+                        applicationId,
+                        shiftDetails: {
+                            role: shiftRole,
+                            date: shiftDate,
+                        },
+                    }),
+                }],
+            }));
+        } catch (ebErr) {
+            const m = (ebErr as Error)?.message || String(ebErr);
+            console.warn(`[deleteJobApplication] application-withdrawn publish failed (non-fatal): ${m}`);
+        }
 
         // 8. Success Response
         return json(event, 200, {

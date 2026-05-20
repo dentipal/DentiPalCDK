@@ -143,19 +143,46 @@ async function fetchClinicContext(userSub: string): Promise<ClinicContext> {
   return ctx;
 }
 
-/** Convert UserContext into a short system-style preamble for the agent. */
-export function renderContextPreamble(ctx: UserContext): string {
-  const displayName = (ctx.firstName || ctx.lastName)
+function displayNameOf(ctx: UserContext): string {
+  return (ctx.firstName || ctx.lastName)
     ? [ctx.firstName, ctx.lastName].filter(Boolean).join(" ")
     : "this user";
+}
 
+/**
+ * Hard role guardrail. Must be re-injected on every fresh agent session
+ * because role drift is a behavior bug (not a fact the agent should "remember
+ * and apply") — we want it loaded deterministically before the first user
+ * message of every session.
+ */
+function renderRoleAnchor(ctx: UserContext): string {
+  const displayName = displayNameOf(ctx);
   if (ctx.agentType === "professional") {
-    const lines: string[] = [
+    return [
       `[ROLE ANCHOR — ground every response in this. Never drift.]`,
       `You are talking to ${displayName}. They are a PROFESSIONAL on the DentiPal platform — a dental hygienist / dentist / assistant looking for work.`,
       `NEVER reference clinic-side concepts (posting jobs, hiring, applicants, "your clinic"). If they ask about something only a clinic can do, respond plainly: "That's a clinic-side action — you'd need to be signed in as a clinic admin."`,
       `[END ROLE ANCHOR]`,
-      ``,
+    ].join("\n");
+  }
+  return [
+    `[ROLE ANCHOR — ground every response in this. Never drift.]`,
+    `You are talking to ${displayName}. They are a CLINIC ADMIN on the DentiPal platform — staff at a dental clinic posting jobs and managing applicants.`,
+    `NEVER reference professional-side concepts (applying to jobs, "your shifts", "the clinic invited me"). If they ask about something only a professional can do, respond plainly: "That's a professional-side action — you'd need to be signed in as a dental professional."`,
+    `[END ROLE ANCHOR]`,
+  ].join("\n");
+}
+
+/**
+ * Per-user profile/clinic snapshot. Injected once per 15-min Bedrock Agents
+ * session — after that Bedrock holds it in its own session memory keyed by
+ * bedrockSessionId.
+ */
+function renderProfileContext(ctx: UserContext): string {
+  const displayName = displayNameOf(ctx);
+
+  if (ctx.agentType === "professional") {
+    const lines: string[] = [
       `[USER CONTEXT — do not echo verbatim; use silently to ground your answers]`,
       `userSub: ${ctx.userSub}`,
     ];
@@ -176,11 +203,6 @@ export function renderContextPreamble(ctx: UserContext): string {
 
   // clinic
   const lines: string[] = [
-    `[ROLE ANCHOR — ground every response in this. Never drift.]`,
-    `You are talking to ${displayName}. They are a CLINIC ADMIN on the DentiPal platform — staff at a dental clinic posting jobs and managing applicants.`,
-    `NEVER reference professional-side concepts (applying to jobs, "your shifts", "the clinic invited me"). If they ask about something only a professional can do, respond plainly: "That's a professional-side action — you'd need to be signed in as a dental professional."`,
-    `[END ROLE ANCHOR]`,
-    ``,
     `[USER CONTEXT — do not echo verbatim; use silently to ground your answers]`,
     `userSub: ${ctx.userSub}`,
     ctx.firstName || ctx.lastName ? `name: ${displayName}` : "",
@@ -200,6 +222,15 @@ export function renderContextPreamble(ctx: UserContext): string {
   }
   lines.push(`[END USER CONTEXT]`);
   return lines.join("\n");
+}
+
+/**
+ * Compose role anchor + profile context into a single preamble injected
+ * into the first user turn of each session. Memory preamble (AgentCore
+ * cross-session summary/preferences) is prepended separately by chatMessage.ts.
+ */
+export function renderContextPreamble(ctx: UserContext): string {
+  return `${renderRoleAnchor(ctx)}\n\n${renderProfileContext(ctx)}`;
 }
 
 async function safeGet(

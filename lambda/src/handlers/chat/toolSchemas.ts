@@ -34,12 +34,16 @@ const STRING_ARRAY = { type: "array", items: { type: "string" } };
 
 export const SEARCH_JOBS_NEAR_ME: ToolDefinition = {
   name: "search_jobs_near_me", bucket: "search", scope: "professional",
-  description: "Find active job postings matching filters. Use whenever the user wants to discover jobs.",
+  description:
+    "Find active job postings matching filters. Use whenever the user wants to discover jobs. " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) for queries like 'jobs on Monday'; " +
+    "pass `dateFrom`/`dateTo` (YYYY-MM-DD) for explicit date windows. Server filters — do NOT filter results yourself.",
   inputSchema: {
     type: "object",
     properties: {
       radiusMiles: NUMBER, jobType: STRING, professionalRole: STRING, shiftSpeciality: STRING,
       minRate: NUMBER, maxRate: NUMBER, dateFrom: STRING, dateTo: STRING,
+      dayOfWeek: STRING,
       assistedHygiene: BOOL, limit: NUMBER,
     },
   },
@@ -53,26 +57,50 @@ export const GET_JOB_DETAILS: ToolDefinition = {
 
 export const GET_MY_APPLICATIONS: ToolDefinition = {
   name: "get_my_applications", bucket: "info", scope: "professional",
-  description: "List the professional's applications and their statuses.",
-  inputSchema: { type: "object", properties: {} },
+  description:
+    "List the professional's applications and their statuses. " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) or `dateFrom`/`dateTo` (YYYY-MM-DD) " +
+    "to filter by the underlying shift's date. Server filters.",
+  inputSchema: {
+    type: "object",
+    properties: { dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+  },
 };
 
 export const GET_MY_INVITATIONS: ToolDefinition = {
   name: "get_my_invitations", bucket: "info", scope: "professional",
-  description: "List the professional's pending clinic invitations (excludes accepted/declined/past).",
-  inputSchema: { type: "object", properties: {} },
+  description:
+    "List the professional's pending clinic invitations (excludes accepted/declined/past). " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) or `dateFrom`/`dateTo` (YYYY-MM-DD) " +
+    "to filter by the underlying shift's date. Server filters.",
+  inputSchema: {
+    type: "object",
+    properties: { dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+  },
 };
 
 export const GET_SCHEDULED_SHIFTS: ToolDefinition = {
   name: "get_scheduled_shifts", bucket: "info", scope: "both",
-  description: "List accepted, future shifts. Pro sees their own; clinic sees theirs.",
-  inputSchema: { type: "object", properties: { clinicId: STRING } },
+  description:
+    "List accepted, future shifts. Pro sees their own; clinic sees theirs. " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) for 'shifts on Monday' queries; " +
+    "`dateFrom`/`dateTo` (YYYY-MM-DD) for explicit date windows. Server filters.",
+  inputSchema: {
+    type: "object",
+    properties: { clinicId: STRING, dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+  },
 };
 
 export const GET_COMPLETED_SHIFTS: ToolDefinition = {
   name: "get_completed_shifts", bucket: "info", scope: "both",
-  description: "List completed shifts. Pro sees their own; clinic sees theirs.",
-  inputSchema: { type: "object", properties: { clinicId: STRING } },
+  description:
+    "List completed shifts. Pro sees their own; clinic sees theirs. " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) or `dateFrom`/`dateTo` (YYYY-MM-DD) " +
+    "for day-of-week or date-window filtering. Server filters.",
+  inputSchema: {
+    type: "object",
+    properties: { clinicId: STRING, dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+  },
 };
 
 export const GET_MY_NEGOTIATIONS: ToolDefinition = {
@@ -381,8 +409,22 @@ export const GET_ACTION_NEEDED: ToolDefinition = {
 
 export const GET_OPEN_SHIFTS: ToolDefinition = {
   name: "get_open_shifts", bucket: "info", scope: "clinic",
-  description: "List upcoming unfilled shifts for a clinic.",
-  inputSchema: { type: "object", required: ["clinicId"], properties: { clinicId: STRING } },
+  description:
+    "List upcoming unfilled shifts for a clinic. Optional filters: " +
+    "`dayOfWeek` (mon|tue|wed|thu|fri|sat|sun — case-insensitive, full names also accepted) " +
+    "to restrict to a specific weekday; " +
+    "`dateFrom`/`dateTo` (YYYY-MM-DD inclusive) for an explicit date window. " +
+    "When the user asks 'open shifts for Monday' / 'Thursday' etc., pass dayOfWeek; do NOT filter results yourself.",
+  inputSchema: {
+    type: "object",
+    required: ["clinicId"],
+    properties: {
+      clinicId: STRING,
+      dayOfWeek: STRING,
+      dateFrom: STRING,
+      dateTo: STRING,
+    },
+  },
 };
 
 export const LIST_APPLICANTS_FOR_JOB: ToolDefinition = {
@@ -835,12 +877,53 @@ export const CONFIRM_REMOVE_TEAM_MEMBER: ToolDefinition = {
 };
 
 // =========================================================================
+// Generic DDB read (escape hatch — see ddbQueryTool.ts and plan
+// make-a-comprehensive-table-joyful-pearl.md). One tool shared by both
+// authenticated agents; explicitly NOT available to the public agent.
+// =========================================================================
+
+export const QUERY_DDB_TABLE: ToolDefinition = {
+  name: "query_ddb_table", bucket: "info", scope: "both",
+  description:
+    "FALLBACK reader for analytics / diagnostic / cross-cut questions the narrow tools don't cover " +
+    "(e.g., 'how many applications did I make last month', 'look up application by id', " +
+    "'compare pending applicants across my clinics'). " +
+    "ALWAYS prefer narrow tools (get_my_applications, get_scheduled_shifts, list_applicants_for_job, etc.) " +
+    "when one fits. NEVER use for writes — those have dedicated preview_*/confirm_* tools. " +
+    "Allowed tables: JobPostings, JobApplications, JobInvitations, JobNegotiations, " +
+    "ProfessionalProfiles, ClinicProfiles. Server FORCES auth scoping — you cannot read another user's data. " +
+    "op = query (multiple rows) or getItem (single row by full key). " +
+    "keyName / indexName must match an allowed key on that table; see error message for the allow-list if you guess wrong.",
+  inputSchema: {
+    type: "object",
+    required: ["table", "op", "keyName", "keyValue"],
+    properties: {
+      table: STRING,        // one of the 6 allow-listed short names (omit DentiPal-V5- prefix)
+      op: STRING,           // "query" | "getItem"
+      indexName: STRING,    // optional GSI name; tool can usually infer from keyName
+      keyName: STRING,      // attribute used as the partition key
+      keyValue: STRING,     // partition key value
+      sortKeyName: STRING,
+      sortKeyValue: STRING,
+      sortKeyValueEnd: STRING,
+      sortKeyOp: STRING,    // "=" | "begins_with" | ">" | ">=" | "<" | "<=" | "between"
+      filterStatus: STRING,
+      filterDateFrom: STRING,
+      filterDateTo: STRING,
+      limit: NUMBER,        // 1-50, default 25
+    },
+  },
+};
+
+// =========================================================================
 // Registries
 // =========================================================================
 
 export const PROFESSIONAL_AGENT_TOOLS: ToolDefinition[] = [
   SEARCH_JOBS_NEAR_ME, GET_JOB_DETAILS, GET_MY_APPLICATIONS, GET_MY_INVITATIONS,
   GET_SCHEDULED_SHIFTS, GET_COMPLETED_SHIFTS, GET_MY_NEGOTIATIONS,
+  // Escape hatch — see ddbQueryTool.ts. Use only when narrow tools above don't fit.
+  QUERY_DDB_TABLE,
   // Single-shot writes (v1 active set)
   APPLY_TO_JOB, RESPOND_INVITATION,
   // Counter-offer preview/confirm (v1 active set)
@@ -863,6 +946,8 @@ export const CLINIC_AGENT_TOOLS: ToolDefinition[] = [
   GET_MY_CLINICS, GET_ACTION_NEEDED, GET_OPEN_SHIFTS, GET_SCHEDULED_SHIFTS,
   GET_COMPLETED_SHIFTS, LIST_APPLICANTS_FOR_JOB, GET_PROFESSIONAL_INFO,
   GET_CLINIC_FAVORITES, GET_JOB_DETAILS,
+  // Escape hatch — see ddbQueryTool.ts. Use only when narrow tools above don't fit.
+  QUERY_DDB_TABLE,
   PREVIEW_POST_TEMPORARY_JOB, CONFIRM_POST_TEMPORARY_JOB,
   PREVIEW_POST_CONSULTING_JOB, CONFIRM_POST_CONSULTING_JOB,
   PREVIEW_POST_PERMANENT_JOB, CONFIRM_POST_PERMANENT_JOB,

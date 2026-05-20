@@ -120,7 +120,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const currentStatus = existing.Item.applicationStatus?.S;
 
         // Idempotency: if already completed by this same flow, return 200 without
-        // re-firing referral bonus.
+        // re-firing referral bonus. `ratingEligible` is still true on the idempotent
+        // path so the frontend can re-open the rating prompt if the user dismissed it.
         if (currentStatus === "completed") {
             return json(event, 200, {
                 message: "Shift already marked completed",
@@ -128,13 +129,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 professionalUserSub,
                 applicationStatus: "completed",
                 idempotent: true,
+                ratingEligible: true,
+                clinicId: existing.Item.clinicId?.S || undefined,
             });
         }
 
-        if (currentStatus !== "scheduled") {
+        // "accepted" is a legacy spelling of "scheduled" from an earlier
+        // version of acceptProf / respondToNegotiation. Treat both as
+        // confirmable so old rows aren't stuck.
+        const CONFIRMABLE_STATUSES = new Set(["scheduled", "accepted"]);
+        if (!currentStatus || !CONFIRMABLE_STATUSES.has(currentStatus)) {
             return json(event, 409, {
                 error: "Invalid status transition",
-                message: `Shift cannot be confirmed from status '${currentStatus}'. Expected 'scheduled'.`,
+                message: `Shift cannot be confirmed from status '${currentStatus ?? "unknown"}'. Expected 'scheduled' or 'accepted'.`,
             });
         }
 
@@ -151,10 +158,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 "SET applicationStatus = :completed, actualHoursWorked = :hours, " +
                 "confirmedByUserSub = :clinicUser, confirmedAt = :now, updatedAt = :now" +
                 (clinicNotes ? ", clinicNotes = :notes" : ""),
-            ConditionExpression: "applicationStatus = :scheduled",
+            ConditionExpression: "applicationStatus = :scheduled OR applicationStatus = :accepted",
             ExpressionAttributeValues: {
                 ":completed": { S: "completed" },
                 ":scheduled": { S: "scheduled" },
+                ":accepted": { S: "accepted" },
                 ":hours": { N: String(hoursNum) },
                 ":clinicUser": { S: clinicUserSub },
                 ":now": { S: now },
@@ -230,6 +238,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             applicationStatus: "completed",
             actualHoursWorked: hoursNum,
             confirmedAt: now,
+            // The frontend opens the clinic→professional rating modal when this
+            // is true. Stays true on the idempotent path above as well.
+            ratingEligible: true,
+            clinicId: existing.Item.clinicId?.S || undefined,
         });
     } catch (error) {
         console.error("[confirmShiftCompletion] handler error:", error);

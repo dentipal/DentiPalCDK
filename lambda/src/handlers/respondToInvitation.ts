@@ -279,6 +279,8 @@ export const handler = async (
               appliedAt: { S: timestamp },
               updatedAt: { S: timestamp },
               applicationMessage: { S: responseData.message || "" },
+              fromInvitation: { BOOL: true },
+              invitationResponseDate: { S: timestamp },
             },
           })
         );

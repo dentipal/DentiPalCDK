@@ -265,6 +265,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 },
                 specialRequirements: strArr(clinic.special_requirements),
                 officeImageKey: str(clinic.office_image_key),
+                locationUrl: str(clinic.location_url),
                 notes: str(clinic.notes) || str(clinic.description),
             };
         });

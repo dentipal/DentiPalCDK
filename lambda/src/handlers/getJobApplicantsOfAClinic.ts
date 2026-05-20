@@ -13,6 +13,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 const REGION = process.env.REGION || process.env.AWS_REGION || "us-east-1";
 const APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "DentiPal-JobApplications";
 const POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
+const INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE || "DentiPal-V5-JobInvitations";
 // The CDK stack sets PROFESSIONAL_PROFILES_TABLE; keep PROFILES_TABLE as a legacy alias in case
 // an older deployment env still uses the short name. Default matches the currently-provisioned
 // V5 table so a missing env var doesn't silently hit a non-existent (and un-IAM-granted) table.
@@ -457,7 +458,41 @@ export const handler = async (
       "userSub, firstName, first_name, lastName, last_name, professional_role, professionalRole, #role, yearsExperience, years_of_experience, yearsOfExperience, profile_image_url, profileImageKey";
     const PROFILE_LIST_EXPR_NAMES = { "#role": "role" };
 
-    const [negotiationMap, postingsRaw, profilesRaw] = await Promise.all([
+    // 4. Invitation lookup — for each (jobId, professionalUserSub) pair on the
+    //    applications list, check whether a JobInvitations row exists. This is
+    //    the bulletproof source for `fromInvitation`: it works for legacy
+    //    application rows (which lack the flag), accept-branch rows (which
+    //    didn't set the flag historically), and negotiate-branch rows alike.
+    const inviteKeysAll = applications
+      .filter((a) => a.jobId && a.professionalUserSub)
+      .map((a) => ({
+        jobId: { S: String(a.jobId) },
+        professionalUserSub: { S: String(a.professionalUserSub) },
+      }));
+
+    const invitedPairsPromise: Promise<Set<string>> = (async () => {
+      const out = new Set<string>();
+      if (inviteKeysAll.length === 0) return out;
+      try {
+        const result = await batchGetChunked({
+          [INVITATIONS_TABLE]: {
+            Keys: inviteKeysAll,
+            ProjectionExpression: "jobId, professionalUserSub",
+          },
+        });
+        for (const raw of result.Responses?.[INVITATIONS_TABLE] || []) {
+          const item = raw as Record<string, AttributeValue>;
+          const jid = (item.jobId as any)?.S;
+          const sub = (item.professionalUserSub as any)?.S;
+          if (jid && sub) out.add(`${jid}|${sub}`);
+        }
+      } catch (err: any) {
+        console.warn("[fromInvitation lookup] failed:", err?.message);
+      }
+      return out;
+    })();
+
+    const [negotiationMap, postingsRaw, profilesRaw, invitedPairs] = await Promise.all([
       // 1. Negotiations (batch + query hybrid)
       fetchNegotiationsForNegotiatingApps(applications),
 
@@ -476,6 +511,9 @@ export const handler = async (
             .then((r) => (r.Responses?.[PROFILES_TABLE] || []).map((item: Record<string, AttributeValue>) => unmarshall(item)))
             .catch((e: any) => { console.error("❌ Profile batch failed:", e.message); return [] as any[]; })
         : Promise.resolve([] as any[]),
+
+      // 4. Invitations — see comment block above.
+      invitedPairsPromise,
     ]);
 
     const postingByJobId = new Map(
@@ -498,6 +536,15 @@ export const handler = async (
         ? negotiationMap.get(appIdTrimmed) || null
         : null;
 
+      const inviteKey = `${app.jobId}|${app.professionalUserSub}`;
+      // Three independent signals — any one of them means this application
+      // originated from a clinic invitation. We OR them so the badge survives
+      // missing data in any single source.
+      const isFromInvitation =
+        Boolean(app.fromInvitation) ||
+        Boolean(app.invitationResponseDate) ||
+        invitedPairs.has(inviteKey);
+
       return {
         application: {
           applicationId: app.applicationId,
@@ -509,6 +556,8 @@ export const handler = async (
           updatedAt: app.updatedAt,
           proposedRate: app.proposedRate ?? null,
           negotiationId: app.negotiationId ?? null,
+          fromInvitation: isFromInvitation,
+          invitationResponseDate: app.invitationResponseDate ?? null,
         },
         negotiation: nego,
         // `job` lives on byJobId[jobId].job so it's not duplicated per applicant in the flat list.

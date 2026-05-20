@@ -113,6 +113,7 @@ const refreshProfileFields = async (clinicId: string, newImage: Img) => {
     const parkingType = s(newImage, "parking_type");
     const practiceType = s(newImage, "practice_type");
     const primaryPracticeArea = s(newImage, "primary_practice_area");
+    const locationUrl = s(newImage, "location_url");
 
     const jobs = await queryActiveJobsForClinic(clinicId);
     if (jobs.length === 0) return;
@@ -149,6 +150,10 @@ const refreshProfileFields = async (clinicId: string, newImage: Img) => {
         if (primaryPracticeArea !== undefined) {
             sets.push("primaryPracticeArea = :ppa");
             values[":ppa"] = { S: primaryPracticeArea };
+        }
+        if (locationUrl !== undefined) {
+            sets.push("locationUrl = :lurl");
+            values[":lurl"] = { S: locationUrl };
         }
 
         if (sets.length === 0) return Promise.resolve();

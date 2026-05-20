@@ -397,19 +397,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 jobType,
             };
 
-            await eb.send(new PutEventsCommand({
-                Entries: [{
-                    Source: "denti-pal.api",
-                    DetailType: "ShiftEvent",
-                    Detail: JSON.stringify({
-                        eventType: "shift-scheduled",
-                        clinicId,
-                        professionalSub: professionalUserSub,
-                        shiftDetails
-                    })
-                }]
-            }));
-            inboxMessageSent = true;
+            // Best-effort: if EventBridge is unavailable or the caller's role
+            // lacks events:PutEvents, the inbox notification is skipped but the
+            // hire still completes. Matches the non-fatal pattern used by the
+            // JobPostings "filled" status update above.
+            try {
+                await eb.send(new PutEventsCommand({
+                    Entries: [{
+                        Source: "denti-pal.api",
+                        DetailType: "ShiftEvent",
+                        Detail: JSON.stringify({
+                            eventType: "shift-scheduled",
+                            clinicId,
+                            professionalSub: professionalUserSub,
+                            shiftDetails
+                        })
+                    }]
+                }));
+                inboxMessageSent = true;
+            } catch (ebErr) {
+                console.warn("[acceptProf] EventBridge PutEvents failed (non-fatal):", {
+                    jobId,
+                    error: (ebErr as Error).message,
+                });
+            }
         } else {
             console.error("WARNING: clinicId is missing — inbox conversation will NOT be created.", {
                 jobId,
@@ -433,6 +444,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (isAuthError(error)) {
             return json(event, 401, { status: "error", statusCode: 401, error: "Unauthorized", message: "Authentication required" });
         }
-        return json(event, 500, { status: "error", statusCode: 500, error: "Internal Server Error", message: "Failed to accept applicant" });
+        // Surface the real reason in the response body so chat (and any other
+        // caller) can show something actionable instead of a flat
+        // "Failed to accept applicant". Server logs above retain full stack.
+        const detail = error instanceof Error ? error.message : String(error);
+        return json(event, 500, {
+            status: "error",
+            statusCode: 500,
+            error: "Internal Server Error",
+            message: `Failed to accept applicant: ${detail}`,
+        });
     }
 };

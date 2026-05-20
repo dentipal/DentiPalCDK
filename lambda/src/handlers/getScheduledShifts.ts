@@ -3,6 +3,7 @@
 import {
   DynamoDBClient,
   QueryCommand,
+  BatchGetItemCommand,
   AttributeValue,
   QueryCommandOutput,
 } from "@aws-sdk/client-dynamodb";
@@ -15,6 +16,7 @@ import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE;
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE;
+const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE;
 
 /* ─────────────────────────────────────────────────────────────────────────────
    ADD #1: Helper to normalize DynamoDB date attributes to string[]
@@ -180,9 +182,51 @@ export const handler = async (
     const detailsMap = new Map<string, any>();
     jobIds.forEach((jid, idx) => detailsMap.set(jid!, detailsList[idx] || {}));
 
+    // Build the (jobId, professionalUserSub) → fromInvitation lookup against
+    // the JobInvitations table. This is the source of truth for whether a
+    // shift originated from an invite, independent of whether the application
+    // row carries the `fromInvitation` flag (legacy data and accept-branch
+    // rows historically didn't).
+    const invitedPairs = new Set<string>();
+    if (JOB_INVITATIONS_TABLE && scheduledApps.length > 0) {
+      const inviteKeys = scheduledApps
+        .filter((a) => a.jobId?.S && a.professionalUserSub?.S)
+        .map((a) => ({
+          jobId: { S: a.jobId!.S! },
+          professionalUserSub: { S: a.professionalUserSub!.S! },
+        }));
+      for (let i = 0; i < inviteKeys.length; i += 100) {
+        const chunk = inviteKeys.slice(i, i + 100);
+        try {
+          const resp = await dynamodb.send(new BatchGetItemCommand({
+            RequestItems: {
+              [JOB_INVITATIONS_TABLE]: {
+                Keys: chunk,
+                ProjectionExpression: "jobId, professionalUserSub",
+              },
+            },
+          }));
+          for (const item of (resp.Responses?.[JOB_INVITATIONS_TABLE] || [])) {
+            const jid = (item.jobId as any)?.S;
+            const sub = (item.professionalUserSub as any)?.S;
+            if (jid && sub) invitedPairs.add(`${jid}|${sub}`);
+          }
+        } catch (err: any) {
+          console.warn("[getScheduledShifts] fromInvitation lookup failed:", err?.message);
+        }
+      }
+    }
+
     const scheduledJobs = scheduledApps.map((app) => {
       const jid = app.jobId?.S || "";
       const d = detailsMap.get(jid) || {};
+      const sub = app.professionalUserSub?.S || "";
+      // Three independent signals (flag, invitation-response date, JobInvitations row) —
+      // OR them so the badge survives missing data in any single source.
+      const isFromInvitation =
+        Boolean(app.fromInvitation?.BOOL) ||
+        Boolean(app.invitationResponseDate?.S) ||
+        invitedPairs.has(`${jid}|${sub}`);
 
       return {
         jobId: jid || "No jobId",
@@ -205,6 +249,8 @@ export const handler = async (
 
         status: app.applicationStatus?.S || "Not specified",
         clinicId: clinicId,
+        professionalUserSub: sub || undefined,
+        fromInvitation: isFromInvitation,
       };
     });
 

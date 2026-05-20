@@ -24,6 +24,8 @@ import {
 } from "./sessionStore";
 import { executeTool, ToolCall } from "./toolExecutor";
 import { fetchUserContext, renderContextPreamble, UserContext } from "./userContext";
+import { hydrateMemoryPreamble, writeMemoryEvent, ConversationTurn } from "./agentCoreMemory";
+import { writeTurn as writeChatHistoryTurn } from "./chatHistoryStore";
 import { AuthContext, CLINIC_ROLES } from "../utils";
 
 const REGION = process.env.REGION || "us-east-1";
@@ -88,15 +90,6 @@ interface ConfirmActionFrame {
 }
 
 type InboundFrame = ChatMessageFrame | ConfirmActionFrame;
-
-const PROFESSIONAL_GROUPS_LOWER = new Set([
-  "associatedentist", "dentalhygienist", "dentalassistant",
-  "expandedfunctionsda", "dualrolefrontda", "patientcoordinatorfront",
-  "treatmentcoordinatorfront", "dentist", "hygienist", "dhcomborole",
-]);
-
-const isClinicGroup = (g: string) => (CLINIC_ROLES as readonly string[]).includes(g.toLowerCase());
-const isProfessionalGroup = (g: string) => PROFESSIONAL_GROUPS_LOWER.has(g.toLowerCase());
 
 /**
  * First-message bootstrap.
@@ -196,17 +189,30 @@ function getAgentTarget(agentType: string): { agentId: string; agentAliasId: str
 }
 
 /**
- * Build the API Gateway Management API client for the current WebSocket
- * connection. Endpoint is derived from the request context so the same Lambda
- * works across stages.
+ * Construct the per-invocation ApiGatewayManagementApi client for posting
+ * frames back to the WebSocket connection.
+ *
+ * IMPORTANT: must use the RAW `<api-id>.execute-api.<region>.amazonaws.com`
+ * host, NOT `event.requestContext.domainName`. For this stack `domainName`
+ * is the custom domain `ws.dentipal.com`, which has a base-path mapping that
+ * already prepends `/prod` — appending another `/${stage}` produces
+ * `/prod/prod/@connections/...` and AWS rejects it as
+ * "AccessDenied execute-api:Invoke" (confusing error, real cause is the
+ * malformed URL — see CDK env-var comment).
+ *
+ * `WEBSOCKET_API_ID` is set by CDK exactly for this construction.
  */
+const WEBSOCKET_API_ID = process.env.WEBSOCKET_API_ID || "";
+
 function buildApiGwClient(event: any): ApiGatewayManagementApiClient {
-  const domain = event.requestContext?.domainName;
-  const stage = event.requestContext?.stage;
-  if (!domain || !stage) throw new Error("Missing WebSocket request context for PostToConnection");
+  const stage = event?.requestContext?.stage || "prod";
+  // Prefer the env-var-provided raw API id. Fall back to requestContext.apiId
+  // (also raw) if the env var ever goes missing — never use domainName.
+  const apiId = WEBSOCKET_API_ID || event?.requestContext?.apiId;
+  const endpoint = `https://${apiId}.execute-api.${REGION}.amazonaws.com/${stage}`;
   return new ApiGatewayManagementApiClient({
     region: REGION,
-    endpoint: `https://${domain}/${stage}`,
+    endpoint,
   });
 }
 
@@ -233,32 +239,7 @@ async function postFrame(
   }
 }
 
-/**
- * chatMessage route handler.
- *
- * Flow:
- *   1. Resolve session row (and refresh TTL).
- *   2. Parse the incoming frame.
- *   3. Invoke Bedrock AgentCore for the session's agentType, with the same
- *      bedrockSessionId carried across turns.
- *   4. Iterate the streaming response:
- *        - `chunk` events → forward as `{type:"token", delta}` frames.
- *        - `returnControl` events → execute the requested tool via
- *          toolExecutor, then continue the conversation by re-invoking with
- *          `sessionState.returnControlInvocationResults`. The model resumes
- *          where it stopped.
- *        - `trace` events → optionally forward as `{type:"trace", ...}` for
- *          debug; redacted in prod.
- *   5. Send a terminal `{type:"final", ...}` frame when the stream ends.
- *
- * Errors:
- *   - Session not found / expired → `{type:"error", reason:"session_expired"}`.
- *     Client should drop the socket and reconnect (server's $disconnect will
- *     fire automatically; the new $connect mints a fresh row).
- *   - Bedrock error → `{type:"error", reason:"agent_failure"}`.
- *   - Tool error → forwarded as `{type:"toolResult", ok:false, ...}` and the
- *     model is given the error so it can recover gracefully.
- */
+
 export const handler = async (event: any): Promise<APIGatewayProxyResult> => {
   const connectionId: string | undefined = event.requestContext?.connectionId;
   if (!connectionId) {
@@ -389,6 +370,24 @@ async function handlerBody(
         session.userContext as any,
       );
       console.log(`[chatMessage] confirmAction result — tool=${frame.toolName} ok=${result.ok} error=${result.ok ? "(none)" : result.error}`);
+      // Record the confirmation in AgentCore Memory ONLY — so the agent's
+      // future sessions know what the user confirmed ("did I post that
+      // shift last week?"). We do NOT write to the user-facing transcript
+      // (ChatMessages) because the confirm payload is a machine string
+      // ("confirm_post_temporary_job ({...JSON...})") that has no business
+      // appearing alongside the natural-language USER/ASSISTANT turns. The
+      // toolResult frame still streams to the live session for real-time
+      // feedback; transcript readers see the preceding "Review the details
+      // and click Confirm." line and infer continuation from the next turn.
+      //
+      // Role is USER in memory because clicking "confirm" is a user action;
+      // TOOL is reserved for actual model-emitted tool-output payloads.
+      if (session.agentType !== "public" && result.ok) {
+        const summaryText = `Confirmed: ${frame.toolName} (${JSON.stringify(frame.payload || {}).slice(0, 400)})`;
+        void writeMemoryEvent(session.userSub, session.bedrockSessionId, [
+          { role: "USER", text: summaryText },
+        ]).catch((e) => console.warn("[chatMessage] confirm memory write failed:", e));
+      }
       await postFrame(api, connectionId, {
         type: "toolResult",
         tool: frame.toolName,
@@ -449,16 +448,72 @@ async function handlerBody(
   // so the agent grounds itself in who's talking, their role, home address,
   // and which clinics they manage. Subsequent turns send the raw user text;
   // Bedrock keeps the preamble in the session memory keyed by bedrockSessionId.
+  //
+  // Authenticated sessions also get a memory preamble pulled from AgentCore
+  // Memory — rolling summaries of prior sessions plus extracted preferences,
+  // so the assistant carries context across days/weeks. Public (anon) sessions
+  // skip this because their userSub rotates per connection.
   let firstTurnText = userText;
   if (!session.contextInjected && session.userContext) {
     try {
-      const preamble = renderContextPreamble(session.userContext as unknown as UserContext);
-      firstTurnText = `${preamble}\n\nUser said: ${userText}`;
+      const profilePreamble = renderContextPreamble(session.userContext as unknown as UserContext);
+      let memoryPreamble = "";
+      if (session.agentType !== "public") {
+        // Bound first-turn latency: race the AgentCore retrieve against a
+        // 1.5s timer. If AgentCore is slow/unreachable we proceed without
+        // memory rather than making the user wait. Memory is a
+        // quality-of-life signal, not load-bearing.
+        const HYDRATE_TIMEOUT_MS = 1500;
+        memoryPreamble = await Promise.race([
+          hydrateMemoryPreamble(session.userSub),
+          new Promise<string>((resolve) =>
+            setTimeout(() => {
+              console.warn(`[chatMessage] hydrateMemoryPreamble timed out after ${HYDRATE_TIMEOUT_MS}ms`);
+              resolve("");
+            }, HYDRATE_TIMEOUT_MS),
+          ),
+        ]).catch((e) => {
+          console.warn("[chatMessage] hydrateMemoryPreamble failed (continuing without):", e);
+          return "";
+        });
+      }
+      firstTurnText = [memoryPreamble, profilePreamble, `User said: ${userText}`]
+        .filter(Boolean)
+        .join("\n\n");
       await markContextInjected(session.userSub, connectionId);
     } catch (e) {
-      console.warn("[chatMessage] renderContextPreamble failed (continuing without):", e);
+      console.warn("[chatMessage] preamble assembly failed (continuing without):", e);
     }
   }
+
+  // Accumulates the assistant's user-visible text across every InvokeAgent
+  // loop within this single user turn, so we can persist the complete turn
+  // pair to AgentCore Memory once the loop settles.
+  let assistantTextAcrossLoops = "";
+  // Fire-and-forget memory write — never awaited on the user-visible path,
+  // so memory latency / errors can't block the chat turn. Safe because
+  // Lambda's default `callbackWaitsForEmptyEventLoop=true` keeps the
+  // runtime alive until pending promises settle. (Verified: no caller in
+  // this codebase sets that flag to false.)
+  const persistTurnToMemory = (stopReason: string) => {
+    if (session.agentType === "public") return; // anon userSubs are ephemeral
+    const turns: ConversationTurn[] = [{ role: "USER", text: userText }];
+    const assistant = assistantTextAcrossLoops.trim();
+    if (assistant) turns.push({ role: "ASSISTANT", text: assistant });
+    // Don't await; log on failure inside writeMemoryEvent.
+    void writeMemoryEvent(session.userSub, session.bedrockSessionId, turns)
+      .catch((e) => console.warn(`[chatMessage] memory write (stop=${stopReason}) failed:`, e));
+    // Also persist to the user-facing transcript table. Separate store
+    // because AgentCore Memory only retains compressed summaries; this
+    // table backs the "scroll up to see prior chats" UI.
+    void writeChatHistoryTurn({
+      userSub: session.userSub,
+      sessionId: session.bedrockSessionId,
+      userText,
+      assistantText: assistant,
+      agentType: session.agentType,
+    }).catch((e) => console.warn(`[chatMessage] chat-history write (stop=${stopReason}) failed:`, e));
+  };
 
   try {
     let inputText: string | undefined = firstTurnText;
@@ -492,8 +547,12 @@ async function handlerBody(
 
       const response = await bedrock.send(command);
       if (!response.completion) {
+        // Persist whatever turn we have so memory continuity isn't lost,
+        // then return — falling through to the loop-cap path below would
+        // send a second contradictory error frame.
+        persistTurnToMemory("empty_completion");
         await postFrame(api, connectionId, { type: "error", reason: "empty_completion" });
-        break;
+        return { statusCode: 200, body: "ok" };
       }
 
       let pendingToolCalls: ToolCall[] = [];
@@ -552,8 +611,13 @@ async function handlerBody(
 
       console.log(`[chatMessage] turn complete loop=${loop} pendingToolCalls=${pendingToolCalls.length} assistantTextLen=${assistantTextThisTurn.length} text="${assistantTextThisTurn.slice(0, 200)}"`);
 
+      // Roll into the cross-loop accumulator so memory captures the
+      // full assistant utterance even when it was split by tool calls.
+      assistantTextAcrossLoops += assistantTextThisTurn;
+
       // No tool calls => assistant turn is complete.
       if (pendingToolCalls.length === 0) {
+        persistTurnToMemory("end_turn");
         await postFrame(api, connectionId, { type: "final", stopReason: "end_turn" });
         return { statusCode: 200, body: "ok" };
       }
@@ -590,6 +654,7 @@ async function handlerBody(
     }
 
     // Hit the loop cap.
+    persistTurnToMemory("tool_loop_cap");
     await postFrame(api, connectionId, {
       type: "error",
       reason: "tool_loop_cap",
@@ -599,6 +664,9 @@ async function handlerBody(
 
   } catch (err: any) {
     console.error("chatMessage: Bedrock invoke failed", err);
+    // Memory still gets the (possibly partial) turn — useful for diagnostic
+    // continuity across sessions even when this one errored out.
+    persistTurnToMemory("agent_failure");
     await postFrame(api, connectionId, {
       type: "error",
       reason: "agent_failure",

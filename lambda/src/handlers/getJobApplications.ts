@@ -6,6 +6,7 @@ import {
   QueryCommand,
   QueryCommandOutput,
   GetItemCommand,
+  BatchGetItemCommand,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { extractUserFromBearerToken } from "./utils";
@@ -16,6 +17,7 @@ export const dynamodb = new DynamoDBClient({
 
 const CLINIC_PROFILES_TABLE = process.env.CLINIC_PROFILES_TABLE || "DentiPal-V5-ClinicProfiles";
 const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-V5-Clinics";
+const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE;
 
 /** Per-invocation cache. Keys: clinicUserSub for profile-table hits,
  *  "cid:<clinicId>" for clinics-table hits. Avoids redundant GetItems
@@ -217,6 +219,7 @@ export const handler = async (event: any) => {
           availability: str(item.availability),
           notes: str(item.notes),
           acceptedRate: num(item.acceptedRate),
+          fromInvitation: bool(item.fromInvitation) === true,
         };
 
         // ----- Fetch Job Details -----
@@ -378,6 +381,48 @@ export const handler = async (event: any) => {
       (a, b) =>
         new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime()
     );
+
+    // ---- fromInvitation enrichment ----
+    // The application row's `fromInvitation` flag was only written for rows
+    // created via the negotiating branch of respondToInvitation.ts historically.
+    // To make the badge reliable for legacy rows and accept-branch rows too,
+    // batch-lookup the JobInvitations table for each (jobId, professionalUserSub)
+    // pair on this professional's applications. Any pair that matches a row in
+    // JobInvitations is — by definition — invite-originated.
+    if (JOB_INVITATIONS_TABLE && applications.length > 0) {
+      const inviteKeys = applications
+        .filter((a) => a.jobId && a.professionalUserSub)
+        .map((a) => ({
+          jobId: { S: String(a.jobId) },
+          professionalUserSub: { S: String(a.professionalUserSub) },
+        }));
+      const invitedPairs = new Set<string>();
+      for (let i = 0; i < inviteKeys.length; i += 100) {
+        const chunk = inviteKeys.slice(i, i + 100);
+        try {
+          const resp = await dynamodb.send(new BatchGetItemCommand({
+            RequestItems: {
+              [JOB_INVITATIONS_TABLE]: {
+                Keys: chunk,
+                ProjectionExpression: "jobId, professionalUserSub",
+              },
+            },
+          }));
+          for (const item of (resp.Responses?.[JOB_INVITATIONS_TABLE] || [])) {
+            const jid = (item.jobId as any)?.S;
+            const sub = (item.professionalUserSub as any)?.S;
+            if (jid && sub) invitedPairs.add(`${jid}|${sub}`);
+          }
+        } catch (err: any) {
+          console.warn("[getJobApplications] fromInvitation lookup failed:", err?.message);
+        }
+      }
+      for (const app of applications) {
+        if (invitedPairs.has(`${app.jobId}|${app.professionalUserSub}`)) {
+          app.fromInvitation = true;
+        }
+      }
+    }
 
     return json(event, 200, {
       status: "success",

@@ -91,6 +91,14 @@ import { handler as reportNoShowHandler } from "./handlers/reportNoShow";
 import { handler as listNoShowReportsHandler } from "./handlers/listNoShowReports";
 import { handler as reviewNoShowReportHandler } from "./handlers/reviewNoShowReport";
 
+// Clinic → professional ratings (gated on a completed shift).
+import { handler as submitProfessionalRatingHandler } from "./handlers/submitProfessionalRating";
+import { handler as getProfessionalRatingsHandler } from "./handlers/getProfessionalRatings";
+
+// Professional → clinic ratings (the inverse direction).
+import { handler as submitClinicRatingHandler } from "./handlers/submitClinicRating";
+import { handler as getClinicRatingsHandler } from "./handlers/getClinicRatings";
+
 // updateCompletedShifts.ts is deprecated — kept on disk for one release as rollback safety,
 // but no longer wired into the router or the scheduled-task path.
 import { handler as getScheduledShiftsHandler } from "./handlers/getScheduledShifts";
@@ -205,6 +213,11 @@ import { handler as updateNotificationPreferencesHandler } from "./handlers/upda
 import { handler as listNotificationsHandler } from "./handlers/listNotifications";
 import { handler as markNotificationsReadHandler } from "./handlers/markNotificationsRead";
 import { handler as deleteNotificationsHandler } from "./handlers/deleteNotifications";
+
+// Persistent chat transcript — backs the "scroll up to see prior chats" UI
+// (single continuous thread per user). Writes happen on the chat WebSocket
+// Lambda; this reads.
+import { handler as getChatHistoryHandler } from "./handlers/chat/getChatHistory";
 
 import { corsHeaders } from "./handlers/corsHeaders";
 
@@ -371,6 +384,14 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "POST:/jobs/{jobId}/confirm-completion": confirmShiftCompletionHandler,
         "POST:/jobs/{jobId}/no-show": reportNoShowHandler,
 
+        // Clinic → professional ratings.
+        "POST:/professionals/{userSub}/ratings": submitProfessionalRatingHandler,
+        "GET:/professionals/{userSub}/ratings": getProfessionalRatingsHandler,
+
+        // Professional → clinic ratings.
+        "POST:/clinics/{clinicId}/ratings": submitClinicRatingHandler,
+        "GET:/clinics/{clinicId}/ratings": getClinicRatingsHandler,
+
         // Admin no-show review queue.
         "GET:/admin/no-show-reports": listNoShowReportsHandler,
         "PATCH:/admin/no-show-reports/{jobId}/{professionalUserSub}": reviewNoShowReportHandler,
@@ -513,6 +534,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "GET:/notifications": listNotificationsHandler,
         "POST:/notifications/read": markNotificationsReadHandler,
         "POST:/notifications/delete": deleteNotificationsHandler,
+
+        // Chat transcript — paginated user-facing history (scroll up to see
+        // prior chats). Writes happen on the chat WebSocket Lambda.
+        "GET:/chat/history": getChatHistoryHandler,
 
     };
 
