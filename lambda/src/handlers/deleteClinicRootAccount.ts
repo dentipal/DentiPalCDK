@@ -70,7 +70,10 @@ const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "";
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE || "";
 const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE || "";
 const JOB_NEGOTIATIONS_TABLE = process.env.JOB_NEGOTIATIONS_TABLE || "";
-const FEEDBACK_TABLE = process.env.FEEDBACK_TABLE || "";
+// Note: ratings received about a clinic live in CLINIC_RATINGS_TABLE
+// (DentiPal-V5-ClinicRatings, keyed clinicId+professionalJobKey).
+// The FEEDBACK_TABLE is "Send Feedback" submissions, not clinic ratings.
+const CLINIC_RATINGS_TABLE = process.env.CLINIC_RATINGS_TABLE || "";
 const NOTIFICATIONS_TABLE = process.env.NOTIFICATIONS_TABLE || "";
 const CLINIC_ACCOUNT_BACKUP_TABLE = "DentiPal-V5-ClinicAccountBackup";
 
@@ -512,6 +515,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const negotiationsRaw: Record<string, AttributeValue>[] = [];
 
         for (const cid of ownedClinicIds) {
+            // ClinicProfiles is keyed (clinicId PK, userSub SK). Query by PK.
             if (CLINIC_PROFILES_TABLE) {
                 try {
                     const ps = await queryAllByPK(CLINIC_PROFILES_TABLE, "clinicId", cid);
@@ -520,12 +524,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     console.warn(`[deleteClinicRootAccount] profile query failed for ${cid}:`, (err as Error).message);
                 }
             }
+            // UserClinicAssignments is keyed (userSub PK, clinicId SK) and has
+            // no GSI on clinicId. Scan with a filter is the only option.
             if (USER_CLINIC_ASSIGNMENTS_TABLE) {
                 try {
-                    const ms = await queryAllByPK(USER_CLINIC_ASSIGNMENTS_TABLE, "clinicId", cid);
+                    const ms = await scanByFilter(
+                        USER_CLINIC_ASSIGNMENTS_TABLE,
+                        "clinicId = :cid",
+                        { ":cid": { S: cid } },
+                    );
                     membersRaw.push(...ms);
                 } catch (err) {
-                    console.warn(`[deleteClinicRootAccount] members query failed for ${cid}:`, (err as Error).message);
+                    console.warn(`[deleteClinicRootAccount] members scan failed for ${cid}:`, (err as Error).message);
                 }
             }
             if (JOB_POSTINGS_TABLE) {
@@ -539,45 +549,63 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }
 
         // For each job: applications, invitations, negotiations.
+        // JobApplications is keyed (jobId PK, professionalUserSub SK) — Query by PK.
+        // JobInvitations is keyed (jobId PK, professionalUserSub SK) — Query by PK.
         for (const job of allJobsRaw) {
             const jobId = job.jobId?.S;
             if (!jobId) continue;
             if (JOB_APPLICATIONS_TABLE) {
                 try {
-                    const apps = await queryAllByPK(JOB_APPLICATIONS_TABLE, "jobId", jobId, "JobIndex");
+                    const apps = await queryAllByPK(JOB_APPLICATIONS_TABLE, "jobId", jobId);
                     allAppsRaw.push(...apps);
-                } catch { /* swallow per-job */ }
+                } catch (err) {
+                    console.warn(`[deleteClinicRootAccount] applications query failed for job ${jobId}:`, (err as Error).message);
+                }
             }
             if (JOB_INVITATIONS_TABLE) {
                 try {
                     const invs = await queryAllByPK(JOB_INVITATIONS_TABLE, "jobId", jobId);
                     invitationsRaw.push(...invs);
-                } catch { /* swallow per-job */ }
+                } catch (err) {
+                    console.warn(`[deleteClinicRootAccount] invitations query failed for job ${jobId}:`, (err as Error).message);
+                }
             }
         }
+        // JobNegotiations is keyed (applicationId PK, negotiationId SK). The
+        // JobApplications schema has no `applicationId` column — applications
+        // are identified by (jobId, professionalUserSub). If your negotiations
+        // refer to applications by a different key, the synthesized id is
+        // "{jobId}#{professionalUserSub}". Try that.
         for (const app of allAppsRaw) {
-            const appId = app.applicationId?.S;
-            if (!appId) continue;
-            if (JOB_NEGOTIATIONS_TABLE) {
-                try {
-                    const negs = await queryAllByPK(JOB_NEGOTIATIONS_TABLE, "applicationId", appId);
-                    negotiationsRaw.push(...negs);
-                } catch { /* swallow per-app */ }
+            const jobId = app.jobId?.S;
+            const profSub = app.professionalUserSub?.S;
+            if (!jobId || !profSub) continue;
+            const candidateAppIds = [
+                app.applicationId?.S,
+                `${jobId}#${profSub}`,
+            ].filter((x): x is string => !!x);
+            for (const appId of candidateAppIds) {
+                if (JOB_NEGOTIATIONS_TABLE) {
+                    try {
+                        const negs = await queryAllByPK(JOB_NEGOTIATIONS_TABLE, "applicationId", appId);
+                        negotiationsRaw.push(...negs);
+                    } catch (err) {
+                        console.warn(`[deleteClinicRootAccount] negotiations query failed for ${appId}:`, (err as Error).message);
+                    }
+                }
             }
         }
 
-        // Ratings received about each owned clinic (Feedback table).
-        if (FEEDBACK_TABLE) {
+        // Ratings received about each owned clinic. ClinicRatings is keyed
+        // (clinicId PK, professionalJobKey SK) — Query by PK is cheap and
+        // returns every rating that clinic has received.
+        if (CLINIC_RATINGS_TABLE) {
             for (const cid of ownedClinicIds) {
                 try {
-                    const rs = await scanByFilter(
-                        FEEDBACK_TABLE,
-                        "clinicId = :cid",
-                        { ":cid": { S: cid } }
-                    );
+                    const rs = await queryAllByPK(CLINIC_RATINGS_TABLE, "clinicId", cid);
                     ratingsReceivedRaw.push(...rs);
                 } catch (err) {
-                    console.warn(`[deleteClinicRootAccount] ratings scan failed for ${cid}:`, (err as Error).message);
+                    console.warn(`[deleteClinicRootAccount] ratings query failed for ${cid}:`, (err as Error).message);
                 }
             }
         }
@@ -683,48 +711,54 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 deletes.push({ TableName: JOB_POSTINGS_TABLE, Key: { clinicUserSub: { S: cus }, jobId: { S: jobId } } });
             }
         }
-        // Ratings received
+        // Ratings received — ClinicRatings keyed (clinicId, professionalJobKey).
         for (const r of ratingsReceivedRaw) {
-            if (FEEDBACK_TABLE) {
-                const key: Record<string, AttributeValue> = {};
-                if (r.feedbackId?.S) key.feedbackId = { S: r.feedbackId.S };
-                else if (r.ratingId?.S) key.ratingId = { S: r.ratingId.S };
-                else if (r.id?.S) key.id = { S: r.id.S };
-                if (Object.keys(key).length > 0) deletes.push({ TableName: FEEDBACK_TABLE, Key: key });
+            if (!CLINIC_RATINGS_TABLE) break;
+            const cid = r.clinicId?.S;
+            const pjk = r.professionalJobKey?.S;
+            if (cid && pjk) {
+                deletes.push({
+                    TableName: CLINIC_RATINGS_TABLE,
+                    Key: { clinicId: { S: cid }, professionalJobKey: { S: pjk } },
+                });
             }
         }
-        // Members
+        // Members — UserClinicAssignments keyed (userSub PK, clinicId SK).
         for (const m of membersRaw) {
-            const cid = m.clinicId?.S, sub = m.userSub?.S;
-            if (cid && sub && USER_CLINIC_ASSIGNMENTS_TABLE) {
-                deletes.push({ TableName: USER_CLINIC_ASSIGNMENTS_TABLE, Key: { clinicId: { S: cid }, userSub: { S: sub } } });
+            const sub = m.userSub?.S, cid = m.clinicId?.S;
+            if (sub && cid && USER_CLINIC_ASSIGNMENTS_TABLE) {
+                deletes.push({
+                    TableName: USER_CLINIC_ASSIGNMENTS_TABLE,
+                    Key: { userSub: { S: sub }, clinicId: { S: cid } },
+                });
             }
         }
-        // ClinicProfiles
+        // ClinicProfiles — keyed (clinicId PK, userSub SK). Both required.
         for (const p of clinicProfilesRaw) {
-            const cid = p.clinicId?.S;
-            if (cid && CLINIC_PROFILES_TABLE) {
-                const key: Record<string, AttributeValue> = { clinicId: { S: cid } };
-                if (p.profileId?.S) key.profileId = { S: p.profileId.S };
-                deletes.push({ TableName: CLINIC_PROFILES_TABLE, Key: key });
+            const cid = p.clinicId?.S, sub = p.userSub?.S;
+            if (cid && sub && CLINIC_PROFILES_TABLE) {
+                deletes.push({
+                    TableName: CLINIC_PROFILES_TABLE,
+                    Key: { clinicId: { S: cid }, userSub: { S: sub } },
+                });
             }
         }
-        // Owner's notifications (best-effort scan)
+        // Owner's notifications — Notifications keyed (userSub PK, notificationId SK).
+        // Query by PK (no scan needed; userSub IS the partition key).
         if (NOTIFICATIONS_TABLE) {
             try {
-                const notifs = await scanByFilter(
-                    NOTIFICATIONS_TABLE,
-                    "userSub = :sub",
-                    { ":sub": { S: ownerSub } }
-                );
+                const notifs = await queryAllByPK(NOTIFICATIONS_TABLE, "userSub", ownerSub);
                 for (const n of notifs) {
                     const sub = n.userSub?.S, nid = n.notificationId?.S;
                     if (sub && nid) {
-                        deletes.push({ TableName: NOTIFICATIONS_TABLE, Key: { userSub: { S: sub }, notificationId: { S: nid } } });
+                        deletes.push({
+                            TableName: NOTIFICATIONS_TABLE,
+                            Key: { userSub: { S: sub }, notificationId: { S: nid } },
+                        });
                     }
                 }
             } catch (err) {
-                console.warn("[deleteClinicRootAccount] notifications scan failed:", (err as Error).message);
+                console.warn("[deleteClinicRootAccount] notifications query failed:", (err as Error).message);
             }
         }
 
