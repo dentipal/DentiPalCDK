@@ -188,6 +188,10 @@ export const handler = async (
       .map((it) => ({
       clinicUserSub: s(it.clinicUserSub),
       clinicId: s(it.clinicId),
+      // Placeholder so the downstream live-clinic enricher patches in the
+      // real clinic_name (the enricher only writes keys that already exist
+      // on the record — without this seed the chat card has no clinic name).
+      clinicName: "",
       jobId: s(it.jobId),
       jobTitle: s(it.professional_role) || s(it.jobTitle),
       professionalRole: s(it.professional_role),

@@ -99,6 +99,53 @@ function safeBodyToString(status: number, body: any): string {
 }
 
 /**
+ * Scrub past dates off shift/job postings before they reach the chat widget.
+ *
+ * The underlying handlers keep multi-day consulting postings whenever at least
+ * one date in `dates` is still upcoming, but the card renderer surfaces
+ * `dates[0]` — the earliest, which can already be in the past. This helper:
+ *   - drops dated single-day postings whose only date is past,
+ *   - trims `dates` arrays down to upcoming-only and realigns the singular
+ *     `date`/`startDate`/`start_date` fields so every render path picks a
+ *     bookable date,
+ *   - leaves permanent postings alone (those are open-ended hires, not
+ *     date-bound shifts; a past start_date is fine).
+ *
+ * Used by `search_jobs_near_me` and `get_open_shifts` — both surfaces had
+ * "Sun · 17 May" cards showing up after that date had passed.
+ */
+function trimPastDatesFromPostings<T extends Record<string, any>>(postings: T[]): T[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const isPastIso = (d: any): boolean => {
+    if (typeof d !== "string" || !d) return false;
+    const dt = new Date(d.length === 10 ? d + "T00:00:00" : d);
+    return !Number.isNaN(dt.getTime()) && dt < today;
+  };
+  const out: T[] = [];
+  for (const p of postings) {
+    const datesArr: any[] = Array.isArray((p as any).dates) ? (p as any).dates : [];
+    if (datesArr.length > 0) {
+      // Multi-day shift. Drop the whole posting when every occurrence has
+      // passed — but DON'T trim the dates array down to upcoming-only.
+      // Past dates are part of the original booking schedule and the chat
+      // card now lists every date so clinics (and pros) can see the full
+      // commitment, not just whatever happens to remain after today.
+      const hasUpcoming = datesArr.some((d) => !isPastIso(d));
+      if (!hasUpcoming) continue;
+      out.push(p);
+      continue;
+    }
+    const jt = String((p as any).jobType || (p as any).job_type || "").toLowerCase();
+    if (jt === "permanent") { out.push(p); continue; }
+    const singleDate = (p as any).date || (p as any).startDate || (p as any).start_date;
+    if (typeof singleDate === "string" && isPastIso(singleDate)) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+/**
  * Standard "translate adapter result into ToolResult" helper. Use this
  * everywhere instead of inlining `r.status >= 400 ? err(..., JSON.stringify(r.body)) : ok(...)`
  * — `JSON.stringify(undefined)` yields the JS value `undefined`, which
@@ -737,11 +784,16 @@ export async function executeTool(
         // can handle either source.
         const postings: any[] = body?.jobs || body?.jobPostings || [];
 
+        // Past-date hygiene runs first so downstream day-of-week filtering and
+        // the card renderer both see upcoming-only dates. Without it, multi-day
+        // postings whose first occurrence is past kept rendering "Sun · 17 May"
+        // even when the next occurrence was a week away.
+        let finalPostings = trimPastDatesFromPostings(postings);
+
         // If the canonical handler didn't apply distance (no home coords),
         // do a best-effort Haversine on what we got.
-        let finalPostings = postings;
         if (home?.lat && home?.lng) {
-          finalPostings = postings.map((p: any) => {
+          finalPostings = finalPostings.map((p: any) => {
             if (typeof p?.distanceMiles === "number") return p; // handler already provided
             if (typeof p?.lat === "number" && typeof p?.lng === "number") {
               const miles = haversineDistance(home.lat, home.lng, p.lat, p.lng);
@@ -983,9 +1035,14 @@ export async function executeTool(
         // doesn't know how to display — that's why the agent appeared to
         // say "Done." with no cards even when the handler returned dozens.
         const shifts: any[] = Array.isArray(filtered.body?.data) ? filtered.body.data : [];
+        // Defense-in-depth: getClinicShifts.open-shifts has no past-date filter
+        // of its own, so a temp posting whose `date` has passed but whose status
+        // still reads `active` would surface here as "open". Trim past dates
+        // and drop fully-past postings so the chat card never shows them.
+        const trimmedShifts = trimPastDatesFromPostings(shifts);
         return ok(call.toolName, {
-          shifts,
-          totalCount: shifts.length,
+          shifts: trimmedShifts,
+          totalCount: trimmedShifts.length,
         });
       }
       case "list_applicants_for_job": {
