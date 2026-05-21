@@ -28,6 +28,14 @@ const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyR
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     const method: string = event.httpMethod || (event as any).requestContext?.http?.method || "GET";
 
+    console.log("[deleteClinic] ENTRY", {
+        method,
+        path: (event as any).path || (event as any).rawPath,
+        rawPathParameters: event.pathParameters,
+        envCLINICS_TABLE: process.env.CLINICS_TABLE,
+        envREGION: process.env.REGION,
+    });
+
     if (method === "OPTIONS") {
         return { statusCode: 200, headers: corsHeaders(event), body: "" };
     }
@@ -38,8 +46,38 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         const userSub = userInfo.sub;
         const groups = userInfo.groups;
 
-        const clinicId: string | undefined =
+        const rawClinicId =
             event.pathParameters?.clinicId || event.pathParameters?.proxy;
+
+        // Defensive normalization. Three things can corrupt the clinicId
+        // before it hits DynamoDB:
+        //   1. The router passes `pathParameters.proxy` which under the
+        //      catch-all REST proxy integration contains the FULL path
+        //      after the API root, including the "clinics/" prefix
+        //      (e.g. "clinics/4fc550c1-..."). DynamoDB then looks up
+        //      `clinicId = "clinics/4fc550c1-..."` and finds nothing.
+        //      We strip everything up to and including the last "/" so the
+        //      key is just the trailing segment (the UUID).
+        //   2. URL-encoding (e.g. trailing %0A from copy-paste).
+        //   3. Whitespace or trailing slashes.
+        let clinicId: string | undefined = rawClinicId;
+        if (clinicId) {
+            try { clinicId = decodeURIComponent(clinicId); } catch { /* not encoded */ }
+            clinicId = clinicId.trim().replace(/\/+$/, "");
+            const lastSlash = clinicId.lastIndexOf("/");
+            if (lastSlash >= 0) clinicId = clinicId.slice(lastSlash + 1);
+        }
+
+        console.log("[deleteClinic] auth+id resolved", {
+            userSub,
+            groups,
+            rawClinicId,
+            normalizedClinicId: clinicId,
+            normalizedLength: clinicId?.length,
+            normalizedBytes: clinicId
+                ? Array.from(clinicId).map((c) => c.charCodeAt(0))
+                : null,
+        });
 
         if (!clinicId) {
             return json(event, 400, {
@@ -56,12 +94,62 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // soft-deleted — which produces a misleading 403. By looking the row
         // up here first, we can return precise 404/409 errors and reserve the
         // 403 for actual permission failures.
-        const existing = await dynamoClient.send(new GetItemCommand({
+        const getInput = {
             TableName: CLINICS_TABLE,
             Key: { clinicId: { S: clinicId } },
-        }));
+        };
+        console.log("[deleteClinic] GetItem request", getInput);
+        const existing = await dynamoClient.send(new GetItemCommand(getInput));
+        console.log("[deleteClinic] GetItem response", {
+            hasItem: !!existing.Item,
+            itemKeys: existing.Item ? Object.keys(existing.Item) : null,
+            consumedCapacity: existing.$metadata?.httpStatusCode,
+            requestId: existing.$metadata?.requestId,
+        });
 
         if (!existing.Item) {
+            // Belt-and-suspenders fallback: if GetItem somehow misses a row
+            // that exists, fall through to a Query so we can see whether the
+            // row is reachable by the same partition key value through a
+            // different read API. If Query returns it, the discrepancy is
+            // logged loudly and we proceed with the soft-delete instead of
+            // returning a misleading 404.
+            console.warn("[deleteClinic] GetItem returned no Item — running fallback Query to diagnose", {
+                clinicId,
+                table: CLINICS_TABLE,
+            });
+            try {
+                const { QueryCommand } = await import("@aws-sdk/client-dynamodb");
+                const q = await dynamoClient.send(new QueryCommand({
+                    TableName: CLINICS_TABLE,
+                    KeyConditionExpression: "clinicId = :cid",
+                    ExpressionAttributeValues: { ":cid": { S: clinicId } },
+                    Limit: 1,
+                }));
+                console.warn("[deleteClinic] Fallback Query result", {
+                    count: q.Count,
+                    scannedCount: q.ScannedCount,
+                    firstItemKeys: q.Items?.[0] ? Object.keys(q.Items[0]) : null,
+                });
+                if (q.Items && q.Items.length > 0) {
+                    console.error("[deleteClinic] BUG: GetItem missed a row that Query found. Investigate table key schema / encoding mismatch.", {
+                        clinicId,
+                        table: CLINICS_TABLE,
+                        foundItem: q.Items[0],
+                    });
+                    // Continue using the Query result rather than returning 404.
+                    existing.Item = q.Items[0];
+                }
+            } catch (qErr) {
+                console.error("[deleteClinic] Fallback Query failed", { error: (qErr as Error).message });
+            }
+        }
+
+        if (!existing.Item) {
+            console.warn("[deleteClinic] Returning 404 — clinic not found by GetItem OR Query", {
+                clinicId,
+                table: CLINICS_TABLE,
+            });
             return json(event, 404, {
                 error: "Not Found",
                 statusCode: 404,

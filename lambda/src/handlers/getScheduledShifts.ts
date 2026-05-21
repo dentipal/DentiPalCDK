@@ -249,6 +249,10 @@ export const handler = async (
 
         status: app.applicationStatus?.S || "Not specified",
         clinicId: clinicId,
+        // Placeholder so the live-clinic enricher below patches in the real
+        // clinic_name — the enricher only writes keys that already exist on
+        // the record, so without this seed chat cards have no clinic name.
+        clinicName: "",
         professionalUserSub: sub || undefined,
         fromInvitation: isFromInvitation,
       };

@@ -679,9 +679,88 @@ export class DentiPalCDKStack extends cdk.Stack {
         // ========================================================================
         // 1. Cognito User Pool
         // ========================================================================
+        // Branded OTP verification email — mirrors the visual language of
+        // lambda/src/handlers/admin/onboarding/inviteEmail.ts. Cognito
+        // substitutes `{####}` with the 6-digit OTP at send time.
+        //
+        // OTP expiry: Cognito's self-signup confirmation code is valid for
+        // 24 hours after delivery. After that, the user must request a new
+        // one from the verification screen. The TTL itself isn't tuneable
+        // from the UserPool construct, so we hardcode "24 hours" in the copy.
+        const SIGNUP_OTP_EMAIL_SUBJECT = "Verify your DentiPal account";
+        const SIGNUP_OTP_EMAIL_BODY = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verify your DentiPal account</title>
+</head>
+<body style="margin: 0; padding: 0; background: #f5f5f7; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1d1d1f;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background: #f5f5f7; padding: 32px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width: 480px; background: #ffffff; border-radius: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); overflow: hidden;">
+          <!-- Header: solid black bar with white DentiPal wordmark, centered -->
+          <tr>
+            <td align="center" style="background: #1d1d1f; padding: 22px 32px; text-align: center;">
+              <div style="font-size: 18px; font-weight: 700; letter-spacing: -0.01em; color: #ffffff;">DentiPal</div>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding: 28px 32px 8px;">
+              <h1 style="margin: 0 0 6px; font-size: 22px; line-height: 1.25; font-weight: 600; color: #1d1d1f; letter-spacing: -0.02em;">
+                Confirm your email
+              </h1>
+              <p style="margin: 0; color: #424245; line-height: 1.55; font-size: 15px;">
+                Use the code below to finish creating your account.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" style="padding: 18px 32px 6px;">
+              <div style="font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 30px; font-weight: 600; color: #1d1d1f; background: #f5f5f7; border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; padding: 14px 22px; display: inline-block; letter-spacing: 0.32em;">{####}</div>
+              <div style="margin-top: 10px; font-size: 12px; color: #6e6e73;">
+                This code expires in <strong style="color: #1d1d1f; font-weight: 600;">24 hours</strong>.
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 12px 32px 24px;">
+              <p style="margin: 0; font-size: 12px; color: #86868b; line-height: 1.55; text-align: center;">
+                Never share this code. If this wasn't you, ignore this email.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer: solid black bar with white text, centered -->
+          <tr>
+            <td align="center" style="background: #1d1d1f; padding: 18px 32px; text-align: center;">
+              <div style="font-size: 13px; color: #ffffff; font-weight: 600; letter-spacing: -0.01em;">DentiPal</div>
+              <div style="margin-top: 4px; font-size: 11px; color: rgba(255,255,255,0.72);">
+                <a href="https://dentipal.com" style="color: rgba(255,255,255,0.72); text-decoration: none;">dentipal.com</a>
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+        const SIGNUP_OTP_SMS_MESSAGE =
+            "Your DentiPal verification code is {####}. Expires in 24 hours. Never share it.";
+
         const userPool = new cognito.UserPool(this, 'ClinicUserPoolV5', {
             selfSignUpEnabled: true,
             autoVerify: { email: true },
+            userVerification: {
+                emailSubject: SIGNUP_OTP_EMAIL_SUBJECT,
+                emailBody: SIGNUP_OTP_EMAIL_BODY,
+                emailStyle: cognito.VerificationEmailStyle.CODE,
+                smsMessage: SIGNUP_OTP_SMS_MESSAGE,
+            },
             standardAttributes: {
                 givenName: { required: true, mutable: true },
                 familyName: { required: true, mutable: true },
@@ -771,8 +850,11 @@ export class DentiPalCDKStack extends cdk.Stack {
             'ClinicViewer',
             'AssociateDentist',
             'DentalAssistant',
+            'ExpandedFunctionsDA',
             'DualRoleFrontDA',
             'DentalHygienist',
+            'PatientCoordinatorFront',
+            'TreatmentCoordinatorFront',
             'FrontDesk',
             'Dentist',
             'Hygienist',
@@ -1563,6 +1645,17 @@ export class DentiPalCDKStack extends cdk.Stack {
                 PROFESSIONAL_LICENSES_BUCKET: professionalLicensesBucket.bucketName,
                 CLINIC_OFFICE_IMAGES_BUCKET: clinicOfficeImagesBucket.bucketName,
                 CLINIC_ACCOUNT_BACKUP_BUCKET: clinicAccountBackupBucket.bucketName,
+
+                // Ranking V2 feature flags — see getProfessionalFilteredJobs.ts.
+                // Toggle these together to roll out the new relevance score
+                // (always-on distance + profile-derived role/skills/specialties
+                // + clinic-diversity rerank). Default "false" means production
+                // continues to run V1 weights even though V2 code is shipped.
+                // Once the canary metrics show the predicted wins, PR 6 will
+                // delete both paths and these flags.
+                RANKING_V2_PROFILE_SIGNALS: "true",
+                RANKING_V2_SCORE: "true",
+                RANKING_V2_DIVERSITY: "true",
             },
             timeout: cdk.Duration.seconds(60),
             // Lambda CPU scales with memory. The monolith init (imports every handler + AWS SDK v3)

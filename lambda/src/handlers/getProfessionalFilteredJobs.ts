@@ -17,6 +17,11 @@ import {
   jobConflictsWithScheduled,
   jobDates,
 } from "./professionalAvailability";
+import {
+  getProfessionalPreferences,
+  DEFAULT_PREFERENCES,
+  type ProfessionalPreferences,
+} from "./professionalPreferences";
 
 const REGION = process.env.REGION || "us-east-1";
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-JobPostings";
@@ -247,76 +252,371 @@ export function getJobCoords(item: Record<string, AttributeValue>): Coordinates 
 }
 
 /**
- * Compute a relevance score for a job based on available signals.
- * Higher = more relevant. Score range: 0-140 (with all bonuses).
+ * Per-signal breakdown of the relevance score. `total` is what sorts; the
+ * individual components are surfaced for observability (structured logs in
+ * PR 5, and the X-Debug-Ranking response augment for staff JWTs).
+ *
+ * Components are non-negative except `travelPenalty`, which is subtracted
+ * from the total when the soft travel cap fires.
  */
-function computeRelevanceScore(job: Record<string, AttributeValue>, params: {
+export type ScoreBreakdown = {
+  total: number;
+  distance: number;
+  role: number;
+  skills: number;
+  recency: number;
+  rate: number;
+  completeness: number;
+  clinicBoost: number;
+  popularity: number;
+  travelPenalty: number;
+};
+
+type ScoreParams = {
   role?: string;
   location?: string;
   distanceMi?: number | null;
   radiusMiles?: number;
   appliedClinicIds?: Set<string>;
-}): number {
-  let score = 0;
+  // Profile-derived soft signals. When RANKING_V2_PROFILE_SIGNALS is off the
+  // caller passes DEFAULT_PREFERENCES so these are inert.
+  profileRole?: string | null;
+  profileSpecialties?: string[];
+  profileSkills?: string[];
+  profileCertificates?: string[];
+  profileIsWillingToTravel?: boolean;
+  profileMaxTravelDistance?: number | null;
+};
 
-  // Recency score (0-40): newer jobs score higher
+// Read once at module init. Lambda env vars are set at deploy time; toggling
+// the flag re-runs cold-start which picks the new value up. Reading on every
+// score call would be wasteful in hot paths.
+const RANKING_V2_SCORE = process.env.RANKING_V2_SCORE === "true";
+
+function roundToTwo(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+function finalize(b: Omit<ScoreBreakdown, "total">): ScoreBreakdown {
+  const total = roundToTwo(
+    b.distance + b.role + b.skills + b.recency + b.rate +
+    b.completeness + b.clinicBoost + b.popularity - b.travelPenalty,
+  );
+  return { ...b, total };
+}
+
+// A scored job carried through the ranker. Defined at module scope so the
+// diversity / observability helpers below can name it without taking the
+// type as a generic parameter.
+type RankedJob = {
+  item: Record<string, AttributeValue>;
+  score: ScoreBreakdown;
+  distanceMi?: number | null;
+};
+
+// Returned by the non-trending sort paths (newest / highestPay / priority)
+// where we want a uniformly shaped score field but the actual ordering is
+// driven by other criteria. Allocating a fresh object per call is fine — the
+// ranker runs O(scanned-rows) times, and the row's filter gauntlet dwarfs this.
+function emptyBreakdown(): ScoreBreakdown {
+  return {
+    total: 0, distance: 0, role: 0, skills: 0, recency: 0,
+    rate: 0, completeness: 0, clinicBoost: 0, popularity: 0, travelPenalty: 0,
+  };
+}
+
+// Names of the additive signal components, used for "signal coverage" — how
+// many signals contributed something to the total. `travelPenalty` is excluded
+// because it's a subtraction; coverage measures contribution, not presence.
+const POSITIVE_SIGNAL_KEYS = [
+  "distance", "role", "skills", "recency", "rate",
+  "completeness", "clinicBoost", "popularity",
+] as const;
+
+const RANKING_V2_DIVERSITY = process.env.RANKING_V2_DIVERSITY === "true";
+
+/**
+ * Reorder a page of ranked jobs so no clinic occupies more than 2 consecutive
+ * slots. When a 3rd-in-a-row collision is detected, the offending row is
+ * swapped forward with the nearest later row from a different clinic. The
+ * swap is bounded by the page itself, so worst-case work is O(page²) — fine
+ * for the page sizes the dashboard ever requests (20-50).
+ *
+ * Promoted bucket is intentionally untouched — paid placement keeps its slot.
+ */
+function diversifyByClinic(jobs: RankedJob[]): RankedJob[] {
+  if (!RANKING_V2_DIVERSITY || jobs.length <= 2) return jobs;
+  const result = [...jobs];
+  for (let i = 2; i < result.length; i++) {
+    const cid = str(result[i].item.clinicId);
+    if (!cid) continue;
+    const prev1 = str(result[i - 1].item.clinicId);
+    const prev2 = str(result[i - 2].item.clinicId);
+    if (prev1 !== cid || prev2 !== cid) continue;
+    // 3rd-in-a-row from the same clinic — find the nearest later row from a
+    // different clinic and swap. If none exists (whole tail belongs to this
+    // clinic), leave the cluster — there's nothing useful to swap with.
+    for (let j = i + 1; j < result.length; j++) {
+      const ocid = str(result[j].item.clinicId);
+      if (ocid && ocid !== cid) {
+        const tmp = result[i];
+        result[i] = result[j];
+        result[j] = tmp;
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+type RankedJobLite = { item: Record<string, AttributeValue>; score: ScoreBreakdown };
+
+/**
+ * Compute "signal coverage" — the fraction of additive ranking signals that
+ * contributed a non-zero value to the total. Useful as a single-number health
+ * check for the ranker: if coverage collapses to recency+completeness only,
+ * personalisation has stopped flowing through.
+ */
+function signalCoverage(items: RankedJobLite[]): number {
+  if (items.length === 0) return 0;
+  const active = new Set<string>();
+  for (const it of items) {
+    for (const k of POSITIVE_SIGNAL_KEYS) {
+      if (it.score[k] > 0) active.add(k);
+    }
+  }
+  return active.size / POSITIVE_SIGNAL_KEYS.length;
+}
+
+/**
+ * Emit a structured ranking observability line. The `_aws` envelope is
+ * CloudWatch's Embedded Metric Format — when this lambda's log group is
+ * configured for EMF, CloudWatch automatically extracts `RankingSignalCoverage`
+ * as a metric. The same line doubles as a human-readable log entry so the
+ * data is useful without any CloudWatch setup.
+ */
+function emitRankingLog(payload: {
+  userSub: string;
+  coordSource: "live" | "stored" | "none";
+  totalScanned: number;
+  matchedCount: number;
+  promotedCount: number;
+  topJobs: { jobId: string; total: number; breakdown: ScoreBreakdown }[];
+  coverage: number;
+}) {
+  const line = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [{
+        Namespace: "DentiPal/Ranking",
+        Dimensions: [["FeedKind"]],
+        Metrics: [{ Name: "RankingSignalCoverage", Unit: "None" }],
+      }],
+    },
+    FeedKind: "available",
+    RankingSignalCoverage: payload.coverage,
+    event: "ranking",
+    userSub: payload.userSub,
+    coordSource: payload.coordSource,
+    totalScanned: payload.totalScanned,
+    matchedCount: payload.matchedCount,
+    promotedCount: payload.promotedCount,
+    topJobs: payload.topJobs,
+  };
+  // Single-line JSON keeps Cloud Watch Logs Insights queries trivial.
+  console.log(JSON.stringify(line));
+}
+
+/**
+ * Compute the relevance score for a job. Returns a breakdown rather than a
+ * scalar so the per-signal contribution is available for logging and debug.
+ * Dispatches to V1 (current weights) or V2 (rebalanced weights with
+ * always-on distance + skill overlap + soft travel cap) based on
+ * RANKING_V2_SCORE env flag.
+ */
+function computeRelevanceScore(
+  job: Record<string, AttributeValue>,
+  params: ScoreParams,
+): ScoreBreakdown {
+  return RANKING_V2_SCORE ? computeScoreV2(job, params) : computeScoreV1(job, params);
+}
+
+/**
+ * Legacy weights — preserved for the canary off-state. Max ≈ 140.
+ * Recency 40 / Role 30 / Rate 20 / Completeness 10 / Distance 10 /
+ * ClinicBoost 15 / Popularity 15.
+ */
+function computeScoreV1(job: Record<string, AttributeValue>, params: ScoreParams): ScoreBreakdown {
+  let recency = 0;
   const createdAt = str(job.createdAt);
   if (createdAt) {
-    const ageMs = Date.now() - new Date(createdAt).getTime();
-    const ageDays = ageMs / (1000 * 60 * 60 * 24);
-    // Jobs less than 1 day old get full 40 points, decays over 30 days
-    score += Math.max(0, 40 * (1 - ageDays / 30));
+    const ageDays = (Date.now() - new Date(createdAt).getTime()) / (1000 * 60 * 60 * 24);
+    recency = Math.max(0, 40 * (1 - ageDays / 30));
   }
 
-  // Role match score (0-30): exact or partial role match
-  if (params.role) {
+  // Role match — filter takes priority, falls back to profile role; specialty
+  // overlap adds up to +10 within the same 30-point ceiling.
+  const effectiveRole = params.role || params.profileRole || "";
+  let role = 0;
+  if (effectiveRole) {
     const jobRole = (str(job.professional_role) || str(job.professionalRole)).toLowerCase();
-    const filterRole = params.role.toLowerCase();
-    if (jobRole === filterRole) {
-      score += 30; // exact match
-    } else if (jobRole.includes(filterRole) || filterRole.includes(jobRole)) {
-      score += 15; // partial match
+    const filterRole = effectiveRole.toLowerCase();
+    if (jobRole === filterRole) role = 30;
+    else if (jobRole.includes(filterRole) || filterRole.includes(jobRole)) role = 15;
+  }
+  if (params.profileSpecialties && params.profileSpecialties.length > 0) {
+    const jobSpec = (str(job.shift_speciality) || str(job.shiftSpeciality)).toLowerCase();
+    if (jobSpec) {
+      const overlap = params.profileSpecialties.some((s) => {
+        const ls = s.toLowerCase();
+        return ls === jobSpec || jobSpec.includes(ls) || ls.includes(jobSpec);
+      });
+      if (overlap) role = Math.min(30, role + 10);
     }
   }
 
-  // Rate score (0-20): jobs with higher rates score higher
-  const rate = num(job.rate) ?? num(job.hourly_rate) ?? num(job.hourlyRate) ?? 0;
-  // Cap at $200/hr for normalization
-  score += Math.min(20, (rate / 200) * 20);
+  const rateValue = num(job.rate) ?? num(job.hourly_rate) ?? num(job.hourlyRate) ?? 0;
+  const rate = Math.min(20, (rateValue / 200) * 20);
 
-  // Has complete info bonus (0-10): jobs with all details filled score higher
   let completeness = 0;
   if (str(job.date) || job.dates) completeness += 2.5;
   if (str(job.start_time) || str(job.startTime)) completeness += 2.5;
   if (str(job.professional_role) || str(job.professionalRole)) completeness += 2.5;
-  if (rate > 0) completeness += 2.5;
-  score += completeness;
+  if (rateValue > 0) completeness += 2.5;
 
-  // Distance weighting (0-10): closer jobs score higher within the radius.
-  // Only applied when user has a radius filter active and we computed a distance.
+  let distance = 0;
   if (params.distanceMi != null && params.radiusMiles && params.radiusMiles > 0) {
-    const distanceScore = 10 * (1 - params.distanceMi / params.radiusMiles);
-    score += Math.max(0, distanceScore);
+    distance = Math.max(0, 10 * (1 - params.distanceMi / params.radiusMiles));
   }
 
-  // Applied-clinic boost (+15): user has applied to this clinic before.
-  // Strong familiarity signal — they've engaged with the clinic before.
+  let clinicBoost = 0;
   if (params.appliedClinicIds && params.appliedClinicIds.size > 0) {
     const jobClinicId = str(job.clinicId);
-    if (jobClinicId && params.appliedClinicIds.has(jobClinicId)) {
-      score += 15;
+    if (jobClinicId && params.appliedClinicIds.has(jobClinicId)) clinicBoost = 15;
+  }
+
+  let popularity = 0;
+  const apps = num(job.applicationsCount) ?? 0;
+  if (apps > 0) popularity = Math.min(15, Math.log(1 + apps) * 5);
+
+  return finalize({
+    distance, role, skills: 0, recency, rate, completeness,
+    clinicBoost, popularity, travelPenalty: 0,
+  });
+}
+
+/**
+ * V2 weights — recency capped lower so distance/role can compete. Max ≈ 160.
+ * Distance 40 (exp decay scaled by profile.maxTravelDistance) /
+ * Role 30 / Skills 15 / Recency 25 / Rate 15 / Completeness 10 /
+ * ClinicBoost 15 / Popularity 10. Soft travel penalty: -20 when the pro
+ * declared `is_willing_to_travel = false` and the job is non-permanent
+ * outside their declared max distance.
+ */
+function computeScoreV2(job: Record<string, AttributeValue>, params: ScoreParams): ScoreBreakdown {
+  // Distance — exponential decay so a 5mi job scores ~5x a 25mi job for a
+  // typical pro. Scale derived from the pro's declared travel reach: a pro
+  // willing to travel 50mi gets a flatter curve (broader catchment) than one
+  // willing to travel 10mi. The 15-mile floor keeps the curve sane for pros
+  // with very low or unset max_travel_distance.
+  let distance = 0;
+  if (params.distanceMi != null) {
+    const scale = Math.max(15, (params.profileMaxTravelDistance ?? 30) / 2);
+    distance = 40 * Math.exp(-params.distanceMi / scale);
+  }
+
+  // Role match — same shape as V1 but consumed alongside skills below.
+  const effectiveRole = params.role || params.profileRole || "";
+  let role = 0;
+  if (effectiveRole) {
+    const jobRole = (str(job.professional_role) || str(job.professionalRole)).toLowerCase();
+    const filterRole = effectiveRole.toLowerCase();
+    if (jobRole === filterRole) role = 30;
+    else if (jobRole.includes(filterRole) || filterRole.includes(jobRole)) role = 15;
+  }
+  if (params.profileSpecialties && params.profileSpecialties.length > 0) {
+    const jobSpec = (str(job.shift_speciality) || str(job.shiftSpeciality)).toLowerCase();
+    if (jobSpec) {
+      const overlap = params.profileSpecialties.some((s) => {
+        const ls = s.toLowerCase();
+        return ls === jobSpec || jobSpec.includes(ls) || ls.includes(jobSpec);
+      });
+      if (overlap) role = Math.min(30, role + 10);
     }
   }
 
-  // Popularity (0-15): lifetime applicationsCount on a log scale so a single
-  // viral job doesn't dominate. Old popular jobs still fade out via the
-  // recency term above, so no rolling window is needed here.
-  const apps = num(job.applicationsCount) ?? 0;
-  if (apps > 0) {
-    score += Math.min(15, Math.log(1 + apps) * 5);
+  // Skill / certificate overlap — +3 per hit against job.requirements, capped
+  // at 15. Skills and certs share the same cap so a pro with both doesn't
+  // double-count the same job text.
+  let skills = 0;
+  const requirementsText = (str(job.requirements) || "").toLowerCase();
+  if (requirementsText) {
+    const tokens = new Set<string>();
+    for (const s of params.profileSkills || []) {
+      const ls = s.toLowerCase().trim();
+      if (ls) tokens.add(ls);
+    }
+    for (const c of params.profileCertificates || []) {
+      const lc = c.toLowerCase().trim();
+      if (lc) tokens.add(lc);
+    }
+    let hits = 0;
+    for (const t of tokens) {
+      if (requirementsText.includes(t)) hits++;
+      if (hits * 3 >= 15) break;
+    }
+    skills = Math.min(15, hits * 3);
   }
 
-  return Math.round(score * 100) / 100;
+  // Recency — same linear-over-30-days curve, lower ceiling so other signals
+  // can compete instead of being drowned out.
+  let recency = 0;
+  const createdAt = str(job.createdAt);
+  if (createdAt) {
+    const ageDays = (Date.now() - new Date(createdAt).getTime()) / (1000 * 60 * 60 * 24);
+    recency = Math.max(0, 25 * (1 - ageDays / 30));
+  }
+
+  const rateValue = num(job.rate) ?? num(job.hourly_rate) ?? num(job.hourlyRate) ?? 0;
+  const rate = Math.min(15, (rateValue / 200) * 15);
+
+  let completeness = 0;
+  if (str(job.date) || job.dates) completeness += 2.5;
+  if (str(job.start_time) || str(job.startTime)) completeness += 2.5;
+  if (str(job.professional_role) || str(job.professionalRole)) completeness += 2.5;
+  if (rateValue > 0) completeness += 2.5;
+
+  let clinicBoost = 0;
+  if (params.appliedClinicIds && params.appliedClinicIds.size > 0) {
+    const jobClinicId = str(job.clinicId);
+    if (jobClinicId && params.appliedClinicIds.has(jobClinicId)) clinicBoost = 15;
+  }
+
+  let popularity = 0;
+  const apps = num(job.applicationsCount) ?? 0;
+  if (apps > 0) popularity = Math.min(10, Math.log(1 + apps) * 3.3);
+
+  // Soft travel cap — penalty only, not exclusion. Permanent roles often
+  // involve relocation, so they're exempt; the pro might still want a great
+  // distant permanent match. For temporary/consulting work, declared "not
+  // willing to travel" beyond the declared max costs -20 points.
+  let travelPenalty = 0;
+  const jobType = (str(job.job_type) || str(job.jobType)).toLowerCase();
+  const isPermanent = jobType === "permanent";
+  if (
+    params.profileIsWillingToTravel === false &&
+    !isPermanent &&
+    params.distanceMi != null &&
+    params.profileMaxTravelDistance != null &&
+    params.distanceMi > params.profileMaxTravelDistance
+  ) {
+    travelPenalty = 20;
+  }
+
+  return finalize({
+    distance, role, skills, recency, rate, completeness,
+    clinicBoost, popularity, travelPenalty,
+  });
 }
 
 /**
@@ -483,13 +783,24 @@ export const handler = async (
     // Phase 2: also fetch the pro's "scheduled" job occurrences so the feed
     // can hide anything that time-conflicts with what they're already booked.
     // Parallel with the existing fetches — adds one query, no serial cost.
-    const [appliedInfo, storedCoords, promotedItems, availability, scheduledOccurrences] = await Promise.all([
+    // Profile preference slice (role / specialties / skills / certs / travel
+    // prefs) is fetched on every request. The data only influences ranking
+    // when RANKING_V2_PROFILE_SIGNALS is enabled, but the read is unconditional
+    // so the parallel-load shape stays stable and the flag flip is purely
+    // a scoring change with no extra round-trip.
+    const [appliedInfo, storedCoords, promotedItems, availability, scheduledOccurrences, preferences] = await Promise.all([
       getAppliedJobInfo(userSub),
       needStoredCoords ? getProfessionalCoords(userSub) : Promise.resolve(null as Coordinates | null),
       isFirstPage ? getActivePromotedJobItems() : Promise.resolve([] as Record<string, AttributeValue>[]),
       getProfessionalAvailability(userSub),
       getScheduledOccurrences(userSub),
+      getProfessionalPreferences(userSub),
     ]);
+
+    const profileSignalsEnabled = process.env.RANKING_V2_PROFILE_SIGNALS === "true";
+    const activePreferences: ProfessionalPreferences = profileSignalsEnabled
+      ? preferences
+      : DEFAULT_PREFERENCES;
 
     // Master availability gate — when the pro flips the toggle OFF we surface
     // an empty feed (no jobs, no promoted slots) but keep the response shape
@@ -519,7 +830,7 @@ export const handler = async (
     // 2) Query the status-createdAt GSI for "open" jobs, newest first
     //    Falls back to scanning "active" status if "open" yields nothing
     const statusesToQuery = ["open", "active"];
-    let matchedJobs: { item: Record<string, AttributeValue>; score: number; distanceMi?: number | null }[] = [];
+    let matchedJobs: RankedJob[] = [];
     let nextKey: Record<string, AttributeValue> | undefined;
 
     // Decode incoming cursor. Two shapes are supported:
@@ -631,16 +942,25 @@ export const handler = async (
           // the pro is already booked for.
           if (jobConflictsWithScheduled(item, scheduledOccurrences)) continue;
 
-          // Radius filter: skip jobs outside the professional's travel radius
+          // Distance computation is now decoupled from the radius filter.
+          //
+          // - When `profCoords` exists (live geo > stored address), we compute
+          //   `distanceMi` for every job that has coords. The V2 score uses this
+          //   for its exponential decay term, so distance influences ranking even
+          //   when no explicit `radius` filter is set.
+          //
+          // - The radius filter is still a hard gate when present: anything beyond
+          //   `radiusMiles` is dropped, and jobs missing coords are dropped (we
+          //   can't verify they fit). Without a radius filter, missing job coords
+          //   simply mean the distance term contributes 0 for that row.
           let distanceMi: number | null = null;
-          if (radiusMiles && profCoords) {
+          if (profCoords) {
             const jobCoords = getJobCoords(item);
             if (jobCoords) {
               distanceMi = haversineDistance(profCoords.lat, profCoords.lng, jobCoords.lat, jobCoords.lng);
-              if (distanceMi > radiusMiles) continue; // too far — skip
-            } else {
-              // Job has no stored coords — cannot verify it's within radius, so exclude it
-              continue;
+              if (radiusMiles && distanceMi > radiusMiles) continue;
+            } else if (radiusMiles) {
+              continue; // radius set but job has no coords → cannot verify → exclude
             }
           }
 
@@ -656,15 +976,21 @@ export const handler = async (
           if (!itemMatchesSelectedType(jt)) continue;
 
           // Relevance score is only used for "trending"; skip the work otherwise.
-          const score = sort === "trending"
+          const score: ScoreBreakdown = sort === "trending"
             ? computeRelevanceScore(item, {
                 role: filters.role,
                 location: filters.location,
                 distanceMi,
                 radiusMiles,
                 appliedClinicIds,
+                profileRole: activePreferences.role,
+                profileSpecialties: activePreferences.specialties,
+                profileSkills: activePreferences.skills,
+                profileCertificates: activePreferences.certificates,
+                profileIsWillingToTravel: activePreferences.isWillingToTravel,
+                profileMaxTravelDistance: activePreferences.maxTravelDistance,
               })
-            : 0;
+            : emptyBreakdown();
           matchedJobs.push({ item, score, distanceMi });
         }
 
@@ -688,7 +1014,7 @@ export const handler = async (
     //     Promoted entries take priority over organic ones on jobId collision
     //     (the organic scan may surface the same job independently).
     const PROMOTED_RADIUS_MI = 50;
-    const promotedMatched: { item: Record<string, AttributeValue>; score: number; distanceMi?: number | null }[] = [];
+    const promotedMatched: RankedJob[] = [];
     if (promotedItems.length > 0) {
       let droppedOutsideRadius = 0;
       let droppedMissingCoords = 0;
@@ -759,6 +1085,12 @@ export const handler = async (
           distanceMi,
           radiusMiles,
           appliedClinicIds,
+          profileRole: activePreferences.role,
+          profileSpecialties: activePreferences.specialties,
+          profileSkills: activePreferences.skills,
+          profileCertificates: activePreferences.certificates,
+          profileIsWillingToTravel: activePreferences.isWillingToTravel,
+          profileMaxTravelDistance: activePreferences.maxTravelDistance,
         });
         promotedMatched.push({ item, score, distanceMi });
       }
@@ -804,7 +1136,7 @@ export const handler = async (
 
         case "trending":
         default: {
-          if (b.score !== a.score) return b.score - a.score;
+          if (b.score.total !== a.score.total) return b.score.total - a.score.total;
           return createdAtMs(b.item) - createdAtMs(a.item);
         }
       }
@@ -819,8 +1151,8 @@ export const handler = async (
       const planId = str(item.promotionPlanId);
       return PROMOTION_TIER_WEIGHT[planId] || 1;
     };
-    const hybridScore = (m: { item: Record<string, AttributeValue>; score: number }): number =>
-      tierWeightOf(m.item) * m.score;
+    const hybridScore = (m: RankedJob): number =>
+      tierWeightOf(m.item) * m.score.total;
 
     promotedMatched.sort((a, b) => {
       const diff = hybridScore(b) - hybridScore(a);
@@ -830,7 +1162,12 @@ export const handler = async (
 
     // 4) Slice to requested page size, honoring any in-memory offset from an
     //    earlier overflow page.
-    const pageJobs = matchedJobs.slice(overflowOffset, overflowOffset + limit);
+    //
+    //    Diversity rerank runs only on the visible page — reordering jobs
+    //    that won't be returned wastes work and risks oscillating between
+    //    pages on cursor navigation. The rerank itself is a no-op when
+    //    RANKING_V2_DIVERSITY is off.
+    const pageJobs = diversifyByClinic(matchedJobs.slice(overflowOffset, overflowOffset + limit));
 
     // Two independent sources of "more":
     //   - DDB still has unseen rows (nextKey set).
@@ -859,10 +1196,18 @@ export const handler = async (
 
     // 6) Convert to plain objects and attach relevance score + distance.
     //    Mask expired promotions at read time so clients never see stale boosts.
-    const toJobObject = ({ item, score, distanceMi }: { item: Record<string, AttributeValue>; score: number; distanceMi?: number | null }) => {
+    //
+    //    `X-Debug-Ranking: 1` augments each row's `_relevanceScore` with the
+    //    full per-signal breakdown so staff can introspect rankings in the
+    //    browser devtools. Header-only gate for now — JWT-claim gating
+    //    (admin/staff) is a follow-up; the data is non-sensitive (just
+    //    score numbers), so cost of accidental exposure is low.
+    const debugRanking =
+      (event.headers?.["x-debug-ranking"] || event.headers?.["X-Debug-Ranking"]) === "1";
+    const toJobObject = ({ item, score, distanceMi }: RankedJob) => {
       const obj: any = {
         ...itemToObject(item),
-        _relevanceScore: score,
+        _relevanceScore: debugRanking ? score : score.total,
         ...(distanceMi != null && { _distanceMiles: Math.round(distanceMi * 10) / 10 }),
       };
       if (obj.isPromoted) {
@@ -959,6 +1304,27 @@ export const handler = async (
         fireAndForgetIncrement(j.jobId, j.promotionId, "impressions");
       }
     }
+
+    // Structured ranking observability — one EMF line per request, so the
+    // CloudWatch metric and the human-readable trace share the same source
+    // of truth. Top 5 jobs by score expose the breakdown so we can see
+    // *why* the ranker chose this ordering when debugging a feed.
+    const coordSource: "live" | "stored" | "none" =
+      liveUserCoords ? "live" : storedCoords ? "stored" : "none";
+    const topJobs = pageJobs.slice(0, 5).map((m) => ({
+      jobId: str(m.item.jobId),
+      total: m.score.total,
+      breakdown: m.score,
+    }));
+    emitRankingLog({
+      userSub,
+      coordSource,
+      totalScanned,
+      matchedCount: matchedJobs.length,
+      promotedCount: promotedMatched.length,
+      topJobs,
+      coverage: signalCoverage([...pageJobs, ...promotedMatched]),
+    });
 
     return json(event, 200, {
       totalJobs: jobs.length,
