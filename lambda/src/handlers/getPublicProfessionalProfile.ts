@@ -5,12 +5,50 @@ import {
   QueryCommand,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
+import {
+  CognitoIdentityProviderClient,
+  AdminGetUserCommand,
+} from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken } from "./utils";
 // Import shared CORS headers
 import { corsHeaders } from "./corsHeaders";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
+const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
+
+/**
+ * Names entered during signup are stored only as Cognito attributes
+ * (`given_name` / `family_name`). The ProfessionalProfiles row is created later
+ * when the professional completes their profile form — so applicants who haven't
+ * done that step yet have either no row or a row with empty names, which made
+ * clinic-facing UIs render "Unknown Professional".
+ *
+ * Read-time fallback: if the profile row is missing or its name fields are blank,
+ * resolve them from Cognito and merge in. DDB still wins when it has values, so
+ * any name a professional later edits in their profile remains the source of truth.
+ */
+async function fetchCognitoNames(userSub: string): Promise<{ first_name?: string; last_name?: string }> {
+  const userPoolId = process.env.USER_POOL_ID;
+  if (!userPoolId) return {};
+  try {
+    const resp = await cognito.send(new AdminGetUserCommand({
+      UserPoolId: userPoolId,
+      Username: userSub,
+    }));
+    const attrs = resp.UserAttributes || [];
+    const given = attrs.find((a) => a.Name === "given_name")?.Value || "";
+    const family = attrs.find((a) => a.Name === "family_name")?.Value || "";
+    const out: { first_name?: string; last_name?: string } = {};
+    if (given) out.first_name = given;
+    if (family) out.last_name = family;
+    return out;
+  } catch (err) {
+    // Non-fatal: caller falls back to whatever DDB had (possibly nothing).
+    console.warn("Cognito name fallback failed for", userSub, err);
+    return {};
+  }
+}
 
 // Helper to build JSON responses with shared CORS
 const json = (event: any, statusCode: number, bodyObj: object): APIGatewayProxyResult => ({
@@ -178,6 +216,21 @@ export const handler = async (
       const sum = typeof first.ratingSum === "number" ? first.ratingSum : 0;
       if (count > 0) {
         first.avgRating = Math.round((sum / count) * 100) / 100;
+      }
+    }
+
+    // If the DDB row is absent OR its name fields are empty, fill from Cognito.
+    // We only touch the empty slots, so a professional who later edits their
+    // name in their profile keeps that DDB value as the source of truth.
+    const hasFirst = typeof first?.first_name === "string" && first.first_name.trim().length > 0;
+    const hasLast = typeof first?.last_name === "string" && first.last_name.trim().length > 0;
+    if (!first || !hasFirst || !hasLast) {
+      const cognitoNames = await fetchCognitoNames(professionalUserSub);
+      if (cognitoNames.first_name || cognitoNames.last_name) {
+        const merged = first || { userSub: professionalUserSub };
+        if (!hasFirst && cognitoNames.first_name) merged.first_name = cognitoNames.first_name;
+        if (!hasLast && cognitoNames.last_name) merged.last_name = cognitoNames.last_name;
+        return json(event, 200, { profile: merged });
       }
     }
 
