@@ -1238,7 +1238,10 @@ export async function executeTool(
         return genericConfirm(call.toolName, auth, connectionId, call.input, (p) => {
           normalizeClinicIdsInPlace(p, userContext);
           normalizeProfessionalRoleInPlace(p);
-          return callHandlerInProcess(createPermanentJobHandler, { method: "POST", body: p, auth });
+          // createPermanentJob is the unified create handler; it requires
+          // job_type in the body. The chat tool schema never asks the LLM
+          // for it because the tool name already implies it.
+          return callHandlerInProcess(createPermanentJobHandler, { method: "POST", body: { ...p, job_type: "permanent" }, auth });
         });
 
       case "preview_accept_professional":

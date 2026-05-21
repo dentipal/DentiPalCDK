@@ -2560,7 +2560,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             // --- response: post jobs ---
             {
                 name: 'preview_post_temporary_job',
-                description: 'Render confirm-card for a single-shift temp job. Call BEFORE confirm_post_temporary_job.',
+                description: 'Render confirm-card for a single-shift temp job. Call BEFORE confirm_post_temporary_job. MUST ask the clinic how many professionals they need (positions_required, 1-20) before calling — never assume 1.',
                 parameters: {
                     clinicIds: ARR('Clinic UUIDs to post to', true),
                     professional_role: STR('Required role', true),
@@ -2575,6 +2575,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                     requirements: ARR('Requirements list'),
                     assisted_hygiene: BOOL('Assisted hygiene flag'),
                     work_location_type: STR('onsite | us_remote | global_remote'),
+                    positions_required: NUM('How many professionals needed for the shift (integer, 1-20). REQUIRED — ask the clinic before calling.', true),
                 },
             },
             {
@@ -2593,16 +2594,17 @@ export class DentiPalCDKStack extends cdk.Stack {
                     requirements: ARR('Requirements'),
                     assisted_hygiene: BOOL('Assisted hygiene flag'),
                     work_location_type: STR('Work location'),
+                    positions_required: NUM('How many professionals needed (integer, 1-20). Carry over the value from preview.', true),
                 },
             },
             {
                 name: 'preview_post_consulting_job',
-                description: 'Render confirm-card for a multi-day consulting job.',
+                description: 'Render confirm-card for a multi-day consulting job. MUST ask the clinic how many professionals they need (positions_required, 1-20) before calling — never assume 1. For `dates`: if the user gave a range ("May 21-25"), pass that string VERBATIM — do not enumerate. If the user listed specific non-consecutive days, pass a comma-separated string ("2026-05-21,2026-05-23,2026-05-27"). The server expands ranges correctly (inclusive on both ends).',
                 parameters: {
                     clinicIds: ARR('Clinic UUIDs', true), professional_role: STR('Role', true),
                     professional_roles: ARR('Multi-role'),
-                    dates: ARR('ISO dates list', true),
-                    total_days: NUM('Total days', true), hours_per_day: NUM('Hours/day', true),
+                    dates: STR('Date range (e.g. "May 21-25" — inclusive of both endpoints) OR comma-separated ISO dates ("2026-05-21,2026-05-23"). Server expands ranges; do not enumerate yourself.', true),
+                    total_days: NUM('Total days'), hours_per_day: NUM('Hours/day', true),
                     shift_speciality: STR('Specialty', true), rate: NUM('Rate', true),
                     pay_type: STR('Pay type'),
                     start_time: STR('HH:MM', true), end_time: STR('HH:MM', true),
@@ -2611,6 +2613,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                     job_title: STR('Title'), job_description: STR('Description'),
                     requirements: ARR('Requirements'),
                     work_location_type: STR('Work location'),
+                    positions_required: NUM('How many professionals needed (integer, 1-20). REQUIRED — ask the clinic before calling.', true),
                 },
             },
             {
@@ -2619,8 +2622,9 @@ export class DentiPalCDKStack extends cdk.Stack {
                 parameters: {
                     previewToken: STR('Token', true),
                     clinicIds: ARR('Clinic UUIDs', true), professional_role: STR('Role', true),
-                    professional_roles: ARR('Multi-role'), dates: ARR('Dates', true),
-                    total_days: NUM('Total days', true), hours_per_day: NUM('Hours/day', true),
+                    professional_roles: ARR('Multi-role'),
+                    dates: STR('Date range string or comma-separated ISO dates. Carry over verbatim from preview.', true),
+                    total_days: NUM('Total days'), hours_per_day: NUM('Hours/day', true),
                     shift_speciality: STR('Specialty', true), rate: NUM('Rate', true),
                     pay_type: STR('Pay type'),
                     start_time: STR('HH:MM', true), end_time: STR('HH:MM', true),
@@ -2629,11 +2633,12 @@ export class DentiPalCDKStack extends cdk.Stack {
                     job_title: STR('Title'), job_description: STR('Description'),
                     requirements: ARR('Requirements'),
                     work_location_type: STR('Work location'),
+                    positions_required: NUM('How many professionals needed (integer, 1-20). Carry over from preview.', true),
                 },
             },
             {
                 name: 'preview_post_permanent_job',
-                description: 'Render confirm-card for a permanent job.',
+                description: 'Render confirm-card for a permanent job. MUST ask the clinic how many professionals they want to hire (positions_required, 1-20) before calling — never assume 1.',
                 parameters: {
                     clinicIds: ARR('Clinic UUIDs', true),
                     professional_role: STR('Role', true), professional_roles: ARR('Multi-role'),
@@ -2648,6 +2653,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                     requirements: ARR('Requirements'),
                     work_location_type: STR('Work location'),
                     pay_type: STR('Pay type'), rate: NUM('Rate'),
+                    positions_required: NUM('How many professionals to hire (integer, 1-20). REQUIRED — ask the clinic before calling.', true),
                 },
             },
             {
@@ -2668,6 +2674,7 @@ export class DentiPalCDKStack extends cdk.Stack {
                     requirements: ARR('Requirements'),
                     work_location_type: STR('Work location'),
                     pay_type: STR('Pay type'), rate: NUM('Rate'),
+                    positions_required: NUM('How many professionals to hire (integer, 1-20). Carry over from preview.', true),
                 },
             },
             // --- response: applicant decisions ---
@@ -3235,13 +3242,13 @@ export class DentiPalCDKStack extends cdk.Stack {
                 '- "details on job X" / "show job X" → get_job_details({jobId}).',
                 '- "favorites" / "starred pros" / "my saved professionals" → get_clinic_favorites.',
                 '- "find a hygienist" / "search pros" / "look up a dentist" → search_professionals with the role/specialty/area the user mentioned.',
-                '- "post a temp shift" / "post a job" → If you have ALL required fields (clinic, role, date, start_time, end_time, rate, shift_speciality), call preview_post_temporary_job IMMEDIATELY. If anything is missing, ask for the missing pieces in ONE short conversational sentence with an inline example — NEVER as a numbered checklist, never with bold markdown, never asking 8 questions at once. Example response when ALL fields are missing: "Sure — clinic, role, date, time window, and rate? e.g., \'Qwerty Clinic, Dental Assistant, May 21 9am–2pm, $50/hr\'". When only the rate is missing: "What rate? e.g., $40/hr".',
+                '- "post a temp shift" / "post a job" → If you have ALL required fields (clinic, role, date, start_time, end_time, rate, shift_speciality, positions_required), call preview_post_temporary_job IMMEDIATELY. If anything is missing — INCLUDING positions_required, which is mandatory and must NEVER be assumed — ask for the missing pieces in ONE short conversational sentence with an inline example. NEVER as a numbered checklist, never with bold markdown, never asking 8 questions at once. Example when ALL fields are missing: "Sure — clinic, role, date, time window, rate, and how many professionals you need? e.g., \'Qwerty Clinic, Dental Assistant, May 21 9am–2pm, $50/hr, 2 positions\'". When only positions_required is missing: "How many professionals do you need for this shift?". When only the rate is missing: "What rate? e.g., $40/hr".',
                 '- "accept <pro>" / "hire <pro> for job X" / "accept this professional" / "hire them" → preview_accept_professional → wait for confirm.',
                 '- "reject <pro>" / "decline <pro>" / "decline this professional" / "pass on them" → preview_reject_professional → wait for confirm.',
                 '- When the user message contains explicit "jobId=<UUID>" and "professionalUserSub=<UUID>" tokens (the applicants list buttons inject these), parse them verbatim and call the tool directly — do NOT ask for confirmation of the IDs.',
                 '- For "accept/decline THIS professional" / "hire them" without inline IDs in the current message: SCAN PRIOR USER MESSAGES IN THIS CONVERSATION for the most recent "userSub=<UUID>" and "jobId=<UUID>" tokens (typically from a "Show me the full profile of …" or "Accept applicant …" message generated by the applicants-list View/Accept/Decline buttons). Use those values verbatim. NEVER ask the user for jobId or userSub if either has appeared in prior turns — it is always recoverable from history. Only ask if both intent and history are completely empty.',
-                '- "post a permanent job" / "post a full-time position" → preview_post_permanent_job (then wait for confirm).',
-                '- "post a consulting gig" / "multi-day consulting" / "post multiday job" → preview_post_consulting_job. DATES rules:\n  • If the user gave a RANGE ("May 21-25", "May 21 to May 25"), pass the WHOLE range string verbatim as the dates field — DO NOT enumerate it yourself (you tend to miscount inclusive ranges; the server expands ranges correctly).\n  • If the user gave specific days ("May 21, 23, 27"), pass an ISO array: dates=["2026-05-21","2026-05-23","2026-05-27"].\n  • DO NOT pass total_days — the server derives it from the resolved dates array.\n  • Default to the current calendar year unless the user said otherwise.',
+                '- "post a permanent job" / "post a full-time position" → preview_post_permanent_job (then wait for confirm). positions_required is MANDATORY — ask "how many professionals do you want to hire?" if not given; never assume 1.',
+                '- "post a consulting gig" / "multi-day consulting" / "post multiday job" → preview_post_consulting_job. positions_required is MANDATORY — ask "how many professionals do you need?" if not given; never assume 1. DATES rules — `dates` is a STRING (not an array):\n  • If the user gave a RANGE ("May 21-25", "May 21 to May 25"), pass that string VERBATIM, e.g. dates="May 21-25". Ranges are INCLUSIVE on both ends — "May 21-25" is 5 days (21, 22, 23, 24, 25), not 4. Never enumerate ranges yourself.\n  • If the user gave specific non-consecutive days ("May 21, 23, 27"), pass a comma-separated string: dates="2026-05-21,2026-05-23,2026-05-27".\n  • DO NOT pass total_days — the server derives it from the resolved dates.\n  • Default to the current calendar year unless the user said otherwise.',
                 '- "negotiate $X on application Y" / "counter their offer" → preview_negotiate with the rate. The system renders a confirm card.',
                 '- "mark shift complete" / "shift was worked" / "sign off the shift" → preview_mark_shift_completed.',
                 '- "no-show" / "<pro> didn\'t show up" → preview_report_no_show.',

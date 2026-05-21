@@ -122,6 +122,8 @@ export const handler = async (
       practiceType: job.practiceType?.S || "General",
       primaryPracticeArea: job.primaryPracticeArea?.S || "General Dentistry",
 
+      positionsRequired: job.positionsRequired?.N ? parseInt(job.positionsRequired.N, 10) : 1,
+      positionsFilled: job.positionsFilled?.N ? parseInt(job.positionsFilled.N, 10) : 0,
       createdAt: job.createdAt?.S || "",
       updatedAt: job.updatedAt?.S || "",
       created_by: job.created_by?.S || "",

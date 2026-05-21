@@ -450,16 +450,16 @@ export const GET_CLINIC_FAVORITES: ToolDefinition = {
 
 export const PREVIEW_POST_TEMPORARY_JOB: ToolDefinition = {
   name: "preview_post_temporary_job", bucket: "response", scope: "clinic",
-  description: "Render confirm-card for a single-shift temp job posting. ALWAYS preview before confirm.",
+  description: "Render confirm-card for a single-shift temp job posting. ALWAYS preview before confirm. You MUST ask the clinic how many professionals they need for the shift (`positions_required`, integer 1-20) before calling this tool — do not assume 1.",
   inputSchema: {
     type: "object",
-    required: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time"],
+    required: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time", "positions_required"],
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       date: STRING, shift_speciality: STRING, hours: NUMBER, rate: NUMBER,
       pay_type: STRING, start_time: STRING, end_time: STRING, meal_break: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      assisted_hygiene: BOOL, work_location_type: STRING,
+      assisted_hygiene: BOOL, work_location_type: STRING, positions_required: NUMBER,
     },
   },
 };
@@ -470,31 +470,31 @@ export const CONFIRM_POST_TEMPORARY_JOB: ToolDefinition = {
   description: "Create the temp job posting. Requires previewToken.",
   inputSchema: {
     type: "object",
-    required: ["previewToken", "clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time"],
+    required: ["previewToken", "clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time", "positions_required"],
     properties: {
       previewToken: STRING,
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       date: STRING, shift_speciality: STRING, hours: NUMBER, rate: NUMBER,
       pay_type: STRING, start_time: STRING, end_time: STRING, meal_break: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      assisted_hygiene: BOOL, work_location_type: STRING,
+      assisted_hygiene: BOOL, work_location_type: STRING, positions_required: NUMBER,
     },
   },
 };
 
 export const PREVIEW_POST_CONSULTING_JOB: ToolDefinition = {
   name: "preview_post_consulting_job", bucket: "response", scope: "clinic",
-  description: "Render confirm-card for a multi-day consulting job posting.",
+  description: "Render confirm-card for a multi-day consulting job posting. You MUST ask the clinic how many professionals they need (`positions_required`, integer 1-20) before calling this tool — do not assume 1.",
   inputSchema: {
     type: "object",
-    required: ["clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time"],
+    required: ["clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time", "positions_required"],
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       dates: STRING_ARRAY, total_days: NUMBER, hours_per_day: NUMBER,
       shift_speciality: STRING, rate: NUMBER, pay_type: STRING,
       start_time: STRING, end_time: STRING, meal_break: STRING,
       project_duration: STRING, job_title: STRING, job_description: STRING,
-      requirements: STRING_ARRAY, work_location_type: STRING,
+      requirements: STRING_ARRAY, work_location_type: STRING, positions_required: NUMBER,
     },
   },
 };
@@ -505,23 +505,24 @@ export const CONFIRM_POST_CONSULTING_JOB: ToolDefinition = {
   description: "Create the consulting job. Requires previewToken.",
   inputSchema: {
     type: "object",
-    required: ["previewToken", "clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time"],
+    required: ["previewToken", "clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time", "positions_required"],
     properties: {
       previewToken: STRING, clinicIds: STRING_ARRAY, professional_role: STRING,
       professional_roles: STRING_ARRAY, dates: STRING_ARRAY, total_days: NUMBER,
       hours_per_day: NUMBER, shift_speciality: STRING, rate: NUMBER, pay_type: STRING,
       start_time: STRING, end_time: STRING, meal_break: STRING, project_duration: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY, work_location_type: STRING,
+      positions_required: NUMBER,
     },
   },
 };
 
 export const PREVIEW_POST_PERMANENT_JOB: ToolDefinition = {
   name: "preview_post_permanent_job", bucket: "response", scope: "clinic",
-  description: "Render confirm-card for a permanent job posting.",
+  description: "Render confirm-card for a permanent job posting. You MUST ask the clinic how many professionals they want to hire (`positions_required`, integer 1-20) before calling this tool — do not assume 1.",
   inputSchema: {
     type: "object",
-    required: ["clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits"],
+    required: ["clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits", "positions_required"],
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       shift_speciality: STRING,
@@ -529,7 +530,7 @@ export const PREVIEW_POST_PERMANENT_JOB: ToolDefinition = {
       salary_min: NUMBER, salary_max: NUMBER, benefits: STRING_ARRAY,
       vacation_days: NUMBER, work_schedule: STRING, start_date: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      work_location_type: STRING, pay_type: STRING, rate: NUMBER,
+      work_location_type: STRING, pay_type: STRING, rate: NUMBER, positions_required: NUMBER,
     },
   },
 };
@@ -540,7 +541,7 @@ export const CONFIRM_POST_PERMANENT_JOB: ToolDefinition = {
   description: "Create the permanent job. Requires previewToken.",
   inputSchema: {
     type: "object",
-    required: ["previewToken", "clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits"],
+    required: ["previewToken", "clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits", "positions_required"],
     properties: {
       previewToken: STRING, clinicIds: STRING_ARRAY, professional_role: STRING,
       professional_roles: STRING_ARRAY, shift_speciality: STRING,
@@ -548,7 +549,7 @@ export const CONFIRM_POST_PERMANENT_JOB: ToolDefinition = {
       benefits: STRING_ARRAY, vacation_days: NUMBER, work_schedule: STRING,
       start_date: STRING, job_title: STRING, job_description: STRING,
       requirements: STRING_ARRAY, work_location_type: STRING,
-      pay_type: STRING, rate: NUMBER,
+      pay_type: STRING, rate: NUMBER, positions_required: NUMBER,
     },
   },
 };
@@ -710,7 +711,7 @@ export const CONFIRM_UPDATE_CLINIC_PROFILE: ToolDefinition = {
 
 export const PREVIEW_EDIT_JOB: ToolDefinition = {
   name: "preview_edit_job", bucket: "response", scope: "clinic",
-  description: "Render confirm-card for editing an existing job posting. Pass only fields to change.",
+  description: "Render confirm-card for editing an existing job posting. Pass only fields to change. `positions_required` (1-20) is the hiring headcount; raising it on a filled job reopens it for more hires; lowering it below positions already filled is rejected.",
   inputSchema: {
     type: "object", required: ["jobId"],
     properties: {
@@ -721,6 +722,7 @@ export const PREVIEW_EDIT_JOB: ToolDefinition = {
       date: STRING, dates: STRING_ARRAY, hours_per_day: NUMBER, total_days: NUMBER,
       salary_min: NUMBER, salary_max: NUMBER, benefits: STRING_ARRAY,
       employment_type: STRING, vacation_days: NUMBER, work_schedule: STRING,
+      positions_required: NUMBER,
     },
   },
 };
@@ -739,6 +741,7 @@ export const CONFIRM_EDIT_JOB: ToolDefinition = {
       date: STRING, dates: STRING_ARRAY, hours_per_day: NUMBER, total_days: NUMBER,
       salary_min: NUMBER, salary_max: NUMBER, benefits: STRING_ARRAY,
       employment_type: STRING, vacation_days: NUMBER, work_schedule: STRING,
+      positions_required: NUMBER,
     },
   },
 };

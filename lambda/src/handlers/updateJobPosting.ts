@@ -52,7 +52,10 @@ interface UpdateJobPostingBody {
     vacation_days?: number;
     work_schedule?: string;
     start_date?: string;
-    
+
+    // Hiring capacity (all job types)
+    positions_required?: number;
+
     [key: string]: any;
 }
 
@@ -187,9 +190,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        // Only open jobs are editable. Once a professional is scheduled or the job is completed,
-        // edits could change the agreed terms — clinics must cancel and repost instead.
-        if (currentStatus && currentStatus !== 'open' && currentStatus !== 'active') {
+        // Only open/active jobs are editable, EXCEPT that `positions_required`
+        // may be raised on a 'filled' job to reopen it for more hires. Any
+        // other field change on a filled job still requires cancel & repost.
+        const positionsFilledNow = typeof (existingItem as any).positionsFilled === 'number'
+            ? (existingItem as any).positionsFilled
+            : 0;
+        const onlyPositionsEdit =
+            updateData.positions_required !== undefined &&
+            Object.keys(updateData).every((k) => k === "positions_required");
+        if (
+            currentStatus && currentStatus !== 'open' && currentStatus !== 'active' &&
+            !(currentStatus === 'filled' && onlyPositionsEdit)
+        ) {
             return json(event, 409, {
                 error: "Conflict",
                 statusCode: 409,
@@ -197,6 +210,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 details: { currentStatus: currentStatus },
                 timestamp: new Date().toISOString()
             });
+        }
+
+        // Validate positions_required against current hires
+        if (updateData.positions_required !== undefined) {
+            const next = updateData.positions_required;
+            if (!Number.isInteger(next) || next < 1 || next > 20) {
+                return json(event, 400, {
+                    error: "Bad Request",
+                    message: "positions_required must be an integer between 1 and 20"
+                });
+            }
+            if (next < positionsFilledNow) {
+                return json(event, 400, {
+                    error: "Bad Request",
+                    message: `positions_required cannot be less than positions already filled (${positionsFilledNow})`
+                });
+            }
         }
 
         // --- Step 2: Validation ---
@@ -337,12 +367,28 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             addUpdateField('employment_type', 'employment_type', 'S', 'et');
             addUpdateField('salary_min', 'salary_min', 'N', 'smin');
             addUpdateField('salary_max', 'salary_max', 'N', 'smax');
-            addUpdateField('benefits', 'benefits', 'SS'); 
+            addUpdateField('benefits', 'benefits', 'SS');
             addUpdateField('vacation_days', 'vacation_days', 'N', 'vd');
             addUpdateField('work_schedule', 'work_schedule', 'S', 'ws');
             addUpdateField('start_date', 'start_date', 'S', 'sd');
         }
-        
+
+        // Common across all job types
+        addUpdateField('positions_required', 'positionsRequired', 'N', 'preq');
+
+        // If positions are being raised on a 'filled' job, reopen it so new
+        // applications and hires can come in for the additional seats.
+        if (
+            updateData.positions_required !== undefined &&
+            currentStatus === 'filled' &&
+            updateData.positions_required > positionsFilledNow
+        ) {
+            updateExpressions.push('#status = :status_active');
+            expressionAttributeNames['#status'] = 'status';
+            expressionAttributeValues[':status_active'] = 'active';
+            fieldsUpdatedCount++;
+        }
+
         if (fieldsUpdatedCount === 0) {
             return json(event, 400, { error: 'No valid fields to update' });
         }

@@ -39,6 +39,7 @@ interface MultiJobData {
     assisted_hygiene?: boolean;
     work_location_type?: string;
     pay_type?: string;
+    positions_required?: number;
 }
 
 interface ClinicAddress {
@@ -256,6 +257,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 details: { providedHours: jobData.hours, validRange: "1-12" }
             });
         }
+
+        const positionsRequired = jobData.positions_required ?? 1;
+        if (!Number.isInteger(positionsRequired) || positionsRequired < 1 || positionsRequired > 20) {
+            return json(event, 400, {
+                error: "Bad Request",
+                message: "positions_required must be an integer between 1 and 20",
+                details: { providedPositions: jobData.positions_required, validRange: "1-20" }
+            });
+        }
         // Validate compensation based on pay type
         const payType = jobData.pay_type || "per_hour";
         if (jobData.rate === undefined || jobData.rate === null) {
@@ -375,6 +385,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 // Work location
                 ...(jobData.work_location_type && { work_location_type: jobData.work_location_type }),
 
+                // Hiring capacity
+                positionsRequired: positionsRequired,
+                positionsFilled: 0,
+
                 // Metadata
                 status: "active",
                 createdAt: timestamp,
@@ -451,6 +465,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 hours: jobData.hours,
                 payType: payType,
                 rate: jobData.rate,
+                positionsRequired: positionsRequired,
                 ...(failed.length > 0 && { failed }),
             },
             timestamp: timestamp

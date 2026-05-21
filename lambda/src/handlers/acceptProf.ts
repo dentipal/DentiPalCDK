@@ -5,6 +5,7 @@ import {
     UpdateItemCommand,
     UpdateItemCommandInput,
     AttributeValue,
+    ConditionalCheckFailedException,
 } from "@aws-sdk/client-dynamodb";
 import {
     EventBridgeClient,
@@ -294,15 +295,63 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             acceptedRate = positive(numFromAttr(matchingItem.proposedRate) ?? numFromAttr(matchingItem.proposedHourlyRate));
         }
 
-        // --- Step 7: Update Application (status + acceptedRate when resolved) ---
-        // Append a statusHistory entry in the same UpdateItem so the audit
-        // trail and the status flip are atomic. `if_not_exists` covers legacy
-        // applications created before the statusHistory rollout — they get an
-        // array seeded with this one transition. The ConditionExpression makes
-        // the operation idempotent: re-clicking Accept on an already-scheduled
-        // applicant lands in the catch branch below and we skip the side
-        // effects (EventBridge, job posting "filled" update) cleanly.
+        // --- Step 7: Atomically claim a position on the job posting ---
+        // We increment positionsFilled BEFORE flipping the application to
+        // "scheduled" so two concurrent hires on the last available seat can
+        // never both win. The ConditionExpression rejects the increment when
+        // the job is already at capacity, which surfaces as a clean 409 to
+        // the caller. `if_not_exists` covers legacy rows created before this
+        // field existed — they're treated as 1 required / 0 filled, matching
+        // the prior "first hire fills the job" behavior.
         const nowIso = new Date().toISOString();
+        const jobItemClinicUserSub = preHireJobItem?.clinicUserSub?.S;
+        if (!jobItemClinicUserSub) {
+            return json(event, 500, { error: "Job posting not found for capacity check", jobId });
+        }
+
+        let positionsFilledAfter: number | null = null;
+        let positionsRequiredAfter: number | null = null;
+        try {
+            const incrRes = await dynamo.send(new UpdateItemCommand({
+                TableName: JOB_POSTINGS_TABLE,
+                Key: {
+                    clinicUserSub: { S: jobItemClinicUserSub },
+                    jobId: { S: jobId },
+                },
+                UpdateExpression:
+                    "SET positionsFilled = if_not_exists(positionsFilled, :zero) + :one, " +
+                    "positionsRequired = if_not_exists(positionsRequired, :one), " +
+                    "updatedAt = :now",
+                // `if_not_exists` is not allowed inside ConditionExpression — DynamoDB
+                // restricts it to UpdateExpression. Legacy rows (no positionsFilled
+                // attribute) hit the first clause; new rows hit the comparison.
+                ConditionExpression:
+                    "attribute_not_exists(positionsFilled) OR positionsFilled < positionsRequired",
+                ExpressionAttributeValues: {
+                    ":zero": { N: "0" },
+                    ":one": { N: "1" },
+                    ":now": { S: nowIso },
+                },
+                ReturnValues: "ALL_NEW",
+            }));
+            positionsFilledAfter = numFromAttr(incrRes.Attributes?.positionsFilled);
+            positionsRequiredAfter = numFromAttr(incrRes.Attributes?.positionsRequired);
+        } catch (e) {
+            if (e instanceof ConditionalCheckFailedException || (e as { name?: string })?.name === "ConditionalCheckFailedException") {
+                return json(event, 409, {
+                    status: "error",
+                    error: "JobAlreadyFilled",
+                    message: "All positions for this job have already been filled.",
+                });
+            }
+            throw e;
+        }
+
+        // --- Step 8: Update Application (status + acceptedRate when resolved) ---
+        // Append a statusHistory entry in the same UpdateItem so the audit
+        // trail and the status flip are atomic. The ConditionExpression makes
+        // the operation idempotent: re-clicking Accept on an already-scheduled
+        // applicant lands in the catch branch and we skip the side effects.
         const updateAttrValues: { [key: string]: AttributeValue } = {
             ":status": { S: "scheduled" },
             ":now": { S: nowIso },
@@ -343,13 +392,31 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             await dynamo.send(new UpdateItemCommand(updateCommandInput));
         } catch (e) {
             if ((e as { name?: string })?.name === "ConditionalCheckFailedException") {
-                // Already scheduled — treat as idempotent success and skip the
-                // side effects below so we don't double-fan-out notifications.
+                // Already scheduled — roll back the position we just claimed
+                // so the count stays accurate, then return idempotent success.
                 alreadyScheduled = true;
-                console.log("[acceptProf] Application already scheduled; treating as no-op", {
+                console.log("[acceptProf] Application already scheduled; rolling back position claim", {
                     jobId,
                     professionalUserSub,
                 });
+                try {
+                    await dynamo.send(new UpdateItemCommand({
+                        TableName: JOB_POSTINGS_TABLE,
+                        Key: {
+                            clinicUserSub: { S: jobItemClinicUserSub },
+                            jobId: { S: jobId },
+                        },
+                        UpdateExpression: "SET positionsFilled = positionsFilled - :one, updatedAt = :now",
+                        ConditionExpression: "positionsFilled > :zero",
+                        ExpressionAttributeValues: {
+                            ":one": { N: "1" },
+                            ":zero": { N: "0" },
+                            ":now": { S: new Date().toISOString() },
+                        },
+                    }));
+                } catch (rollbackErr) {
+                    console.warn("[acceptProf] Position rollback failed (non-fatal):", (rollbackErr as Error).message);
+                }
             } else {
                 throw e;
             }
@@ -365,58 +432,114 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        // --- Step 8: Emit EventBridge Event (triggers inbox conversation) ---
+        // --- Step 9: Emit EventBridge Event (triggers inbox conversation) ---
         const clinicIdFromClaims = getClinicIdFromEvent(event);
         const clinicId = clinicIdFromClaims || body.clinicId || matchingItem.clinicId?.S || null;
 
         let inboxMessageSent = false;
 
-        // Fetch the actual job posting for shift details. Reuse the row fetched
-        // for the availability check when available so we don't pay for the
-        // same query twice on the happy path.
-        let jobItem: Record<string, any> | null = preHireJobItem;
-        if (clinicId && !jobItem) {
-            try {
-                const jobRes = await dynamo.send(new QueryCommand({
-                    TableName: JOB_POSTINGS_TABLE,
-                    IndexName: "jobId-index-1",
-                    KeyConditionExpression: "jobId = :jid",
-                    ExpressionAttributeValues: { ":jid": { S: jobId } },
-                    Limit: 1,
-                }));
-                jobItem = (jobRes.Items || [])[0] || null;
-            } catch (e) {
-                console.warn("Failed to fetch job posting for shift details:", (e as Error).message);
-            }
-        }
+        // Reuse the job posting fetched earlier for the availability check.
+        const jobItem: Record<string, any> | null = preHireJobItem;
 
-        // Mark the JobPostings row as filled. Best-effort: a failure here is
-        // non-fatal so the hire still completes — the existing behavior was
-        // for this write to never happen, so any failure mode here just lands
-        // back at today's stale-status state.
-        if (jobItem) {
-            const jobItemClinicUserSub = jobItem.clinicUserSub?.S;
-            if (jobItemClinicUserSub) {
-                try {
-                    await dynamo.send(new UpdateItemCommand({
-                        TableName: JOB_POSTINGS_TABLE,
-                        Key: {
-                            clinicUserSub: { S: jobItemClinicUserSub },
-                            jobId: { S: jobId },
+        // If this hire filled the last position, flip the job to "filled" and
+        // auto-reject any remaining pending/negotiating applicants so the pros
+        // get a final status (and don't keep waiting on a job that's done).
+        // Both are best-effort — failures here don't unwind the successful
+        // hire, matching the existing non-fatal pattern for EventBridge below.
+        const positionsAreFilled =
+            positionsFilledAfter != null &&
+            positionsRequiredAfter != null &&
+            positionsFilledAfter >= positionsRequiredAfter;
+
+        if (positionsAreFilled) {
+            try {
+                await dynamo.send(new UpdateItemCommand({
+                    TableName: JOB_POSTINGS_TABLE,
+                    Key: {
+                        clinicUserSub: { S: jobItemClinicUserSub },
+                        jobId: { S: jobId },
+                    },
+                    UpdateExpression: "SET #s = :filled, updatedAt = :now",
+                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeValues: {
+                        ":filled": { S: "filled" },
+                        ":now": { S: new Date().toISOString() },
+                    },
+                }));
+            } catch (err) {
+                console.error("[acceptProf] Failed to mark JobPostings as filled (non-fatal):", {
+                    jobId,
+                    error: (err as Error).message,
+                });
+            }
+
+            try {
+                const remainingRes = await dynamo.send(new QueryCommand({
+                    TableName: JOB_APPLICATIONS_TABLE,
+                    KeyConditionExpression: "jobId = :jid",
+                    FilterExpression: "(applicationStatus = :pending OR applicationStatus = :negotiating) AND professionalUserSub <> :hired",
+                    ExpressionAttributeValues: {
+                        ":jid": { S: jobId },
+                        ":pending": { S: "pending" },
+                        ":negotiating": { S: "negotiating" },
+                        ":hired": { S: professionalUserSub },
+                    },
+                }));
+                const rejectIso = new Date().toISOString();
+                const rejectAttrs = (subToReject: string): UpdateItemCommandInput => ({
+                    TableName: JOB_APPLICATIONS_TABLE,
+                    Key: {
+                        jobId: { S: jobId },
+                        professionalUserSub: { S: subToReject },
+                    },
+                    UpdateExpression:
+                        "SET applicationStatus = :rejected, updatedAt = :now, " +
+                        "statusHistory = list_append(if_not_exists(statusHistory, :empty), :entry)",
+                    ConditionExpression: "applicationStatus = :pending OR applicationStatus = :negotiating",
+                    ExpressionAttributeValues: {
+                        ":rejected": { S: "rejected" },
+                        ":now": { S: rejectIso },
+                        ":pending": { S: "pending" },
+                        ":negotiating": { S: "negotiating" },
+                        ":empty": { L: [] },
+                        ":entry": {
+                            L: [
+                                {
+                                    M: {
+                                        status: { S: "rejected" },
+                                        at: { S: rejectIso },
+                                        actorId: { S: "system" },
+                                        actorRole: { S: "system" },
+                                        reason: { S: "job_filled" },
+                                    },
+                                },
+                            ],
                         },
-                        UpdateExpression: "SET #s = :filled, updatedAt = :now",
-                        ExpressionAttributeNames: { "#s": "status" },
-                        ExpressionAttributeValues: {
-                            ":filled": { S: "filled" },
-                            ":now": { S: new Date().toISOString() },
-                        },
-                    }));
-                } catch (err) {
-                    console.error("[acceptProf] Failed to mark JobPostings as filled (non-fatal):", {
-                        jobId,
-                        error: (err as Error).message,
-                    });
-                }
+                    },
+                });
+                await Promise.allSettled(
+                    (remainingRes.Items || []).map(async (it) => {
+                        const sub = it.professionalUserSub?.S;
+                        if (!sub) return;
+                        try {
+                            await dynamo.send(new UpdateItemCommand(rejectAttrs(sub)));
+                        } catch (rejErr) {
+                            const name = (rejErr as { name?: string })?.name;
+                            if (name !== "ConditionalCheckFailedException") {
+                                console.warn("[acceptProf] Auto-reject failed (non-fatal):", {
+                                    jobId,
+                                    sub,
+                                    error: (rejErr as Error).message,
+                                });
+                            }
+                        }
+                    })
+                );
+            } catch (err) {
+                console.warn("[acceptProf] Auto-reject sweep failed (non-fatal):", {
+                    jobId,
+                    error: (err as Error).message,
+                });
             }
         }
 

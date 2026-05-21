@@ -2,9 +2,11 @@ import {
   DynamoDBClient,
   QueryCommand,
   UpdateItemCommand,
+  UpdateItemCommandInput,
   GetItemCommand,
   AttributeValue,
   DynamoDBClientConfig,
+  ConditionalCheckFailedException,
 } from "@aws-sdk/client-dynamodb";
 import {
   EventBridgeClient,
@@ -363,19 +365,100 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
       }
     }
 
-    // Execute negotiation update
-    await dynamodb.send(
-      new UpdateItemCommand({
-        TableName: process.env.JOB_NEGOTIATIONS_TABLE!,
-        Key: {
-          applicationId: { S: applicationId },
-          negotiationId: { S: negotiationId },
-        },
-        UpdateExpression: updateExpr,
-        ExpressionAttributeNames: attrNames,
-        ExpressionAttributeValues: attrValues,
-      })
-    );
+    // 8b. Atomically claim a position when this response is an acceptance.
+    //     Done BEFORE flipping the negotiation/application so a job that is
+    //     already at capacity (e.g. another applicant was just hired) does
+    //     not leave a half-committed "accepted negotiation but pending app"
+    //     state behind. Mirrors the increment in acceptProf.ts — keep these
+    //     two in sync. Legacy rows get default 1/0 via `if_not_exists`.
+    let positionsFilledAfter: number | null = null;
+    let positionsRequiredAfter: number | null = null;
+    if (isAccepted) {
+      if (!clinicUserSub) {
+        return json(event, 500, { error: "Job posting is missing clinicUserSub; cannot claim position." });
+      }
+      try {
+        const incrRes = await dynamodb.send(new UpdateItemCommand({
+          TableName: process.env.JOB_POSTINGS_TABLE!,
+          Key: {
+            clinicUserSub: { S: clinicUserSub },
+            jobId: { S: jobId },
+          },
+          UpdateExpression:
+            "SET positionsFilled = if_not_exists(positionsFilled, :zero) + :one, " +
+            "positionsRequired = if_not_exists(positionsRequired, :one), " +
+            "updatedAt = :now",
+          // `if_not_exists` is not allowed inside ConditionExpression — DynamoDB
+          // restricts it to UpdateExpression. Legacy rows (no positionsFilled
+          // attribute) hit the first clause; new rows hit the comparison.
+          ConditionExpression:
+            "attribute_not_exists(positionsFilled) OR positionsFilled < positionsRequired",
+          ExpressionAttributeValues: {
+            ":zero": { N: "0" },
+            ":one": { N: "1" },
+            ":now": { S: timestamp },
+          },
+          ReturnValues: "ALL_NEW",
+        }));
+        const filledStr = incrRes.Attributes?.positionsFilled?.N;
+        const requiredStr = incrRes.Attributes?.positionsRequired?.N;
+        positionsFilledAfter = filledStr ? Number(filledStr) : null;
+        positionsRequiredAfter = requiredStr ? Number(requiredStr) : null;
+      } catch (e) {
+        if (e instanceof ConditionalCheckFailedException || (e as { name?: string })?.name === "ConditionalCheckFailedException") {
+          return json(event, 409, {
+            status: "error",
+            error: "JobAlreadyFilled",
+            message: "All positions for this job have already been filled.",
+          });
+        }
+        throw e;
+      }
+    }
+
+    // Execute negotiation update. If this (or the application update below)
+    // fails after we already claimed a position, roll the counter back so the
+    // job's capacity stays accurate. The rollback is best-effort — if it
+    // also fails we surface the original error and operator runbook applies.
+    const rollbackClaim = async () => {
+      if (!isAccepted || !clinicUserSub) return;
+      try {
+        await dynamodb.send(new UpdateItemCommand({
+          TableName: process.env.JOB_POSTINGS_TABLE!,
+          Key: {
+            clinicUserSub: { S: clinicUserSub },
+            jobId: { S: jobId },
+          },
+          UpdateExpression: "SET positionsFilled = positionsFilled - :one, updatedAt = :now",
+          ConditionExpression: "positionsFilled > :zero",
+          ExpressionAttributeValues: {
+            ":one": { N: "1" },
+            ":zero": { N: "0" },
+            ":now": { S: new Date().toISOString() },
+          },
+        }));
+      } catch (rollbackErr) {
+        console.warn("[respondToNegotiation] Position rollback failed (non-fatal):", (rollbackErr as Error).message);
+      }
+    };
+
+    try {
+      await dynamodb.send(
+        new UpdateItemCommand({
+          TableName: process.env.JOB_NEGOTIATIONS_TABLE!,
+          Key: {
+            applicationId: { S: applicationId },
+            negotiationId: { S: negotiationId },
+          },
+          UpdateExpression: updateExpr,
+          ExpressionAttributeNames: attrNames,
+          ExpressionAttributeValues: attrValues,
+        })
+      );
+    } catch (err) {
+      await rollbackClaim();
+      throw err;
+    }
 
     // 9. Update Application Status
     let applicationStatus: "negotiating" | "scheduled" | "declined" = "negotiating";
@@ -404,18 +487,125 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
       throw new Error("Cannot update application: professionalUserSub is missing.");
     }
 
-    await dynamodb.send(
-      new UpdateItemCommand({
-        TableName: process.env.JOB_APPLICATIONS_TABLE!,
-        Key: {
-          jobId: { S: jobId },
-          professionalUserSub: { S: professionalUserSub },
-        },
-        UpdateExpression: appUpdateExpr,
-        ExpressionAttributeNames: appUpdateNames,
-        ExpressionAttributeValues: appUpdateValues,
-      })
-    );
+    try {
+      await dynamodb.send(
+        new UpdateItemCommand({
+          TableName: process.env.JOB_APPLICATIONS_TABLE!,
+          Key: {
+            jobId: { S: jobId },
+            professionalUserSub: { S: professionalUserSub },
+          },
+          UpdateExpression: appUpdateExpr,
+          ExpressionAttributeNames: appUpdateNames,
+          ExpressionAttributeValues: appUpdateValues,
+        })
+      );
+    } catch (err) {
+      await rollbackClaim();
+      throw err;
+    }
+
+    // 9b. If this acceptance filled the last seat, mark the job 'filled' and
+    //     auto-reject any remaining pending/negotiating applicants. Mirrors
+    //     the post-hire cleanup in acceptProf.ts — keep these two in sync.
+    //     Both writes are best-effort: failures must not roll back the hire.
+    const positionsAreFilled =
+      isAccepted &&
+      positionsFilledAfter != null &&
+      positionsRequiredAfter != null &&
+      positionsFilledAfter >= positionsRequiredAfter;
+
+    if (positionsAreFilled && clinicUserSub) {
+      try {
+        await dynamodb.send(new UpdateItemCommand({
+          TableName: process.env.JOB_POSTINGS_TABLE!,
+          Key: {
+            clinicUserSub: { S: clinicUserSub },
+            jobId: { S: jobId },
+          },
+          UpdateExpression: "SET #s = :filled, updatedAt = :now",
+          ExpressionAttributeNames: { "#s": "status" },
+          ExpressionAttributeValues: {
+            ":filled": { S: "filled" },
+            ":now": { S: new Date().toISOString() },
+          },
+        }));
+      } catch (err) {
+        console.error("[respondToNegotiation] Failed to mark JobPostings as filled (non-fatal):", {
+          jobId,
+          error: (err as Error).message,
+        });
+      }
+
+      try {
+        const remainingRes = await dynamodb.send(new QueryCommand({
+          TableName: process.env.JOB_APPLICATIONS_TABLE!,
+          KeyConditionExpression: "jobId = :jid",
+          FilterExpression: "(applicationStatus = :pending OR applicationStatus = :negotiating) AND professionalUserSub <> :hired",
+          ExpressionAttributeValues: {
+            ":jid": { S: jobId },
+            ":pending": { S: "pending" },
+            ":negotiating": { S: "negotiating" },
+            ":hired": { S: professionalUserSub },
+          },
+        }));
+        const rejectIso = new Date().toISOString();
+        const rejectAttrs = (subToReject: string): UpdateItemCommandInput => ({
+          TableName: process.env.JOB_APPLICATIONS_TABLE!,
+          Key: {
+            jobId: { S: jobId },
+            professionalUserSub: { S: subToReject },
+          },
+          UpdateExpression:
+            "SET applicationStatus = :rejected, updatedAt = :now, " +
+            "statusHistory = list_append(if_not_exists(statusHistory, :empty), :entry)",
+          ConditionExpression: "applicationStatus = :pending OR applicationStatus = :negotiating",
+          ExpressionAttributeValues: {
+            ":rejected": { S: "rejected" },
+            ":now": { S: rejectIso },
+            ":pending": { S: "pending" },
+            ":negotiating": { S: "negotiating" },
+            ":empty": { L: [] },
+            ":entry": {
+              L: [
+                {
+                  M: {
+                    status: { S: "rejected" },
+                    at: { S: rejectIso },
+                    actorId: { S: "system" },
+                    actorRole: { S: "system" },
+                    reason: { S: "job_filled" },
+                  },
+                },
+              ],
+            },
+          },
+        });
+        await Promise.allSettled(
+          (remainingRes.Items || []).map(async (it) => {
+            const sub = it.professionalUserSub?.S;
+            if (!sub) return;
+            try {
+              await dynamodb.send(new UpdateItemCommand(rejectAttrs(sub)));
+            } catch (rejErr) {
+              const name = (rejErr as { name?: string })?.name;
+              if (name !== "ConditionalCheckFailedException") {
+                console.warn("[respondToNegotiation] Auto-reject failed (non-fatal):", {
+                  jobId,
+                  sub,
+                  error: (rejErr as Error).message,
+                });
+              }
+            }
+          })
+        );
+      } catch (err) {
+        console.warn("[respondToNegotiation] Auto-reject sweep failed (non-fatal):", {
+          jobId,
+          error: (err as Error).message,
+        });
+      }
+    }
 
     // 10. Publish EventBridge event when negotiation is accepted (triggers inbox conversation)
     if (isAccepted && professionalUserSub) {
