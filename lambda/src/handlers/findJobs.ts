@@ -107,30 +107,31 @@ function toNumber(attr: any): number | null {
 // --- Helper Functions ---
 
 /**
- * Fetch display info from the CLINIC_PROFILES_TABLE (clinic_name, contact).
+ * Fetch display info (name) from the CLINICS_TABLE, keyed by clinicId.
+ *
+ * The clinic display name lives on the canonical `CLINICS_TABLE.name` attribute
+ * (written by createClinic). The older CLINIC_PROFILES_TABLE has a composite key
+ * (clinicId, userSub), so a single-key GetItem against it throws ValidationException
+ * and the clinic block was never attached to public-jobs responses.
  */
-async function fetchClinicInfo(clinicUserSub: string): Promise<ClinicInfo | undefined> {
+async function fetchClinicInfo(clinicId: string): Promise<ClinicInfo | undefined> {
+  if (!clinicId || !process.env.CLINICS_TABLE) return undefined;
   try {
-    const clinicCommand = new GetItemCommand({
-      TableName: process.env.CLINIC_PROFILES_TABLE,
-      Key: { userSub: { S: clinicUserSub } },
-      ProjectionExpression: "clinic_name, primary_contact_first_name, primary_contact_last_name",
-    });
-
-    const clinicResponse = await dynamodb.send(clinicCommand);
+    const clinicResponse = await dynamodb.send(new GetItemCommand({
+      TableName: process.env.CLINICS_TABLE,
+      Key: { clinicId: { S: clinicId } },
+      ProjectionExpression: "#nm",
+      ExpressionAttributeNames: { "#nm": "name" },
+    }));
 
     if (clinicResponse.Item) {
-      const clinic = clinicResponse.Item;
-      const firstName = clinic.primary_contact_first_name?.S || "";
-      const lastName = clinic.primary_contact_last_name?.S || "";
-
       return {
-        name: clinic.clinic_name?.S || "Unknown Clinic",
-        contactName: `${firstName} ${lastName}`.trim() || "Contact",
+        name: clinicResponse.Item.name?.S || "Unknown Clinic",
+        contactName: "",
       };
     }
   } catch (e) {
-    console.warn(`Failed to fetch clinic details for ${clinicUserSub}:`, e);
+    console.warn(`Failed to fetch clinic details for ${clinicId}:`, e);
   }
   return undefined;
 }
@@ -410,11 +411,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
           }
 
-          // Enrich with clinic display info (name, contact) from the
-          // CLINIC_PROFILES_TABLE.
-          const clinicUserSub = item.clinicUserSub?.S;
-          if (clinicUserSub) {
-            const clinicInfo = await fetchClinicInfo(clinicUserSub);
+          // Enrich with clinic display name from the CLINICS_TABLE (keyed by
+          // clinicId — the canonical home of the clinic name).
+          const clinicIdForName = item.clinicId?.S;
+          if (clinicIdForName) {
+            const clinicInfo = await fetchClinicInfo(clinicIdForName);
             if (clinicInfo) {
               job.clinic = clinicInfo;
             }
