@@ -319,6 +319,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "PUT:/profiles": updateProfessionalProfileHandler,
         "DELETE:/profiles": deleteProfessionalProfileHandler,
         "DELETE:/professionals/me/account": deleteProfessionalAccountHandler,
+        // These three are role-agnostic — clinic-side users (Root/ClinicAdmin/
+        // ClinicManager/ClinicViewer) also call them from the Settings page.
+        // Handler reads userSub from the JWT, so each user can only change
+        // their own password regardless of which side they're on.
         "POST:/professionals/me/password/request": requestPasswordChangeHandler,
         "POST:/professionals/me/password/verify": verifyPasswordOtpHandler,
         "POST:/professionals/me/password/confirm": confirmPasswordChangeHandler,

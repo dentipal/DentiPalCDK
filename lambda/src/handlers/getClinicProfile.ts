@@ -185,6 +185,49 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
+        // Drop profiles whose underlying Clinics row is soft-deleted (has
+        // `deletedAt`) or no longer exists at all (TTL purged it). The
+        // ClinicProfiles rows themselves don't carry a `deletedAt` flag —
+        // soft-delete only writes to the Clinics row — so we cross-reference
+        // here. Without this, Root callers (who skip listAccessibleClinicIds)
+        // and any non-Root path that hits the GSI directly would still see
+        // soft-deleted clinics in their Account Overview.
+        if (items.length > 0 && CLINICS_TABLE) {
+            const uniqueClinicIds = Array.from(
+                new Set(items.map(it => it.clinicId?.S).filter((x): x is string => !!x))
+            );
+            const clinicRows = await Promise.all(
+                uniqueClinicIds.map(async (cid) => {
+                    try {
+                        const resp = await dynamodb.send(new GetItemCommand({
+                            TableName: CLINICS_TABLE,
+                            Key: { clinicId: { S: cid } },
+                            ProjectionExpression: "clinicId, deletedAt",
+                        }));
+                        return { cid, item: resp.Item };
+                    } catch (err) {
+                        console.warn(`[getClinicProfile] Clinics lookup failed for ${cid}:`, (err as Error).message);
+                        // If we can't verify, conservatively keep the profile rather than
+                        // hide a real clinic over a transient AWS error.
+                        return { cid, item: { clinicId: { S: cid } } as Record<string, AttributeValue> };
+                    }
+                })
+            );
+            const liveClinicIds = new Set(
+                clinicRows
+                    .filter(r => r.item && !r.item.deletedAt?.S)
+                    .map(r => r.cid)
+            );
+            const beforeCount = items.length;
+            items = items.filter(it => {
+                const cid = it.clinicId?.S;
+                return cid ? liveClinicIds.has(cid) : false;
+            });
+            if (beforeCount !== items.length) {
+                console.log(`[getClinicProfile] Filtered ${beforeCount - items.length} soft-deleted/purged clinic profile(s) for user ${userSub}`);
+            }
+        }
+
         if (items.length === 0) {
             return json(event, 404, {
                 error: "Not Found",

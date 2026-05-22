@@ -151,6 +151,36 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (comment) item.comment = { S: comment };
     if (raterName) item.raterName = { S: raterName };
 
+    // Refuse to record a new rating against a soft-deleted clinic — the
+    // clinic is in its 30-day removal window and shouldn't accumulate new
+    // reputation data while pending purge.
+    if (CLINICS_TABLE) {
+        try {
+            const clinicCheck = await dynamodb.send(new GetItemCommand({
+                TableName: CLINICS_TABLE,
+                Key: { clinicId: { S: clinicId } },
+                ProjectionExpression: "deletedAt",
+            }));
+            if (!clinicCheck.Item) {
+                return json(event, 404, {
+                    error: "Not Found",
+                    statusCode: 404,
+                    message: "Clinic not found.",
+                });
+            }
+            if (clinicCheck.Item.deletedAt?.S) {
+                return json(event, 409, {
+                    error: "Conflict",
+                    statusCode: 409,
+                    message: "Cannot rate a clinic that has been deleted.",
+                });
+            }
+        } catch (err) {
+            console.warn("[submitClinicRating] deletedAt check failed:", (err as Error).message);
+            // Conservative: allow the rating rather than block on a transient error.
+        }
+    }
+
     try {
         await dynamodb.send(new PutItemCommand({
             TableName: CLINIC_RATINGS_TABLE,

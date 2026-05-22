@@ -1,5 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { v4 as uuidv4 } from "uuid";
 import { extractUserFromBearerToken, canWriteClinic } from "./utils";
@@ -91,12 +91,19 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return { statusCode: 409, headers: corsHeaders(event), body: JSON.stringify({ error: "This job is already promoted" }) };
     }
 
-    // Create promotion record
+    // Create promotion record. Stub-mode payment: the promotion is written
+    // as "active" with a real expiresAt in the same call. This eliminates the
+    // create→activate two-step (which was leaving records stuck in
+    // pending_payment when the activate call ran inside the GSI's eventual-
+    // consistency window). When Stripe is wired in, flip `status` back to
+    // "pending_payment"/"PENDING" expiresAt and let the Stripe webhook call
+    // activatePromotion to flip these fields.
     const promotionId = uuidv4();
-    const now = new Date().toISOString();
+    const nowDate = new Date();
+    const now = nowDate.toISOString();
+    const expiresAtDate = new Date(nowDate.getTime() + durationDays * 24 * 60 * 60 * 1000);
+    const expiresAt = expiresAtDate.toISOString();
 
-    // GSI "status-expiresAt-index" requires expiresAt to be a String (never null).
-    // Use a placeholder value for pending promotions; activatePromotion overwrites it.
     const promotionItem = {
       jobId,
       promotionId,
@@ -106,11 +113,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       durationDays,
       perDayPriceCents,
       totalPriceCents,
-      status: "pending_payment",
+      status: "active",
       createdAt: now,
       updatedAt: now,
-      activatedAt: "PENDING",
-      expiresAt: "PENDING",
+      activatedAt: now,
+      expiresAt,
       impressions: 0,
       clicks: 0,
       applications: 0,
@@ -121,17 +128,35 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       Item: promotionItem,
     }));
 
+    // Denormalize promotion fields onto the job posting so the clinic dashboard
+    // (and the badge on the professional-side card) can render without a
+    // second lookup. Same fields the old activatePromotion handler wrote.
+    await ddbDoc.send(new UpdateCommand({
+      TableName: JOB_POSTINGS_TABLE,
+      Key: { clinicUserSub: job.clinicUserSub, jobId },
+      UpdateExpression:
+        "SET isPromoted = :true, promotionId = :pid, promotionPlanId = :planId, promotionExpiresAt = :expires, updatedAt = :now",
+      ExpressionAttributeValues: {
+        ":true": true,
+        ":pid": promotionId,
+        ":planId": planId,
+        ":expires": expiresAt,
+        ":now": now,
+      },
+    }));
+
     return {
       statusCode: 201,
       headers: corsHeaders(event),
       body: JSON.stringify({
         status: "success",
         promotion: promotionItem,
-        // Payment placeholder - to be implemented later
+        // Payment stubbed — promotion is immediately active. Will switch to
+        // a real client_secret once Stripe is wired in.
         payment: {
           paymentUrl: null,
           clientSecret: null,
-          message: "Payment integration pending. Use the activate endpoint to activate this promotion.",
+          message: "Payment stubbed in development — promotion is immediately active.",
         },
       }),
     };

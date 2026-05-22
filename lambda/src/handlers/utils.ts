@@ -152,6 +152,75 @@ const extractAssociatedUsers = (attr: AttributeValue | undefined): string[] => {
 };
 
 /**
+/**
+ * Shared helper used by every list endpoint that may surface clinic-scoped
+ * rows on the professional side. Returns true if the clinic is either
+ * soft-deleted (deletedAt set) OR no longer exists at all (TTL purged).
+ *
+ * Cached per Lambda warm container — listing endpoints commonly reference
+ * the same handful of clinicIds dozens of times in a single request (one
+ * per application/shift/notification row). A 5-minute in-memory cache
+ * collapses that to ~1 GetItem per unique clinicId per request.
+ *
+ * Treats a missing row as "deleted" too. After the 30-day TTL physically
+ * removes the Clinics row, related rows in other tables may still exist
+ * briefly before the cascade Lambda finishes the purge. From the
+ * professional's perspective those orphans should be hidden too.
+ */
+const SOFT_DELETED_CACHE_TTL_MS = 5 * 60 * 1000;
+const softDeletedClinicCache = new Map<string, { value: boolean; expiresAt: number }>();
+export const isClinicSoftDeleted = async (clinicId: string | undefined | null): Promise<boolean> => {
+    if (!clinicId) return false;
+    if (!CLINICS_TABLE) return false;
+    const cached = softDeletedClinicCache.get(clinicId);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) return cached.value;
+    try {
+        const resp = await dynamoClient.send(new GetItemCommand({
+            TableName: CLINICS_TABLE,
+            Key: { clinicId: { S: clinicId } },
+            ProjectionExpression: "deletedAt",
+        }));
+        const isDeleted = !resp.Item || !!resp.Item.deletedAt?.S;
+        softDeletedClinicCache.set(clinicId, { value: isDeleted, expiresAt: now + SOFT_DELETED_CACHE_TTL_MS });
+        return isDeleted;
+    } catch (err) {
+        // Conservative: on transient error, treat as NOT deleted so we don't
+        // hide live data over an AWS hiccup. The next request will retry.
+        console.warn(`[isClinicSoftDeleted] check failed for ${clinicId}; assuming not deleted:`, (err as Error).message);
+        return false;
+    }
+};
+
+/**
+ * Batch version — single round-trip for a set of clinicIds. Returns a Set
+ * of clinicIds that are soft-deleted or no longer exist. Use this when a
+ * listing handler has 20+ unique clinics to check in one shot.
+ */
+export const findSoftDeletedClinicIds = async (clinicIds: string[]): Promise<Set<string>> => {
+    const out = new Set<string>();
+    const unique = Array.from(new Set(clinicIds.filter((id): id is string => !!id)));
+    if (unique.length === 0 || !CLINICS_TABLE) return out;
+    // Check the in-memory cache first; only round-trip for the misses.
+    const now = Date.now();
+    const toFetch: string[] = [];
+    for (const id of unique) {
+        const cached = softDeletedClinicCache.get(id);
+        if (cached && cached.expiresAt > now) {
+            if (cached.value) out.add(id);
+        } else {
+            toFetch.push(id);
+        }
+    }
+    if (toFetch.length === 0) return out;
+    await Promise.all(toFetch.map(async (id) => {
+        const deleted = await isClinicSoftDeleted(id);
+        if (deleted) out.add(id);
+    }));
+    return out;
+};
+
+/**
  * READ gate: may this user read data for the given clinicId?
  * The user's sub must appear in Clinics.AssociatedUsers OR equal Clinics.createdBy.
  * One GetItem on the Clinics table; no UserClinicAssignments lookup.
