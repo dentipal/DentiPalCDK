@@ -12,7 +12,17 @@ const JOB_PROMOTIONS_TABLE = process.env.JOB_PROMOTIONS_TABLE || "DentiPal-V5-Jo
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
-const VALID_PLANS = ["basic", "featured", "premium"];
+const VALID_PLANS = ["basic", "email", "sms"];
+
+// Server-side source of truth — never trust client-supplied prices.
+const PLAN_PER_DAY_CENTS: Record<string, number> = {
+  basic: 100,
+  email: 200,
+  sms: 300,
+};
+
+const MIN_DURATION_DAYS = 1;
+const MAX_DURATION_DAYS = 30;
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
 
@@ -24,7 +34,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const body = JSON.parse(event.body || "{}");
-    const { jobId, planId } = body;
+    const { jobId, planId, durationDays } = body;
 
     if (!jobId || !planId) {
       return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "jobId and planId are required" }) };
@@ -33,6 +43,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (!VALID_PLANS.includes(planId)) {
       return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: `Invalid planId. Must be one of: ${VALID_PLANS.join(", ")}` }) };
     }
+
+    if (
+      !Number.isInteger(durationDays) ||
+      durationDays < MIN_DURATION_DAYS ||
+      durationDays > MAX_DURATION_DAYS
+    ) {
+      return {
+        statusCode: 400,
+        headers: corsHeaders(event),
+        body: JSON.stringify({
+          error: `durationDays is required and must be an integer between ${MIN_DURATION_DAYS} and ${MAX_DURATION_DAYS}`,
+        }),
+      };
+    }
+
+    const perDayPriceCents = PLAN_PER_DAY_CENTS[planId];
+    const totalPriceCents = perDayPriceCents * durationDays;
 
     // Verify the job exists and belongs to this user
     const jobQuery = await ddbDoc.send(new QueryCommand({
@@ -76,6 +103,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       clinicUserSub: job.clinicUserSub,
       clinicId: job.clinicId,
       planId,
+      durationDays,
+      perDayPriceCents,
+      totalPriceCents,
       status: "pending_payment",
       createdAt: now,
       updatedAt: now,
