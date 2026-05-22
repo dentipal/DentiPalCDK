@@ -143,6 +143,28 @@ function shiftLineFrom(detail: EventBridgeEvent["detail"]): string {
         .trim();
 }
 
+/** Pretty-print the role from event detail for inclusion in notification
+ *  titles. Roles arrive as snake_case ("dental_hygienist") or plain text
+ *  ("Dental Hygienist") depending on the emitter; this normalizes both into
+ *  Title Case. Returns undefined when no role is present so callers can
+ *  fall back to a generic "job" label.
+ *
+ *  Why this matters: the user has many open jobs, and a notification title
+ *  like "Sarah applied to your job" doesn't tell them which one. Including
+ *  the role ("Sarah applied to your Dental Hygienist job") lets them
+ *  identify the relevant posting before they navigate. */
+function jobRoleLabel(detail: EventBridgeEvent["detail"]): string | undefined {
+    const raw = detail.shiftDetails?.role;
+    if (!raw || typeof raw !== "string") return undefined;
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    return trimmed
+        .split(/[\s_]+/)
+        .map((w) => (w ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w))
+        .join(" ");
+}
+
+
 /**
  * Resolve clinic recipients for an event, excluding the actor (so a clinic
  * user who themselves cancelled a job doesn't get their own notification).
@@ -243,11 +265,14 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
             }
             // Clinic audience — payroll/audit visibility for the rest of the team.
             const clinicRecipients = await clinicRecipientsExcludingActor(detail.clinicId, clinicActorSub);
+            const completedRole = jobRoleLabel(detail);
             for (const sub of clinicRecipients) {
                 drafts.push({
                     recipientSub: sub,
                     type: "shift_completed",
-                    title: `${proName} completed a shift`,
+                    title: completedRole
+                        ? `${proName} completed a ${completedRole} shift`
+                        : `${proName} completed a shift`,
                     body: shiftLine || undefined,
                     actorName: proName,
                     deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
@@ -277,11 +302,14 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
             // Clinic audience — confirmation the report was recorded for everyone
             // on the team (so other admins know without re-checking).
             const clinicRecipients = await clinicRecipientsExcludingActor(detail.clinicId, clinicActorSub);
+            const noShowRole = jobRoleLabel(detail);
             for (const sub of clinicRecipients) {
                 drafts.push({
                     recipientSub: sub,
                     type: "no_show_reported",
-                    title: `No-show reported for ${proName}`,
+                    title: noShowRole
+                        ? `No-show reported for ${proName} (${noShowRole})`
+                        : `No-show reported for ${proName}`,
                     body: shiftLine || undefined,
                     actorName: proName,
                     deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
@@ -310,11 +338,14 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
             // Also remind the clinic team so the front desk can prepare.
             {
                 const clinicRecipients = await clinicRecipientsExcludingActor(detail.clinicId, undefined);
+                const reminder24Role = jobRoleLabel(detail);
                 for (const sub of clinicRecipients) {
                     drafts.push({
                         recipientSub: sub,
                         type: "shift_reminder_h24",
-                        title: `${proName} starts a shift in 24 hours`,
+                        title: reminder24Role
+                            ? `${proName} starts a ${reminder24Role} shift in 24 hours`
+                            : `${proName} starts a shift in 24 hours`,
                         body: shiftLine || undefined,
                         actorName: proName,
                         deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
@@ -342,11 +373,14 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
             }
             {
                 const clinicRecipients = await clinicRecipientsExcludingActor(detail.clinicId, undefined);
+                const reminder1Role = jobRoleLabel(detail);
                 for (const sub of clinicRecipients) {
                     drafts.push({
                         recipientSub: sub,
                         type: "shift_reminder_h1",
-                        title: `${proName} starts a shift in 1 hour`,
+                        title: reminder1Role
+                            ? `${proName} starts a ${reminder1Role} shift in 1 hour`
+                            : `${proName} starts a shift in 1 hour`,
                         body: shiftLine || undefined,
                         deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
                         actorName: proName,
@@ -388,11 +422,14 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
             // Pro applied → fan out to the clinic team. Pro side already saw
             // their submission go through; no row for them.
             const clinicRecipients = await clinicRecipientsExcludingActor(detail.clinicId, undefined);
+            const appliedRole = jobRoleLabel(detail);
             for (const sub of clinicRecipients) {
                 drafts.push({
                     recipientSub: sub,
                     type: "application_received",
-                    title: `${proName} applied to your job`,
+                    title: appliedRole
+                        ? `${proName} applied to your ${appliedRole} job`
+                        : `${proName} applied to your job`,
                     body: shiftLine || undefined,
                     actorName: proName,
                     deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
@@ -406,18 +443,11 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
         }
 
         case "application-rejected":
-            if (proSub) {
-                drafts.push({
-                    recipientSub: proSub,
-                    type: "application_rejected",
-                    title: `Your application for ${clinicName} was declined`,
-                    body: "The clinic chose another candidate this time.",
-                    actorName: clinicName,
-                    deepLink: PROFESSIONAL_DASHBOARD_PENDING,
-                    subjectType: "application",
-                    subjectId: detail.applicationId,
-                });
-            }
+            // Intentionally not written to the in-app feed: declined
+            // applications already surface on the Professional History page
+            // (useProfessionalHistory tags them as "Rejected"), so an extra
+            // bell row would be redundant. The email side (event-to-email)
+            // still fires — pros who opt in to email get the heads-up.
             return drafts;
 
         case "application-withdrawn": {
@@ -425,11 +455,14 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
             // don't keep that candidate in their decision pipeline. The pro
             // is the actor; no row written back to them.
             const clinicRecipients = await clinicRecipientsExcludingActor(detail.clinicId, undefined);
+            const withdrawnRole = jobRoleLabel(detail);
             for (const sub of clinicRecipients) {
                 drafts.push({
                     recipientSub: sub,
                     type: "application_withdrawn",
-                    title: `${proName} withdrew their application`,
+                    title: withdrawnRole
+                        ? `${proName} withdrew from your ${withdrawnRole} job`
+                        : `${proName} withdrew their application`,
                     body: shiftLine || undefined,
                     actorName: proName,
                     deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
@@ -539,11 +572,14 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
                 eventType === "invite-accepted" ? "accepted"
                     : eventType === "invite-declined" ? "declined"
                         : "started negotiating";
+            const inviteRole = jobRoleLabel(detail);
             for (const sub of clinicRecipients) {
                 drafts.push({
                     recipientSub: sub,
                     type: "invitation_response",
-                    title: `${proName} ${verb} your invitation`,
+                    title: inviteRole
+                        ? `${proName} ${verb} your ${inviteRole} invitation`
+                        : `${proName} ${verb} your invitation`,
                     body: shiftLine || undefined,
                     actorName: proName,
                     deepLink: clinicJobDeepLink(detail.jobId, detail.clinicId),
@@ -594,11 +630,14 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
             // Professional was the actor → clinic team is the audience.
             if (detail.actor === "professional") {
                 const clinicRecipients = await clinicRecipientsExcludingActor(detail.clinicId, undefined);
+                const negRole = jobRoleLabel(detail);
                 for (const sub of clinicRecipients) {
                     drafts.push({
                         recipientSub: sub,
                         type,
-                        title: `${proName} ${verbToClinic}`,
+                        title: negRole
+                            ? `${proName} ${verbToClinic} for your ${negRole} job`
+                            : `${proName} ${verbToClinic}`,
                         body: detail.shiftDetails?.rate
                             ? (eventType === "negotiation-accepted" ? `Confirmed at $${detail.shiftDetails.rate}/hr` : `Counter rate: $${detail.shiftDetails.rate}/hr`)
                             : undefined,

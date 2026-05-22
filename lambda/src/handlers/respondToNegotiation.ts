@@ -436,6 +436,7 @@ export const handler = async (event: APIGatewayProxyEventV2 | APIGatewayProxyEve
                 eventType: "shift-scheduled",
                 clinicId,
                 professionalSub: professionalUserSub,
+                jobId,
                 shiftDetails,
               }),
             }],

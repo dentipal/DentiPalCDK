@@ -57,6 +57,11 @@ function mapPostingItem(item: Record<string, AttributeValue>) {
   return {
     jobId: (item.jobId as any)?.S || "No jobId",
     clinicUserSub: (item.clinicUserSub as any)?.S || "No userSub", // Changed from clinicId
+    // clinicId is required for the live-clinic enricher to look up the row;
+    // clinicName is seeded as "" so the enricher actually patches it in (it
+    // only writes keys already present on the record).
+    clinicId: (item.clinicId as any)?.S || "",
+    clinicName: "",
     status: (item.status as any)?.S || "unknown",
     
     // details

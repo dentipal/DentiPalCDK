@@ -199,6 +199,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     eventType: "shift-cancelled",
                     clinicId: jobClinicId,
                     professionalSub: app.professionalUserSub,
+                    jobId,
                     shiftDetails,
                 }),
             }));

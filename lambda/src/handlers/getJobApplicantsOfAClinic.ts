@@ -7,6 +7,10 @@ import {
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
+import {
+  CognitoIdentityProviderClient,
+  AdminGetUserCommand,
+} from "@aws-sdk/client-cognito-identity-provider";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 
 // ---------- env / config ----------
@@ -28,6 +32,41 @@ const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 200;
 
 const dynamodb = new DynamoDBClient({ region: REGION });
+const cognito = new CognitoIdentityProviderClient({ region: REGION });
+
+/**
+ * Names entered during signup are stored only as Cognito attributes
+ * (`given_name` / `family_name`) — the ProfessionalProfiles row is created
+ * later when the professional completes their profile form. So applicants
+ * who haven't done that step yet have either no profile row or a row with
+ * empty names, which renders as "Unknown Professional" on the clinic UI.
+ *
+ * Fill the gap by reading `given_name` / `family_name` from Cognito for any
+ * applicant whose joined profile is missing or has empty name fields. DDB
+ * values still win when they have data, so a professional who later edits
+ * their name in their profile remains the source of truth.
+ */
+async function fetchCognitoNamesForSub(userSub: string): Promise<{ first_name?: string; last_name?: string }> {
+  const userPoolId = process.env.USER_POOL_ID;
+  if (!userPoolId) return {};
+  try {
+    const resp = await cognito.send(new AdminGetUserCommand({
+      UserPoolId: userPoolId,
+      Username: userSub,
+    }));
+    const attrs = resp.UserAttributes || [];
+    const given = attrs.find((a) => a.Name === "given_name")?.Value || "";
+    const family = attrs.find((a) => a.Name === "family_name")?.Value || "";
+    const out: { first_name?: string; last_name?: string } = {};
+    if (given) out.first_name = given;
+    if (family) out.last_name = family;
+    return out;
+  } catch (err: any) {
+    // Non-fatal — the card just keeps showing "Unknown Professional" for this row.
+    console.warn(`[cognito name fallback] failed for ${userSub}:`, err?.message);
+    return {};
+  }
+}
 
 // Encode/decode a DynamoDB ExclusiveStartKey as an opaque base64url nextToken
 // so clients don't have to know the underlying key shape.
@@ -535,6 +574,29 @@ export const handler = async (
         return [p.userSub, p];
       })
     );
+
+    // Fill in first/last name from Cognito for any applicant whose joined profile
+    // is missing or has empty names. See fetchCognitoNamesForSub doc above. Runs
+    // in parallel and never throws — a Cognito failure leaves the row as-is.
+    const subsNeedingNames = profSubs.filter((sub: string) => {
+      const p = profileByUserSub.get(sub);
+      if (!p) return true;
+      const hasFirst = typeof (p.first_name || p.firstName) === "string" && (p.first_name || p.firstName).trim().length > 0;
+      const hasLast = typeof (p.last_name || p.lastName) === "string" && (p.last_name || p.lastName).trim().length > 0;
+      return !hasFirst || !hasLast;
+    });
+    if (subsNeedingNames.length > 0) {
+      await Promise.all(subsNeedingNames.map(async (sub: string) => {
+        const names = await fetchCognitoNamesForSub(sub);
+        if (!names.first_name && !names.last_name) return;
+        const existing = profileByUserSub.get(sub) || { userSub: sub };
+        const hasFirst = typeof (existing.first_name || existing.firstName) === "string" && (existing.first_name || existing.firstName).trim().length > 0;
+        const hasLast = typeof (existing.last_name || existing.lastName) === "string" && (existing.last_name || existing.lastName).trim().length > 0;
+        if (!hasFirst && names.first_name) existing.first_name = names.first_name;
+        if (!hasLast && names.last_name) existing.last_name = names.last_name;
+        profileByUserSub.set(sub, existing);
+      }));
+    }
 
     const applicationsJoined = applications.map((app) => {
       const job = postingByJobId.get(app.jobId) || null;

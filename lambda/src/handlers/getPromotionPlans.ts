@@ -1,31 +1,38 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { corsHeaders } from "./corsHeaders";
 
-// Placeholder promotion plans - pricing/duration to be finalized later
+// Per-day promotion plans. Total price = perDayPriceCents * durationDays
+// (user picks days in the popup, server recomputes total on create).
 const PROMOTION_PLANS = [
   {
     planId: "basic",
-    name: "Basic Boost",
-    description: "Your job appears at the top of search results for 3 days.",
-    durationDays: 3,
-    priceCents: 999, // $9.99
+    name: "Basic",
+    description: "Your job appears at the top of search results with a Promoted badge.",
+    perDayPriceCents: 100, // $1/day
     features: ["Top of search results", "Promoted badge"],
   },
   {
-    planId: "featured",
-    name: "Featured Listing",
-    description: "Your job appears at the top of search results for 7 days with a Featured badge.",
-    durationDays: 7,
-    priceCents: 2499, // $24.99
-    features: ["Top of search results", "Featured badge", "Email digest inclusion"],
+    planId: "email",
+    name: "Email Boost",
+    description: "Basic + email blast to matching professionals each day.",
+    perDayPriceCents: 200, // $2/day
+    features: [
+      "Top of search results",
+      "Promoted badge",
+      "Email blast to matching professionals",
+    ],
   },
   {
-    planId: "premium",
-    name: "Premium Spotlight",
-    description: "Maximum visibility for 14 days with premium placement and notifications.",
-    durationDays: 14,
-    priceCents: 4999, // $49.99
-    features: ["Top of search results", "Premium badge", "Email digest inclusion", "Push notifications to matching professionals"],
+    planId: "sms",
+    name: "SMS Boost",
+    description: "Everything in Email + SMS blast to matching professionals.",
+    perDayPriceCents: 300, // $3/day
+    features: [
+      "Top of search results",
+      "Promoted badge",
+      "Email blast to matching professionals",
+      "SMS blast to matching professionals",
+    ],
   },
 ];
 

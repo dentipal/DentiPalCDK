@@ -850,8 +850,11 @@ export class DentiPalCDKStack extends cdk.Stack {
             'ClinicViewer',
             'AssociateDentist',
             'DentalAssistant',
+            'ExpandedFunctionsDA',
             'DualRoleFrontDA',
             'DentalHygienist',
+            'PatientCoordinatorFront',
+            'TreatmentCoordinatorFront',
             'FrontDesk',
             'Dentist',
             'Hygienist',
@@ -1642,6 +1645,17 @@ export class DentiPalCDKStack extends cdk.Stack {
                 PROFESSIONAL_LICENSES_BUCKET: professionalLicensesBucket.bucketName,
                 CLINIC_OFFICE_IMAGES_BUCKET: clinicOfficeImagesBucket.bucketName,
                 CLINIC_ACCOUNT_BACKUP_BUCKET: clinicAccountBackupBucket.bucketName,
+
+                // Ranking V2 feature flags — see getProfessionalFilteredJobs.ts.
+                // Toggle these together to roll out the new relevance score
+                // (always-on distance + profile-derived role/skills/specialties
+                // + clinic-diversity rerank). Default "false" means production
+                // continues to run V1 weights even though V2 code is shipped.
+                // Once the canary metrics show the predicted wins, PR 6 will
+                // delete both paths and these flags.
+                RANKING_V2_PROFILE_SIGNALS: "true",
+                RANKING_V2_SCORE: "true",
+                RANKING_V2_DIVERSITY: "true",
             },
             timeout: cdk.Duration.seconds(60),
             // Lambda CPU scales with memory. The monolith init (imports every handler + AWS SDK v3)
