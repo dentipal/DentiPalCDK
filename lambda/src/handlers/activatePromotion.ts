@@ -11,12 +11,9 @@ const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE || "DentiPal-V5-JobPos
 const client = new DynamoDBClient({ region: REGION });
 const ddbDoc = DynamoDBDocumentClient.from(client);
 
-// Plan duration mapping — update pricing/duration here when finalized
-const PLAN_DURATIONS: Record<string, number> = {
-  basic: 3,
-  featured: 7,
-  premium: 14,
-};
+// Fallback duration for legacy promotion records created before durationDays
+// was stored on the item. New records always carry their own durationDays.
+const LEGACY_FALLBACK_DURATION_DAYS = 7;
 
 /**
  * Activates a promotion after payment is confirmed.
@@ -77,7 +74,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const now = new Date();
-    const durationDays = PLAN_DURATIONS[promotion.planId] || 7;
+    const durationDays =
+      typeof promotion.durationDays === "number" && promotion.durationDays > 0
+        ? promotion.durationDays
+        : LEGACY_FALLBACK_DURATION_DAYS;
     const expiresAt = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000);
 
     // Activate the promotion

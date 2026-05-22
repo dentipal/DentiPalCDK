@@ -1031,18 +1031,26 @@ export const handler = async (
         // that's already happened helps nobody and would distort counts.
         if (isJobFullyPast(item)) continue;
 
-        // Hard 50-mile relevance gate, independent of any user-set radius
-        // filter. A premium boost in Houston is not relevant to a Dallas pro;
-        // we drop those promotions silently rather than spending the slot.
-        // No coords on either side → drop (can't qualify the placement).
-        if (!profCoords) { droppedMissingCoords++; continue; }
+        // Soft 50-mile relevance gate. When both the pro and the job are
+        // geocoded we enforce the radius — a paid boost in Houston is not
+        // relevant to a Dallas pro. When either side lacks coords (common in
+        // dev/test environments and for newly-created jobs whose geocoding
+        // hasn't completed yet), we surface the promoted job anyway so a paid
+        // boost is never silently swallowed by missing metadata.
         const jobCoords = getJobCoords(item);
-        if (!jobCoords) { droppedMissingCoords++; continue; }
-        const distanceMi = haversineDistance(
-          profCoords.lat, profCoords.lng,
-          jobCoords.lat, jobCoords.lng,
-        );
-        if (distanceMi > PROMOTED_RADIUS_MI) { droppedOutsideRadius++; continue; }
+        let distanceMi: number | null = null;
+        if (profCoords && jobCoords) {
+          distanceMi = haversineDistance(
+            profCoords.lat, profCoords.lng,
+            jobCoords.lat, jobCoords.lng,
+          );
+          if (distanceMi > PROMOTED_RADIUS_MI) { droppedOutsideRadius++; continue; }
+        } else {
+          droppedMissingCoords++;
+          // Note: counter is incremented but we DO NOT `continue` — the
+          // promotion still surfaces. The log line below uses this counter
+          // to flag "X promoted jobs surfaced without coord verification".
+        }
 
         // Two-phase: gate by non-jobType filters first, bucket, then jobType.
         if (!matchesFilters(item, filtersSansJobType)) continue;
@@ -1065,7 +1073,9 @@ export const handler = async (
 
         // Also honour the user-set radius filter when one is active and is
         // tighter than the promoted gate (e.g. pro restricted feed to 10 mi).
-        if (radiusMiles && distanceMi > radiusMiles) continue;
+        // Skip this gate when distance is unknown (missing coords) so the
+        // promoted slot still surfaces.
+        if (radiusMiles && distanceMi !== null && distanceMi > radiusMiles) continue;
 
         const jt = (str(item.job_type) || str(item.jobType)).toLowerCase();
         if (computeCounts) {
@@ -1103,7 +1113,7 @@ export const handler = async (
         matchedJobs = matchedJobs.filter((m) => !promotedIds.has(str(m.item.jobId)));
       }
 
-      console.log(`[Promotions] ${promotedMatched.length} promoted jobs surfaced; dropped ${droppedOutsideRadius} outside ${PROMOTED_RADIUS_MI}mi, ${droppedMissingCoords} missing coords.`);
+      console.log(`[Promotions] ${promotedMatched.length} promoted jobs surfaced; dropped ${droppedOutsideRadius} outside ${PROMOTED_RADIUS_MI}mi, ${droppedMissingCoords} surfaced without coord verification (missing lat/lng on pro or job).`);
     }
 
     // 3) Sort organic jobs by the requested mode. Promoted jobs are sorted
