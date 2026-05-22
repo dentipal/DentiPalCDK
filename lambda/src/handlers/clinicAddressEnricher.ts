@@ -31,7 +31,11 @@ const ddb = new DynamoDBClient({ region: REGION });
 
 // Fields we read off the Clinics row. Keep the projection narrow so we
 // never accidentally pull sensitive columns into the response.
-const CLINIC_PROJECTION = "clinicId, #nm, addressLine1, addressLine2, addressLine3, city, #st, pincode";
+// `deletedAt` is in the projection so we can skip soft-deleted clinic rows
+// in the loop below — otherwise scheduled/completed shift views would show
+// fresh live address data for a clinic that no longer exists from the
+// professional's perspective.
+const CLINIC_PROJECTION = "clinicId, #nm, addressLine1, addressLine2, addressLine3, city, #st, pincode, deletedAt";
 const CLINIC_PROJECTION_NAMES = { "#nm": "name", "#st": "state" } as const;
 
 export interface LiveClinicAddress {
@@ -100,6 +104,10 @@ export async function fetchLiveClinicAddresses(
                 const row = unmarshall(raw as Record<string, AttributeValue>);
                 const id: string | undefined = row.clinicId;
                 if (!id) continue;
+                // Skip soft-deleted clinics — callers (getScheduledShifts,
+                // getCompletedShifts, etc.) shouldn't enrich rows with data
+                // from a clinic that's pending permanent removal.
+                if (row.deletedAt) continue;
                 const addr: LiveClinicAddress = {
                     clinicId: id,
                     name: row.name,

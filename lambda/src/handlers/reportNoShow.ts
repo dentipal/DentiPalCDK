@@ -190,6 +190,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                         eventType: "shift-no-show",
                         clinicId,
                         professionalSub: professionalUserSub,
+                        jobId,
                         shiftDetails,
                     }),
                 }],

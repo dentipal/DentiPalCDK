@@ -7,7 +7,7 @@ import {
     AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { corsHeaders } from "./corsHeaders";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, findSoftDeletedClinicIds } from "./utils";
 import { ddb, NOTIFICATIONS_TABLE, itemToRecord } from "./notifications";
 
 const DEFAULT_LIMIT = 200;
@@ -73,7 +73,26 @@ export const handler = async (
 
         const result = await ddb.send(new QueryCommand(queryParams));
 
-        const items = (result.Items || []).map(itemToRecord);
+        let items = (result.Items || []).map(itemToRecord);
+
+        // Drop notifications that point at soft-deleted (or purged) clinics —
+        // a notification about a clinic that no longer exists is noise.
+        const notifClinicIds = items
+            .map(n => (n as any).clinicId as string | undefined)
+            .filter((id): id is string => !!id);
+        if (notifClinicIds.length > 0) {
+            const deletedSet = await findSoftDeletedClinicIds(notifClinicIds);
+            if (deletedSet.size > 0) {
+                const before = items.length;
+                items = items.filter((n) => {
+                    const cid = (n as any).clinicId as string | undefined;
+                    return !cid || !deletedSet.has(cid);
+                });
+                if (before !== items.length) {
+                    console.log(`[listNotifications] Dropped ${before - items.length} notification(s) tied to soft-deleted clinics`);
+                }
+            }
+        }
 
         // Best-effort unread count: query for unread items only, but cap the
         // count so a noisy user doesn't blow up Dynamo capacity. The frontend
