@@ -58,12 +58,17 @@ export const GET_JOB_DETAILS: ToolDefinition = {
 export const GET_MY_APPLICATIONS: ToolDefinition = {
   name: "get_my_applications", bucket: "info", scope: "professional",
   description:
-    "List the professional's applications and their statuses. " +
-    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) or `dateFrom`/`dateTo` (YYYY-MM-DD) " +
-    "to filter by the underlying shift's date. Server filters.",
+    "List the professional's applications. " +
+    "Pass `status` to scope to one tab: 'pending' (pending + negotiating — anything awaiting clinic action), " +
+    "'scheduled' (accepted/hired/confirmed), 'completed', 'no_show', 'rejected' (rejected/declined/canceled). " +
+    "Omit `status` to return EVERY application across all statuses (use this only for 'show me all my applications'). " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) or `dateFrom`/`dateTo` (YYYY-MM-DD) to filter by shift date. Server filters.",
   inputSchema: {
     type: "object",
-    properties: { dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+    properties: {
+      status: { type: "string", enum: ["pending", "scheduled", "completed", "no_show", "rejected"] },
+      dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING,
+    },
   },
 };
 
@@ -453,13 +458,15 @@ export const PREVIEW_POST_TEMPORARY_JOB: ToolDefinition = {
   description: "Render confirm-card for a single-shift temp job posting. ALWAYS preview before confirm. You MUST ask the clinic how many professionals they need for the shift (`positions_required`, integer 1-20) before calling this tool — do not assume 1.",
   inputSchema: {
     type: "object",
-    required: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time", "positions_required"],
+    required: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time", "positions_required", "work_location_type"],
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       date: STRING, shift_speciality: STRING, hours: NUMBER, rate: NUMBER,
       pay_type: STRING, start_time: STRING, end_time: STRING, meal_break: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      assisted_hygiene: BOOL, work_location_type: STRING, positions_required: NUMBER,
+      assisted_hygiene: BOOL,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
+      positions_required: NUMBER,
     },
   },
 };
@@ -470,31 +477,35 @@ export const CONFIRM_POST_TEMPORARY_JOB: ToolDefinition = {
   description: "Create the temp job posting. Requires previewToken.",
   inputSchema: {
     type: "object",
-    required: ["previewToken", "clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time", "positions_required"],
+    required: ["previewToken", "clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time", "positions_required", "work_location_type"],
     properties: {
       previewToken: STRING,
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       date: STRING, shift_speciality: STRING, hours: NUMBER, rate: NUMBER,
       pay_type: STRING, start_time: STRING, end_time: STRING, meal_break: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      assisted_hygiene: BOOL, work_location_type: STRING, positions_required: NUMBER,
+      assisted_hygiene: BOOL,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
+      positions_required: NUMBER,
     },
   },
 };
 
 export const PREVIEW_POST_CONSULTING_JOB: ToolDefinition = {
   name: "preview_post_consulting_job", bucket: "response", scope: "clinic",
-  description: "Render confirm-card for a multi-day consulting job posting. You MUST ask the clinic how many professionals they need (`positions_required`, integer 1-20) before calling this tool — do not assume 1.",
+  description: "Render confirm-card for a multi-day consulting job posting. You MUST ask the clinic how many professionals they need (`positions_required`, 1-20) AND the work mode (`work_location_type`: onsite | us_remote | global_remote) before calling this tool — do not assume defaults.",
   inputSchema: {
     type: "object",
-    required: ["clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time", "positions_required"],
+    required: ["clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time", "positions_required", "work_location_type"],
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       dates: STRING_ARRAY, total_days: NUMBER, hours_per_day: NUMBER,
       shift_speciality: STRING, rate: NUMBER, pay_type: STRING,
       start_time: STRING, end_time: STRING, meal_break: STRING,
       project_duration: STRING, job_title: STRING, job_description: STRING,
-      requirements: STRING_ARRAY, work_location_type: STRING, positions_required: NUMBER,
+      requirements: STRING_ARRAY,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
+      positions_required: NUMBER,
     },
   },
 };
@@ -505,13 +516,14 @@ export const CONFIRM_POST_CONSULTING_JOB: ToolDefinition = {
   description: "Create the consulting job. Requires previewToken.",
   inputSchema: {
     type: "object",
-    required: ["previewToken", "clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time", "positions_required"],
+    required: ["previewToken", "clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time", "positions_required", "work_location_type"],
     properties: {
       previewToken: STRING, clinicIds: STRING_ARRAY, professional_role: STRING,
       professional_roles: STRING_ARRAY, dates: STRING_ARRAY, total_days: NUMBER,
       hours_per_day: NUMBER, shift_speciality: STRING, rate: NUMBER, pay_type: STRING,
       start_time: STRING, end_time: STRING, meal_break: STRING, project_duration: STRING,
-      job_title: STRING, job_description: STRING, requirements: STRING_ARRAY, work_location_type: STRING,
+      job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
       positions_required: NUMBER,
     },
   },
@@ -519,10 +531,10 @@ export const CONFIRM_POST_CONSULTING_JOB: ToolDefinition = {
 
 export const PREVIEW_POST_PERMANENT_JOB: ToolDefinition = {
   name: "preview_post_permanent_job", bucket: "response", scope: "clinic",
-  description: "Render confirm-card for a permanent job posting. You MUST ask the clinic how many professionals they want to hire (`positions_required`, integer 1-20) before calling this tool — do not assume 1.",
+  description: "Render confirm-card for a permanent job posting. You MUST ask the clinic how many professionals they want to hire (`positions_required`, 1-20) AND the work mode (`work_location_type`: onsite | us_remote | global_remote) before calling this tool — do not assume defaults.",
   inputSchema: {
     type: "object",
-    required: ["clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits", "positions_required"],
+    required: ["clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits", "positions_required", "work_location_type"],
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       shift_speciality: STRING,
@@ -530,7 +542,8 @@ export const PREVIEW_POST_PERMANENT_JOB: ToolDefinition = {
       salary_min: NUMBER, salary_max: NUMBER, benefits: STRING_ARRAY,
       vacation_days: NUMBER, work_schedule: STRING, start_date: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      work_location_type: STRING, pay_type: STRING, rate: NUMBER, positions_required: NUMBER,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
+      pay_type: STRING, rate: NUMBER, positions_required: NUMBER,
     },
   },
 };
@@ -541,14 +554,15 @@ export const CONFIRM_POST_PERMANENT_JOB: ToolDefinition = {
   description: "Create the permanent job. Requires previewToken.",
   inputSchema: {
     type: "object",
-    required: ["previewToken", "clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits", "positions_required"],
+    required: ["previewToken", "clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits", "positions_required", "work_location_type"],
     properties: {
       previewToken: STRING, clinicIds: STRING_ARRAY, professional_role: STRING,
       professional_roles: STRING_ARRAY, shift_speciality: STRING,
       employment_type: STRING, salary_min: NUMBER, salary_max: NUMBER,
       benefits: STRING_ARRAY, vacation_days: NUMBER, work_schedule: STRING,
       start_date: STRING, job_title: STRING, job_description: STRING,
-      requirements: STRING_ARRAY, work_location_type: STRING,
+      requirements: STRING_ARRAY,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
       pay_type: STRING, rate: NUMBER, positions_required: NUMBER,
     },
   },

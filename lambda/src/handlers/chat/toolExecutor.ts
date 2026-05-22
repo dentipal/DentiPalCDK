@@ -835,7 +835,25 @@ export async function executeTool(
       }
       case "get_my_applications": {
         const r = await callHandlerInProcess(getJobApplicationsHandler, { method: "GET", auth });
-        const filtered = filterShiftsByDayAndDateRange(r, {
+        // Map the requested status bucket onto the underlying applicationStatus
+        // values. The professional dashboard groups statuses into tabs;
+        // "pending" tab = pending + negotiating (anything the pro is still
+        // waiting on); "scheduled" = scheduled/accepted/hired/confirmed;
+        // "completed" = completed; "no_show" = no_show; "rejected" =
+        // rejected/declined/canceled. The agent passes the bucket name; we
+        // expand it here so the LLM never has to know the internal status
+        // alphabet.
+        const STATUS_BUCKETS: Record<string, string[]> = {
+          pending: ["pending", "negotiating"],
+          scheduled: ["scheduled", "accepted", "hired", "confirmed"],
+          completed: ["completed"],
+          no_show: ["no_show", "no-show"],
+          rejected: ["rejected", "declined", "canceled"],
+        };
+        const statusInput = (call.input.status || "").toString().toLowerCase().trim();
+        const allowed = STATUS_BUCKETS[statusInput];
+        const filteredByStatus = allowed ? filterApplicationsByStatusInResult(r, allowed) : r;
+        const filtered = filterShiftsByDayAndDateRange(filteredByStatus, {
           dayOfWeek: call.input.dayOfWeek,
           dateFrom: call.input.dateFrom,
           dateTo: call.input.dateTo,
