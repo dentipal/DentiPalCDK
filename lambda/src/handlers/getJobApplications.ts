@@ -25,7 +25,7 @@ const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE;
 async function fetchClinicName(
   clinicUserSub: string,
   clinicId: string,
-  cache: Map<string, string>
+  cache: Map<string, string | undefined>
 ): Promise<string | undefined> {
   // 1) Preferred: ClinicProfiles keyed by userSub.
   if (clinicUserSub) {
@@ -196,7 +196,7 @@ export const handler = async (event: any) => {
 
     const applicationsResponse = { Items: allItems };
     let applications: any[] = [];
-    const clinicNameCache = new Map<string, string>();
+    const clinicNameCache = new Map<string, string | undefined>();
 
     const toDates = (attr: AttributeValue | undefined): string[] => {
       if (!attr) return [];
