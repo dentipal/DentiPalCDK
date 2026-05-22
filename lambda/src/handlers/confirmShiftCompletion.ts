@@ -223,6 +223,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                         eventType: "shift-completed",
                         clinicId,
                         professionalSub: professionalUserSub,
+                        jobId,
                         shiftDetails,
                     }),
                 }],

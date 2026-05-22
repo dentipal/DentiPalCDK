@@ -443,18 +443,11 @@ async function buildNotifications(detail: EventBridgeEvent["detail"]): Promise<N
         }
 
         case "application-rejected":
-            if (proSub) {
-                drafts.push({
-                    recipientSub: proSub,
-                    type: "application_rejected",
-                    title: `Your application for ${clinicName} was declined`,
-                    body: "The clinic chose another candidate this time.",
-                    actorName: clinicName,
-                    deepLink: PROFESSIONAL_DASHBOARD_PENDING,
-                    subjectType: "application",
-                    subjectId: detail.applicationId,
-                });
-            }
+            // Intentionally not written to the in-app feed: declined
+            // applications already surface on the Professional History page
+            // (useProfessionalHistory tags them as "Rejected"), so an extra
+            // bell row would be redundant. The email side (event-to-email)
+            // still fires — pros who opt in to email get the heads-up.
             return drafts;
 
         case "application-withdrawn": {
