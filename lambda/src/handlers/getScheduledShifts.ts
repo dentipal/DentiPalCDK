@@ -8,7 +8,7 @@ import {
   QueryCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, findSoftDeletedClinicIds } from "./utils";
 import { corsHeaders } from "./corsHeaders";
 // Additive: read-time enrichment with live Clinics-table address. Never
 // mutates DynamoDB; on failure the response carries the original snapshot.
@@ -254,12 +254,36 @@ export const handler = async (
       };
     });
 
+    // Hide scheduled shifts at soft-deleted clinics — the shift won't
+    // happen because the clinic is gone, and a professional showing up to
+    // a phantom appointment is the worst possible UX. Historical
+    // (completed/cancelled) shifts are NOT in this listing anyway —
+    // they're served by getCompletedShifts.
+    let liveScheduledJobs: any[] = scheduledJobs as any[];
+    {
+      const shiftClinicIds = liveScheduledJobs
+        .map(j => j.clinicId as string | undefined)
+        .filter((id): id is string => !!id);
+      if (shiftClinicIds.length > 0) {
+        const deletedSet = await findSoftDeletedClinicIds(shiftClinicIds);
+        if (deletedSet.size > 0) {
+          const before = liveScheduledJobs.length;
+          liveScheduledJobs = liveScheduledJobs.filter(
+            j => !j.clinicId || !deletedSet.has(j.clinicId)
+          );
+          if (before !== liveScheduledJobs.length) {
+            console.log(`[getScheduledShifts] Dropped ${before - liveScheduledJobs.length} scheduled shift(s) at soft-deleted clinics`);
+          }
+        }
+      }
+    }
+
     // Additive: refresh address fields on each scheduled job with the live
     // Clinics-table values. DB rows are NOT mutated; on failure we log and
     // continue with the original snapshot.
-    let jobsForResponse: any[] = scheduledJobs as any[];
+    let jobsForResponse: any[] = liveScheduledJobs;
     try {
-      jobsForResponse = (await enrichRecordsWithLiveClinicAddress(scheduledJobs as any[])) as any[];
+      jobsForResponse = (await enrichRecordsWithLiveClinicAddress(liveScheduledJobs)) as any[];
     } catch (enrichErr) {
       console.warn(
         "[getScheduledShifts] live clinic-address enrichment skipped:",

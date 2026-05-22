@@ -215,6 +215,27 @@ export async function runBrowseJobPostings(
                 expectedOutcome: item.expected_outcome?.S || '',
             };
 
+            // Skip jobs whose owning clinic is soft-deleted. The cascade
+            // Lambda flips a soft-deleted clinic's jobs to status =
+            // "clinic_deleted", but if any path here ever reaches an active
+            // row for a soft-deleted clinic, this guard prevents leaking
+            // the clinic name + contact details to professionals.
+            if (job.clinicId && process.env.CLINICS_TABLE) {
+                try {
+                    const clinicCheck = await dynamodb.send(new GetItemCommand({
+                        TableName: process.env.CLINICS_TABLE,
+                        Key: { clinicId: { S: job.clinicId } },
+                        ProjectionExpression: "deletedAt",
+                    }));
+                    if (!clinicCheck.Item || clinicCheck.Item.deletedAt?.S) {
+                        continue; // skip this job entirely
+                    }
+                } catch (err) {
+                    console.warn(`[browseJobPostings] deletedAt check failed for clinic ${job.clinicId}:`, (err as Error).message);
+                    // Conservative: keep the job rather than hide live data on a transient error.
+                }
+            }
+
             try {
                 const clinicCommandInput: GetItemCommandInput = {
                     TableName: process.env.CLINIC_PROFILES_TABLE,

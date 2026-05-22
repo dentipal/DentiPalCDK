@@ -6,7 +6,7 @@ import {
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { APIGatewayProxyHandler, APIGatewayProxyResult } from "aws-lambda";
-import { extractAuthFromEvent, AuthContext } from "./utils";
+import { extractAuthFromEvent, AuthContext, findSoftDeletedClinicIds } from "./utils";
 import { corsHeaders } from "./corsHeaders";
 import {
   getProfessionalAvailability,
@@ -46,7 +46,10 @@ async function fetchClinicName(
   }
 
   // 2) Fallback: Clinics table keyed by clinicId. Covers legacy/test rows
-  //    where clinicUserSub is empty.
+  //    where clinicUserSub is empty. Also drops soft-deleted clinics so a
+  //    professional doesn't see the real clinic name on an invitation card
+  //    for a clinic that's pending permanent removal — the frontend's
+  //    fallback hook will render "Clinic no longer available" instead.
   if (clinicId) {
     const cidKey = `cid:${clinicId}`;
     if (cache.has(cidKey)) return cache.get(cidKey);
@@ -54,9 +57,13 @@ async function fetchClinicName(
       const resp = await dynamodb.send(new GetItemCommand({
         TableName: CLINICS_TABLE,
         Key: { clinicId: { S: clinicId } },
-        ProjectionExpression: "#n",
+        ProjectionExpression: "#n, deletedAt",
         ExpressionAttributeNames: { "#n": "name" },
       }));
+      if (resp.Item?.deletedAt?.S) {
+        cache.set(cidKey, undefined);
+        return undefined;
+      }
       const name = resp.Item?.name?.S || "";
       if (name) {
         cache.set(cidKey, name);
@@ -160,7 +167,7 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
     getScheduledOccurrences(professionalUserSub),
   ]);
 
-  const invitations: any[] = [];
+  let invitations: any[] = [];
   const clinicNameCache = new Map<string, string>();
 
   for (const item of allItems) {
@@ -278,6 +285,24 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
   }
 
   invitations.sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
+
+  // Hide ALL invitations from soft-deleted clinics. An invitation is an
+  // outstanding offer to apply — once the clinic is gone, the offer is
+  // meaningless and showing it would just clutter the professional's
+  // dashboard. No historical-archive case to preserve here.
+  const inviteClinicIds = invitations
+    .map((i: any) => i.clinicId as string | undefined)
+    .filter((id): id is string => !!id);
+  if (inviteClinicIds.length > 0) {
+    const deletedSet = await findSoftDeletedClinicIds(inviteClinicIds);
+    if (deletedSet.size > 0) {
+      const before = invitations.length;
+      invitations = invitations.filter((i: any) => !i.clinicId || !deletedSet.has(i.clinicId));
+      if (before !== invitations.length) {
+        console.log(`[getJobInvitations] Dropped ${before - invitations.length} invitation(s) from soft-deleted clinics`);
+      }
+    }
+  }
 
   return {
     status: 200,

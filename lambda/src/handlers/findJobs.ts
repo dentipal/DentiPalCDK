@@ -159,11 +159,15 @@ async function fetchClinicGeo(clinicId: string): Promise<ClinicGeo | undefined> 
     const resp = await dynamodb.send(new GetItemCommand({
       TableName: process.env.CLINICS_TABLE,
       Key: { clinicId: { S: clinicId } },
-      ProjectionExpression: "lat, lng, addressLine1, city, #st, pincode",
+      ProjectionExpression: "lat, lng, addressLine1, city, #st, pincode, deletedAt",
       ExpressionAttributeNames: { "#st": "state" },
     }));
 
     if (!resp.Item) return undefined;
+    // Skip soft-deleted clinics — their jobs should already be hidden by the
+    // status flip, but if findJobs ever reaches a row for a soft-deleted
+    // clinic, don't enrich it with geo so it can't be located on the map.
+    if (resp.Item.deletedAt?.S) return undefined;
     const item = resp.Item;
     return {
       lat: toNumber(item.lat),
