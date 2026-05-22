@@ -29,17 +29,8 @@ export interface ChatSession {
   ttl: number;
   slotBuffer?: Record<string, any>;
   recentSearchResults?: any[];
-  pendingPreview?: {
-    previewToken: string;
-    toolName: string;
-    payload: Record<string, any>;
-    createdAt: number;
-  };
   /** Cached user context (profile, address, clinics) fetched at bootstrap. */
   userContext?: Record<string, any>;
-  /** True after the context preamble has been injected into the agent's first
-   *  inputText. Persists across turns of the same 15-min session. */
-  contextInjected?: boolean;
   /** Cognito groups the user belongs to, fetched at bootstrap via AdminGetUser.
    *  Source of truth for agent-type derivation and downstream RBAC checks
    *  (canWriteClinic etc.). Replaces the empty array we used to pass. */
@@ -203,38 +194,6 @@ export async function setRecentSearchResults(
   }));
 }
 
-/** Record a pending preview so a matching confirm_* call can be verified server-side. */
-export async function setPendingPreview(
-  userSub: string,
-  connectionId: string,
-  toolName: string,
-  payload: Record<string, any>
-): Promise<string> {
-  const previewToken = uuidv4();
-  const now = nowSec();
-  await ddb.send(new UpdateCommand({
-    TableName: CHAT_CONNECTIONS_TABLE,
-    Key: { userSub, connectionId },
-    UpdateExpression: "SET pendingPreview = :p, lastActivityAt = :now, #ttl = :ttl",
-    ExpressionAttributeNames: { "#ttl": "ttl" },
-    ExpressionAttributeValues: {
-      ":p": { previewToken, toolName, payload, createdAt: now },
-      ":now": now,
-      ":ttl": now + SESSION_TTL_SECONDS,
-    },
-  }));
-  return previewToken;
-}
-
-/** Clear pendingPreview after a successful confirm_*. */
-export async function clearPendingPreview(userSub: string, connectionId: string): Promise<void> {
-  await ddb.send(new UpdateCommand({
-    TableName: CHAT_CONNECTIONS_TABLE,
-    Key: { userSub, connectionId },
-    UpdateExpression: "REMOVE pendingPreview",
-  }));
-}
-
 /** Cache fetched user context (profile + address + clinics) on the session row. */
 export async function setUserContext(
   userSub: string,
@@ -277,12 +236,3 @@ export async function setUserGroupsAndAgentType(
   }));
 }
 
-/** Mark the context preamble as injected so we don't repeat it on subsequent turns. */
-export async function markContextInjected(userSub: string, connectionId: string): Promise<void> {
-  await ddb.send(new UpdateCommand({
-    TableName: CHAT_CONNECTIONS_TABLE,
-    Key: { userSub, connectionId },
-    UpdateExpression: "SET contextInjected = :t",
-    ExpressionAttributeValues: { ":t": true },
-  }));
-}

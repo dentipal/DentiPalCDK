@@ -9,6 +9,7 @@ import { corsHeaders } from "./corsHeaders";
 import { extractUserFromBearerToken } from "./utils";
 import { clearUserMemory } from "./chat/agentCoreMemory";
 import { clearChatHistory } from "./chat/chatHistoryStore";
+import { clearAllConversations } from "./chat/conversationStore";
 
 // --- AWS SDK Clients Initialization ---
 const REGION = process.env.REGION || "us-east-1";
@@ -85,13 +86,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         }));
 
         // 4. Best-effort: clear AgentCore Memory records (summaries +
-        //    preferences) AND the user-facing chat transcript log for this
-        //    user. Both helpers handle errors internally and short-circuit
-        //    if their env vars aren't set, so this is safe to call even
-        //    before the CDK env-var grant lands on this Lambda.
+        //    preferences), the user-facing chat transcript log, AND every
+        //    sidebar conversation row for this user. All three helpers
+        //    handle errors internally and short-circuit if their env vars
+        //    aren't set, so this is safe to call even before the CDK
+        //    env-var grant lands on this Lambda.
         await Promise.all([
             clearUserMemory(userSub),
             clearChatHistory(userSub),
+            clearAllConversations(userSub),
         ]);
 
         return json(event, 200, {
