@@ -23,7 +23,7 @@ const CLINICS_TABLE = process.env.CLINICS_TABLE || "DentiPal-V5-Clinics";
 async function fetchClinicName(
   clinicUserSub: string,
   clinicId: string,
-  cache: Map<string, string>
+  cache: Map<string, string | undefined>
 ): Promise<string | undefined> {
   // 1) Preferred: ClinicProfiles keyed by userSub.
   if (clinicUserSub) {
@@ -168,7 +168,7 @@ export async function runGetJobInvitations(auth: AuthContext): Promise<GetJobInv
   ]);
 
   let invitations: any[] = [];
-  const clinicNameCache = new Map<string, string>();
+  const clinicNameCache = new Map<string, string | undefined>();
 
   for (const item of allItems) {
     const invitation: any = {
