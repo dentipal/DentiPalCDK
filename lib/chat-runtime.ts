@@ -39,7 +39,9 @@ export interface ChatRuntimeProps {
   region: string;
   /** Set once WS-3 ChatGateway construct runs. Empty string when chatbot
    *  is gated on with WS-3 not yet wired — the runtime starts up but
-   *  reports no tools. */
+   *  reports no tools. Hybrid-migration note: not used by the orchestrator
+   *  since Deploy 3 (Bedrock Agents owns tool dispatch); kept in props
+   *  for transitional compatibility, will be dropped in Deploy 4 cleanup. */
   gatewayMcpUrl?: string;
   /** AgentCore Memory id — same memory the legacy chatMessage Lambda
    *  already writes to. Runtime reads + writes via @aws-sdk/client-bedrock-agentcore. */
@@ -47,6 +49,17 @@ export interface ChatRuntimeProps {
   /** OPTIONAL: pin to specific Cognito app client ids. Omit to accept any
    *  app client in the pool. */
   allowedClientIds?: string[];
+
+  /** Bedrock Agents IDs + alias IDs — read by the runtime container's
+   *  orchestrator (runtime/shared/orchestrator.ts) to call InvokeAgent
+   *  for the correct per-role agent. Sourced from the ChatBedrockAgents
+   *  construct (lib/chat-bedrock-agents.ts) via cross-construct refs. */
+  bedrockProAgentId: string;
+  bedrockProAgentAliasId: string;
+  bedrockClinicAgentId: string;
+  bedrockClinicAgentAliasId: string;
+  bedrockPublicAgentId: string;
+  bedrockPublicAgentAliasId: string;
 }
 
 export class ChatRuntime extends Construct {
@@ -160,13 +173,33 @@ export class ChatRuntime extends Construct {
       ],
     }));
 
-    // AgentCore Gateway MCP — call the gateway as a tool source. The
-    // gateway authorizes JWT separately; this role just needs to be able
-    // to reach the gateway endpoint.
+    // Bedrock Agents InvokeAgent — the orchestrator (runtime/shared/
+    // orchestrator.ts) calls this per turn. Scope to the 3 specific
+    // agent ARNs + their alias subresources (each alias gets its own
+    // ARN suffix that InvokeAgent's IAM action validates against).
+    const acct = cdk.Stack.of(this).account;
+    runtimeRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["bedrock:InvokeAgent"],
+      resources: [
+        `arn:aws:bedrock:${props.region}:${acct}:agent/${props.bedrockProAgentId}`,
+        `arn:aws:bedrock:${props.region}:${acct}:agent/${props.bedrockClinicAgentId}`,
+        `arn:aws:bedrock:${props.region}:${acct}:agent/${props.bedrockPublicAgentId}`,
+        `arn:aws:bedrock:${props.region}:${acct}:agent-alias/${props.bedrockProAgentId}/${props.bedrockProAgentAliasId}`,
+        `arn:aws:bedrock:${props.region}:${acct}:agent-alias/${props.bedrockClinicAgentId}/${props.bedrockClinicAgentAliasId}`,
+        `arn:aws:bedrock:${props.region}:${acct}:agent-alias/${props.bedrockPublicAgentId}/${props.bedrockPublicAgentAliasId}`,
+      ],
+    }));
+
+    // Legacy InvokeGateway grant from the LangGraph era — kept for
+    // backward compat until Deploy 4 cleanup removes the Gateway entirely.
+    // Harmless if Gateway is gone; the policy statement just doesn't match
+    // any real resource. Removing it cleanly requires a separate deploy
+    // because IAM resource scoping has its own race conditions with the
+    // role updates.
     runtimeRole.addToPolicy(new iam.PolicyStatement({
       actions: ["bedrock-agentcore:InvokeGateway"],
       resources: [
-        `arn:aws:bedrock-agentcore:${props.region}:${cdk.Stack.of(this).account}:gateway/*`,
+        `arn:aws:bedrock-agentcore:${props.region}:${acct}:gateway/*`,
       ],
     }));
 
@@ -199,10 +232,18 @@ export class ChatRuntime extends Construct {
     void props.allowedClientIds;
 
     const sharedEnv: Record<string, string> = {
-      // The runtime container reads these on init. Same shape the legacy
-      // chatMessage Lambda uses.
-      ...(props.gatewayMcpUrl ? { AGENTCORE_GATEWAY_MCP_URL: props.gatewayMcpUrl } : {}),
+      // Bedrock Agents IDs + alias IDs — orchestrator.ts reads these to
+      // call InvokeAgent for the correct per-role agent.
+      BEDROCK_AGENT_PRO_ID: props.bedrockProAgentId,
+      BEDROCK_AGENT_PRO_ALIAS_ID: props.bedrockProAgentAliasId,
+      BEDROCK_AGENT_CLINIC_ID: props.bedrockClinicAgentId,
+      BEDROCK_AGENT_CLINIC_ALIAS_ID: props.bedrockClinicAgentAliasId,
+      BEDROCK_AGENT_PUBLIC_ID: props.bedrockPublicAgentId,
+      BEDROCK_AGENT_PUBLIC_ALIAS_ID: props.bedrockPublicAgentAliasId,
+      // AgentCore Memory — read at hydrate time, written at end of turn.
       ...(props.agentCoreMemoryId ? { AGENTCORE_MEMORY_ID: props.agentCoreMemoryId } : {}),
+      // Gateway URL kept for transitional compat (Deploy 4 will drop).
+      ...(props.gatewayMcpUrl ? { AGENTCORE_GATEWAY_MCP_URL: props.gatewayMcpUrl } : {}),
       // NODE_OPTIONS lets us bump heap if a single turn pulls heavy
       // context. 512MB headroom matches the WS-3 dispatcher Lambda.
       NODE_OPTIONS: "--max-old-space-size=768",
@@ -253,19 +294,24 @@ export class ChatRuntime extends Construct {
     // creates a new one with AWS_IAM). Names also get _v2 to satisfy the
     // service's "name must be unique per account" check during the brief
     // overlap when both old and new exist mid-deploy.
+    // Bumped V4 -> V5 to force-replace the running container so the SSE
+    // yield-wrapping fix in server.ts ({ data: ev } envelope) actually
+    // ships. AgentCore Runtime accepts CFN updates to AgentRuntimeArtifact
+    // silently but keeps the old warm container alive -- construct-ID bump
+    // is the only observed-reliable way to roll the container.
     const proRuntime = makeRuntime(
-      "ProfessionalRuntimeV2",
-      "DentiPal_ProfessionalAgent_v2",
+      "ProfessionalRuntimeV5",
+      "DentiPal_ProfessionalAgent_v5",
       "dist/professional/index.js",
     );
     const clinicRuntime = makeRuntime(
-      "ClinicRuntimeV2",
-      "DentiPal_ClinicAgent_v2",
+      "ClinicRuntimeV5",
+      "DentiPal_ClinicAgent_v5",
       "dist/clinic/index.js",
     );
     const publicRuntime = makeRuntime(
-      "PublicRuntimeV2",
-      "DentiPal_PublicAgent_v2",
+      "PublicRuntimeV5",
+      "DentiPal_PublicAgent_v5",
       "dist/public/index.js",
     );
 

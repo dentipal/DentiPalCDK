@@ -173,6 +173,9 @@ import { handler as cancelPromotionHandler } from "./handlers/cancelPromotion";
 import { handler as activatePromotionHandler } from "./handlers/activatePromotion";
 import { handler as trackPromotionClickHandler } from "./handlers/trackPromotionClick";
 
+// Stripe webhook — public endpoint, auth via signature (no Cognito).
+import { handler as stripeWebhookHandler } from "./handlers/stripeWebhook";
+
 // Internal admin portal — bootstrap public auth + team management.
 import { handler as bootstrapStatusHandler } from "./handlers/admin/bootstrapStatus";
 import { handler as bootstrapAdminHandler } from "./handlers/admin/bootstrapAdmin";
@@ -556,6 +559,11 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "PUT:/promotions/{promotionId}/cancel": cancelPromotionHandler,
         "PUT:/promotions/{promotionId}/activate": activatePromotionHandler,
         "POST:/promotions/track-click": trackPromotionClickHandler,
+
+        // Stripe webhook — Stripe POSTs here when a checkout session
+        // completes. NO auth header; authenticity is verified via the
+        // stripe-signature header inside the handler.
+        "POST:/webhooks/stripe": stripeWebhookHandler,
 
         // Notification preferences
         "GET:/notifications/preferences": getNotificationPreferencesHandler,

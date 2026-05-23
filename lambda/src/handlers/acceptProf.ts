@@ -28,6 +28,10 @@ const REGION: string = process.env.AWS_REGION || process.env.REGION || "us-east-
 const JOB_APPLICATIONS_TABLE = process.env.JOB_APPLICATIONS_TABLE!;
 const JOB_POSTINGS_TABLE = process.env.JOB_POSTINGS_TABLE!;
 const JOB_NEGOTIATIONS_TABLE = process.env.JOB_NEGOTIATIONS_TABLE!;
+// Optional — only used to expire still-outstanding invitations when this hire
+// fills the last seat. Missing env var is non-fatal: the invitation-expire
+// sweep below skips itself and logs a warning instead of failing the hire.
+const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE;
 
 const numFromAttr = (v: AttributeValue | undefined): number | null => {
     if (!v) return null;
@@ -541,6 +545,76 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     error: (err as Error).message,
                 });
             }
+
+            // --- Auto-expire any still-outstanding invitations ---
+            // When the job fills, invitees who haven't responded yet should not
+            // be able to claim a (now non-existent) seat. Flip their JobInvitations
+            // row from "sent" → "expired" so the pro UI hides the Accept/Decline
+            // CTA and shows a "Position filled" notice instead. Best-effort:
+            // failures are logged but never unwind the successful hire.
+            if (JOB_INVITATIONS_TABLE) {
+                try {
+                    const pendingInvitesRes = await dynamo.send(new QueryCommand({
+                        TableName: JOB_INVITATIONS_TABLE,
+                        KeyConditionExpression: "jobId = :jid",
+                        FilterExpression:
+                            "(attribute_not_exists(invitationStatus) OR invitationStatus = :sent) " +
+                            "AND professionalUserSub <> :hired",
+                        ExpressionAttributeValues: {
+                            ":jid": { S: jobId },
+                            ":sent": { S: "sent" },
+                            ":hired": { S: professionalUserSub },
+                        },
+                        ProjectionExpression: "jobId, professionalUserSub",
+                    }));
+
+                    const expireIso = new Date().toISOString();
+                    await Promise.allSettled(
+                        (pendingInvitesRes.Items || []).map(async (it) => {
+                            const inviteeSub = it.professionalUserSub?.S;
+                            if (!inviteeSub) return;
+                            try {
+                                await dynamo.send(new UpdateItemCommand({
+                                    TableName: JOB_INVITATIONS_TABLE,
+                                    Key: {
+                                        jobId: { S: jobId },
+                                        professionalUserSub: { S: inviteeSub },
+                                    },
+                                    UpdateExpression:
+                                        "SET invitationStatus = :expired, updatedAt = :now, expiredAt = :now, expiredReason = :reason",
+                                    // Idempotent: only flip if still "sent" (or attribute missing).
+                                    // Anyone who accepted/declined/negotiated between Query and Update
+                                    // is left untouched — the condition fails and lands in catch.
+                                    ConditionExpression:
+                                        "attribute_not_exists(invitationStatus) OR invitationStatus = :sent",
+                                    ExpressionAttributeValues: {
+                                        ":expired": { S: "expired" },
+                                        ":sent": { S: "sent" },
+                                        ":now": { S: expireIso },
+                                        ":reason": { S: "job_filled" },
+                                    },
+                                }));
+                            } catch (expErr) {
+                                const name = (expErr as { name?: string })?.name;
+                                if (name !== "ConditionalCheckFailedException") {
+                                    console.warn("[acceptProf] Invitation expire failed (non-fatal):", {
+                                        jobId,
+                                        inviteeSub,
+                                        error: (expErr as Error).message,
+                                    });
+                                }
+                            }
+                        })
+                    );
+                } catch (err) {
+                    console.warn("[acceptProf] Invitation-expire sweep failed (non-fatal):", {
+                        jobId,
+                        error: (err as Error).message,
+                    });
+                }
+            } else {
+                console.warn("[acceptProf] JOB_INVITATIONS_TABLE env var not set — skipping invitation expire sweep", { jobId });
+            }
         }
 
         if (clinicId) {
@@ -607,6 +681,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 itemClinicId: matchingItem.clinicId?.S,
             });
         }
+
+        // Note: the auto-reject sweep is intentionally NOT duplicated here.
+        // It runs once, gated by `positionsAreFilled` in Step 9 above. An
+        // unconditional sweep at this point would break the multi-position
+        // model — e.g. after the 1st of 3 hires, the other 67 applicants
+        // would be incorrectly auto-rejected while 2 seats are still open.
 
         return json(event, 200, {
             message: "Professional accepted and status updated to scheduled",

@@ -75,7 +75,12 @@ interface DynamoDBProfileItem {
     last_name?: AttributeValue;
     role?: AttributeValue;
     specialties?: AttributeValue; // SS
-    years_of_experience?: AttributeValue; // N
+    // The create/update handlers persist this attribute as `yearsExperience`
+    // (camelCase, mirroring the frontend payload key). Older rows may carry
+    // the snake_case `years_of_experience` form. Read whichever is present.
+    yearsExperience?: AttributeValue;       // N — current
+    years_of_experience?: AttributeValue;   // N — legacy
+    yearsOfExperience?: AttributeValue;     // N — alt legacy
     [key: string]: AttributeValue | undefined;
 }
 
@@ -257,7 +262,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             // Extract and transform profile fields
             const dentalSoftwareExperience: string[] = item.dental_software_experience?.SS || [];
             const specialties: string[] = item.specialties?.SS || [];
-            const yearsOfExperience: number = item.years_of_experience?.N ? parseInt(item.years_of_experience.N, 10) : 0;
+
+            // Years of experience: the writer stores `yearsExperience` (camelCase)
+            // — mirroring the frontend payload key — so prefer that. Fall back
+            // through the legacy snake_case and alt camelCase variants for rows
+            // written by older code paths. Without these fallbacks every profile
+            // reads as 0 and the Find Professionals card shows "Not specified".
+            const yearsRaw =
+                item.yearsExperience?.N ??
+                item.years_of_experience?.N ??
+                item.yearsOfExperience?.N;
+            const yearsParsed = yearsRaw ? parseFloat(yearsRaw) : NaN;
+            const yearsOfExperience: number = Number.isFinite(yearsParsed) ? yearsParsed : 0;
 
             // Denormalized rating aggregates written by submitProfessionalRating.
             // Read straight off the profile row — same source of truth used by

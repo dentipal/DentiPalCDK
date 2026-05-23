@@ -14,7 +14,7 @@
  */
 
 import { BedrockAgentCoreApp } from "bedrock-agentcore/runtime";
-import { runAgentTurn, RunEvent } from "./plan.js";
+import { runOrchestratedTurn, type RunEvent } from "./orchestrator.js";
 import { extractAuthFromInvocation, AuthContext } from "./auth.js";
 
 export interface ServerOptions {
@@ -65,7 +65,7 @@ export function startServer(opts: ServerOptions): void {
           // Pin to this container's role — never trust the caller's claim.
           auth.userType = opts.agentType;
         } catch (e: any) {
-          yield { type: "error", reason: "unauthorized", detail: e?.message || String(e) } satisfies RunEvent;
+          yield { data: { type: "error", reason: "unauthorized", detail: e?.message || String(e) } satisfies RunEvent };
           return;
         }
 
@@ -77,7 +77,7 @@ export function startServer(opts: ServerOptions): void {
           payload.prompt ||
           "";
         if (!userText || typeof userText !== "string") {
-          yield { type: "error", reason: "invalid_input", detail: "input.userText is required" } satisfies RunEvent;
+          yield { data: { type: "error", reason: "invalid_input", detail: "input.userText is required" } satisfies RunEvent };
           return;
         }
 
@@ -99,11 +99,11 @@ export function startServer(opts: ServerOptions): void {
         let done = false;
         let resolveWait: (() => void) | null = null;
 
-        const runPromise = runAgentTurn({
+        const runPromise = runOrchestratedTurn({
           auth,
           conversationId,
           userText,
-          onEvent: (ev) => {
+          onEvent: (ev: RunEvent) => {
             queue.push(ev);
             if (resolveWait) { resolveWait(); resolveWait = null; }
           },
@@ -116,10 +116,19 @@ export function startServer(opts: ServerOptions): void {
         // events; sleep on a promise between batches so the event loop
         // doesn't spin. Terminates when runAgentTurn finishes AND the
         // queue is empty.
+        //
+        // SSE wrapping: BedrockAgentCoreApp's _normalizeSSEChunk treats any
+        // yielded object with a top-level `data` field as a finished
+        // SSESource and serializes ONLY that `data` field — dropping any
+        // other keys (our `type`, `tool`, `ok`). Tokens accidentally worked
+        // because they had no `data` field. To make every RunEvent survive
+        // the round trip intact, wrap as `{ data: ev }` so the whole event
+        // becomes the SSE payload. The chatMessage Lambda's runtimeInvoker
+        // then JSON-parses one full RunEvent per `data:` line.
         while (true) {
           while (queue.length > 0) {
             const ev = queue.shift()!;
-            yield ev;
+            yield { data: ev };
           }
           if (done) break;
           await new Promise<void>((resolve) => { resolveWait = resolve; });

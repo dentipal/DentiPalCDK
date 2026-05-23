@@ -41,6 +41,7 @@ import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as path from "path";
 import { ChatGateway } from "./chat-gateway";
 import { ChatRuntime } from "./chat-runtime";
+import { ChatBedrockAgents } from "./chat-bedrock-agents";
 
 export interface ChatbotStackProps extends cdk.StackProps {
   /** Cognito user pool ID (string, NOT a construct reference). The chatbot
@@ -92,6 +93,14 @@ export const CHATBOT_EXPORTS = {
   clinicAgentArn: "DentiPalClinicAgentRuntimeArn",
   publicAgentArn: "DentiPalPublicAgentRuntimeArn",
   gatewayMcpUrl: "DentiPalChatGatewayMcpUrl",
+  // Bedrock Agents IDs + aliases (Deploy 1 of the hybrid migration).
+  // Read by the runtime container's orchestrator to call InvokeAgent.
+  bedrockProAgentId: "DentiPalBedrockProAgentId",
+  bedrockClinicAgentId: "DentiPalBedrockClinicAgentId",
+  bedrockPublicAgentId: "DentiPalBedrockPublicAgentId",
+  bedrockProAgentAliasId: "DentiPalBedrockProAgentAliasId",
+  bedrockClinicAgentAliasId: "DentiPalBedrockClinicAgentAliasId",
+  bedrockPublicAgentAliasId: "DentiPalBedrockPublicAgentAliasId",
 } as const;
 
 export class ChatbotStack extends cdk.Stack {
@@ -99,6 +108,7 @@ export class ChatbotStack extends cdk.Stack {
   readonly previewGatesTable: dynamodb.Table;
   readonly chatGateway: ChatGateway;
   readonly chatRuntime: ChatRuntime;
+  readonly chatBedrockAgents: ChatBedrockAgents;
 
   constructor(scope: Construct, id: string, props: ChatbotStackProps) {
     super(scope, id, props);
@@ -220,6 +230,38 @@ export class ChatbotStack extends cdk.Stack {
       resources: [userPool.userPoolArn],
     }));
 
+    // GSI access. dynamodb.Table.fromTableName creates an ITable that only
+    // knows the base table ARN — grantReadWriteData scopes IAM to
+    // table/<name>, NOT table/<name>/index/*. Tools that query a GSI (e.g.
+    // search_jobs_near_me hits professionalUserSub-index on JobApplications)
+    // then fail with AccessDenied. Blanket-grant Query/Scan on every
+    // index/* under the tables the dispatcher touches.
+    chatGatewayDispatcher.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:Query", "dynamodb:Scan"],
+      resources: [
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.chatMessages}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.chatConnections}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.connections}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.jobPostings}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.jobApplications}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.jobInvitations}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.jobNegotiations}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.clinicProfiles}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.clinics}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.clinicFavorites}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.userClinicAssignments}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.professionalProfiles}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.userAddresses}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.notificationPreferences}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.feedback}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.referrals}/index/*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/${t.jobPromotions}/index/*`,
+        // Two tables the chatbot owns directly.
+        `${this.chatConversationsTable.tableArn}/index/*`,
+        `${this.previewGatesTable.tableArn}/index/*`,
+      ],
+    }));
+
     // ────────────────────────────────────────────────────────────────
     // AgentCore Gateway + Runtime constructs
     // ────────────────────────────────────────────────────────────────
@@ -231,12 +273,25 @@ export class ChatbotStack extends cdk.Stack {
       allowedClientIds: [props.userPoolClientId],
     });
 
+    // Bedrock Agents (managed agent loop) — declared BEFORE ChatRuntime
+    // because the orchestrator inside the runtime container needs the
+    // agent IDs as env vars.
+    this.chatBedrockAgents = new ChatBedrockAgents(this, "ChatBedrockAgents", {
+      dispatcherLambda: chatGatewayDispatcher,
+    });
+
     this.chatRuntime = new ChatRuntime(this, "DentiPalChatRuntime", {
       userPool,
       region: this.region,
       gatewayMcpUrl: this.chatGateway.mcpUrl,
       agentCoreMemoryId: props.chatMemoryId,
       allowedClientIds: [props.userPoolClientId],
+      bedrockProAgentId: this.chatBedrockAgents.professionalAgentId,
+      bedrockProAgentAliasId: this.chatBedrockAgents.professionalAgentAliasId,
+      bedrockClinicAgentId: this.chatBedrockAgents.clinicAgentId,
+      bedrockClinicAgentAliasId: this.chatBedrockAgents.clinicAgentAliasId,
+      bedrockPublicAgentId: this.chatBedrockAgents.publicAgentId,
+      bedrockPublicAgentAliasId: this.chatBedrockAgents.publicAgentAliasId,
     });
 
     // ────────────────────────────────────────────────────────────────
@@ -286,6 +341,33 @@ export class ChatbotStack extends cdk.Stack {
     new cdk.CfnOutput(this, "PublicAgentRuntimeArnOut", {
       exportName: CHATBOT_EXPORTS.publicAgentArn,
       value: this.chatRuntime.publicAgentArn,
+    });
+
+    // Bedrock Agents IDs + alias IDs — exported so the runtime container
+    // (Deploy 3) can read them as env vars and call InvokeAgent.
+    new cdk.CfnOutput(this, "BedrockProAgentIdOut", {
+      exportName: CHATBOT_EXPORTS.bedrockProAgentId,
+      value: this.chatBedrockAgents.professionalAgentId,
+    });
+    new cdk.CfnOutput(this, "BedrockClinicAgentIdOut", {
+      exportName: CHATBOT_EXPORTS.bedrockClinicAgentId,
+      value: this.chatBedrockAgents.clinicAgentId,
+    });
+    new cdk.CfnOutput(this, "BedrockPublicAgentIdOut", {
+      exportName: CHATBOT_EXPORTS.bedrockPublicAgentId,
+      value: this.chatBedrockAgents.publicAgentId,
+    });
+    new cdk.CfnOutput(this, "BedrockProAgentAliasIdOut", {
+      exportName: CHATBOT_EXPORTS.bedrockProAgentAliasId,
+      value: this.chatBedrockAgents.professionalAgentAliasId,
+    });
+    new cdk.CfnOutput(this, "BedrockClinicAgentAliasIdOut", {
+      exportName: CHATBOT_EXPORTS.bedrockClinicAgentAliasId,
+      value: this.chatBedrockAgents.clinicAgentAliasId,
+    });
+    new cdk.CfnOutput(this, "BedrockPublicAgentAliasIdOut", {
+      exportName: CHATBOT_EXPORTS.bedrockPublicAgentAliasId,
+      value: this.chatBedrockAgents.publicAgentAliasId,
     });
   }
 }

@@ -23,6 +23,7 @@ export type GatewayNormalizer =
   | "clinicIds"
   | "professionalRole"
   | "dates"
+  | "payTypeAlias"
   | "applicationStatusFilter"
   | "dayDateRangeFilter"
   | "actionableApplicants"
@@ -74,6 +75,13 @@ const NUMBER = { type: "number" };
 const STRING = { type: "string" };
 const BOOL = { type: "boolean" };
 const STRING_ARRAY = { type: "array", items: { type: "string" } };
+// Mirror of VALID_PAY_TYPES in createTemporaryJob / createMultiDayConsulting /
+// createPermanentJob handlers. Without this enum the agent LLM guesses
+// values like "hourly" / "salary" and the handler rejects with
+// `Invalid pay type`; on retry the new `per_hour` value differs from the
+// previewed `hourly`, tripping the previewGate diff guard. Enum keeps the
+// agent on the rails on the first call.
+const PAY_TYPE_ENUM = { type: "string", enum: ["per_hour", "per_transaction", "percentage_of_revenue"] };
 
 // =========================================================================
 // PROFESSIONAL AGENT TOOLS
@@ -101,8 +109,13 @@ export const SEARCH_JOBS_NEAR_ME: ToolDefinition = {
 };
 
 export const GET_JOB_DETAILS: ToolDefinition = {
-  name: "get_job_details", bucket: "info", scope: "both",
-  description: "Get full details for a job by jobId.",
+  // CLINIC-ONLY: handler getJobPosting.ts keys by (clinicUserSub=caller, jobId),
+  // so only the clinic that owns the posting can fetch it. Professionals see
+  // the same job data via search_jobs_near_me result cards, so exposing this
+  // to the pro agent just produces "Job not found or access denied" 500s
+  // before an apply flow. Scope flipped from "both" to "clinic".
+  name: "get_job_details", bucket: "info", scope: "clinic",
+  description: "Get full details for a job by jobId. Clinic-only — the caller must be the clinic that posted the job.",
   inputSchema: { type: "object", required: ["jobId"], properties: { jobId: STRING } },
   gateway: { handlerModule: "getJobPosting", method: "GET", inputShape: "path", pathParamKey: "jobId" },
 };
@@ -511,6 +524,22 @@ export const GET_ACTION_NEEDED: ToolDefinition = {
   gateway: { handlerModule: "getActionNeeded", method: "GET", inputShape: "path", pathParamKey: "clinicId" },
 };
 
+export const GET_MY_POSTED_JOBS: ToolDefinition = {
+  // Aggregated "all jobs across all my clinics" view. The dispatcher's
+  // composed virtual handler fans out get_my_clinics -> get_open_shifts per
+  // clinic, merges + sorts newest-first. Mirror of the dashboard's "my
+  // posted jobs" page. PREFER over a manual get_my_clinics -> per-clinic
+  // get_open_shifts loop -- this one returns in a single round-trip.
+  name: "get_my_posted_jobs", bucket: "info", scope: "clinic",
+  description:
+    "List all jobs the clinic admin has posted across every clinic they manage, newest first. " +
+    "Use for 'show my jobs', 'available jobs', 'recent postings', 'list my postings', etc. " +
+    "Returns {jobs:[...]} with clinicName tagged on each row so the user can tell which clinic owns which job. " +
+    "PREFER this over chaining get_my_clinics -> get_open_shifts per clinic -- it does the fan-out for you.",
+  inputSchema: { type: "object", properties: {} },
+  gateway: { handlerModule: "getMyPostedJobs", method: "GET", inputShape: "query" },
+};
+
 export const GET_OPEN_SHIFTS: ToolDefinition = {
   name: "get_open_shifts", bucket: "info", scope: "clinic",
   description:
@@ -565,14 +594,14 @@ export const PREVIEW_POST_TEMPORARY_JOB: ToolDefinition = {
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       date: STRING, shift_speciality: STRING, hours: NUMBER, rate: NUMBER,
-      pay_type: STRING, start_time: STRING, end_time: STRING, meal_break: STRING,
+      pay_type: PAY_TYPE_ENUM, start_time: STRING, end_time: STRING, meal_break: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
       assisted_hygiene: BOOL,
       work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
       positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "payTypeAlias"] },
 };
 
 export const CONFIRM_POST_TEMPORARY_JOB: ToolDefinition = {
@@ -586,14 +615,14 @@ export const CONFIRM_POST_TEMPORARY_JOB: ToolDefinition = {
       previewToken: STRING,
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       date: STRING, shift_speciality: STRING, hours: NUMBER, rate: NUMBER,
-      pay_type: STRING, start_time: STRING, end_time: STRING, meal_break: STRING,
+      pay_type: PAY_TYPE_ENUM, start_time: STRING, end_time: STRING, meal_break: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
       assisted_hygiene: BOOL,
       work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
       positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "createTemporaryJob", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
+  gateway: { handlerModule: "createTemporaryJob", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "payTypeAlias"] },
 };
 
 export const PREVIEW_POST_CONSULTING_JOB: ToolDefinition = {
@@ -605,7 +634,7 @@ export const PREVIEW_POST_CONSULTING_JOB: ToolDefinition = {
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       dates: STRING_ARRAY, total_days: NUMBER, hours_per_day: NUMBER,
-      shift_speciality: STRING, rate: NUMBER, pay_type: STRING,
+      shift_speciality: STRING, rate: NUMBER, pay_type: PAY_TYPE_ENUM,
       start_time: STRING, end_time: STRING, meal_break: STRING,
       project_duration: STRING, job_title: STRING, job_description: STRING,
       requirements: STRING_ARRAY,
@@ -613,7 +642,7 @@ export const PREVIEW_POST_CONSULTING_JOB: ToolDefinition = {
       positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "dates"] },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "dates", "payTypeAlias"] },
 };
 
 export const CONFIRM_POST_CONSULTING_JOB: ToolDefinition = {
@@ -626,14 +655,14 @@ export const CONFIRM_POST_CONSULTING_JOB: ToolDefinition = {
     properties: {
       previewToken: STRING, clinicIds: STRING_ARRAY, professional_role: STRING,
       professional_roles: STRING_ARRAY, dates: STRING_ARRAY, total_days: NUMBER,
-      hours_per_day: NUMBER, shift_speciality: STRING, rate: NUMBER, pay_type: STRING,
+      hours_per_day: NUMBER, shift_speciality: STRING, rate: NUMBER, pay_type: PAY_TYPE_ENUM,
       start_time: STRING, end_time: STRING, meal_break: STRING, project_duration: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
       work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
       positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "createMultiDayConsulting", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "dates"] },
+  gateway: { handlerModule: "createMultiDayConsulting", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "dates", "payTypeAlias"] },
 };
 
 export const PREVIEW_POST_PERMANENT_JOB: ToolDefinition = {
@@ -650,10 +679,10 @@ export const PREVIEW_POST_PERMANENT_JOB: ToolDefinition = {
       vacation_days: NUMBER, work_schedule: STRING, start_date: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
       work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
-      pay_type: STRING, rate: NUMBER, positions_required: NUMBER,
+      pay_type: PAY_TYPE_ENUM, rate: NUMBER, positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "payTypeAlias"] },
 };
 
 export const CONFIRM_POST_PERMANENT_JOB: ToolDefinition = {
@@ -671,10 +700,10 @@ export const CONFIRM_POST_PERMANENT_JOB: ToolDefinition = {
       start_date: STRING, job_title: STRING, job_description: STRING,
       requirements: STRING_ARRAY,
       work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
-      pay_type: STRING, rate: NUMBER, positions_required: NUMBER,
+      pay_type: PAY_TYPE_ENUM, rate: NUMBER, positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "createPermanentJob", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
+  gateway: { handlerModule: "createPermanentJob", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "payTypeAlias"] },
 };
 
 export const PREVIEW_ACCEPT_PROFESSIONAL: ToolDefinition = {
@@ -852,7 +881,7 @@ export const PREVIEW_EDIT_JOB: ToolDefinition = {
     properties: {
       jobId: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      hours: NUMBER, rate: NUMBER, pay_type: STRING,
+      hours: NUMBER, rate: NUMBER, pay_type: PAY_TYPE_ENUM,
       start_time: STRING, end_time: STRING, meal_break: STRING,
       date: STRING, dates: STRING_ARRAY, hours_per_day: NUMBER, total_days: NUMBER,
       salary_min: NUMBER, salary_max: NUMBER, benefits: STRING_ARRAY,
@@ -872,7 +901,7 @@ export const CONFIRM_EDIT_JOB: ToolDefinition = {
     properties: {
       previewToken: STRING, jobId: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      hours: NUMBER, rate: NUMBER, pay_type: STRING,
+      hours: NUMBER, rate: NUMBER, pay_type: PAY_TYPE_ENUM,
       start_time: STRING, end_time: STRING, meal_break: STRING,
       date: STRING, dates: STRING_ARRAY, hours_per_day: NUMBER, total_days: NUMBER,
       salary_min: NUMBER, salary_max: NUMBER, benefits: STRING_ARRAY,
@@ -1097,7 +1126,7 @@ export const PROFESSIONAL_AGENT_TOOLS: ToolDefinition[] = [
 ];
 
 export const CLINIC_AGENT_TOOLS: ToolDefinition[] = [
-  GET_MY_CLINICS, GET_ACTION_NEEDED, GET_OPEN_SHIFTS, GET_SCHEDULED_SHIFTS,
+  GET_MY_CLINICS, GET_MY_POSTED_JOBS, GET_ACTION_NEEDED, GET_OPEN_SHIFTS, GET_SCHEDULED_SHIFTS,
   GET_COMPLETED_SHIFTS, LIST_APPLICANTS_FOR_JOB, GET_PROFESSIONAL_INFO,
   GET_CLINIC_FAVORITES, GET_JOB_DETAILS,
   // Escape hatch — see ddbQueryTool.ts. Use only when narrow tools above don't fit.
