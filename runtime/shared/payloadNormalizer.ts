@@ -127,7 +127,9 @@ function perToolRemap(toolName: string, body: any): any | null {
         return { professional: body.profiles };
       }
       return null;
-    case "get_open_shifts":
+    // get_open_shifts removed -- get_my_posted_jobs subsumes it. The
+    // get_my_posted_jobs handler returns body.jobs directly (no remap needed,
+    // hits Rule 1's discriminator check).
     case "get_scheduled_shifts":
     case "get_completed_shifts":
       // getClinicShifts returns `{ message, data: [...shifts...] }` -- array

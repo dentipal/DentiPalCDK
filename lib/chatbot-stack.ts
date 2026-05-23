@@ -230,6 +230,23 @@ export class ChatbotStack extends cdk.Stack {
       resources: [userPool.userPoolArn],
     }));
 
+    // EventBridge PutEvents on the default bus -- several handlers fan out
+    // domain events on write (respondToInvitation -> "invitation.accepted",
+    // createJobApplication -> "application.created", acceptProf ->
+    // "professional.hired", etc.) that downstream rules pick up to send
+    // emails / SMS / push notifications. Without this grant the handler
+    // logic completes but the PutEvents call raises AccessDenied, the
+    // handler catches it as Internal Server Error, and the chat surfaces
+    // it as a generic failure -- masking the fact that the actual write
+    // already happened (so the user retrying may double-act).
+    //
+    // Scoped to the default bus only; refactor to a named bus + per-source
+    // scoping later if event volume grows.
+    chatGatewayDispatcher.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["events:PutEvents"],
+      resources: [`arn:aws:events:${this.region}:${this.account}:event-bus/default`],
+    }));
+
     // GSI access. dynamodb.Table.fromTableName creates an ITable that only
     // knows the base table ARN — grantReadWriteData scopes IAM to
     // table/<name>, NOT table/<name>/index/*. Tools that query a GSI (e.g.

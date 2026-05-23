@@ -54,7 +54,13 @@ import {
 // cross-import fails. If you add a tool, update BOTH lists (the runtime
 // container also needs to know which tools its role can call).
 const PRO_TOOL_NAMES = new Set<string>([
-  "search_jobs_near_me", "get_job_details", "get_my_applications",
+  // get_job_details REMOVED from pro -- the underlying getJobPosting handler
+  // keys by (clinicUserSub=caller, jobId), so pros always get "Job not
+  // found or access denied". Pros see job data via search_jobs_near_me
+  // cards or invitation/application records they already received. Schema
+  // is also scope:"clinic", but PRO_TOOL_NAMES is the actual gate for what
+  // appears in the pro agent's action group.
+  "search_jobs_near_me", "get_my_applications",
   "get_my_invitations", "get_scheduled_shifts", "get_completed_shifts",
   "get_my_negotiations",
   "query_ddb_table",
@@ -66,7 +72,13 @@ const PRO_TOOL_NAMES = new Set<string>([
   // message even though apply_to_job is a single-shot zero-question tool.
   // For custom-rate applies the agent should use preview_negotiate AFTER
   // applying, not block the apply flow itself.
-  "preview_respond_invitation", "confirm_respond_invitation",
+  // preview_respond_invitation / confirm_respond_invitation REMOVED for
+  // the same reason as the apply pair: when both paths were exposed, the
+  // agent picked the heavier preview/confirm flow on Accept/Decline clicks
+  // and dropped the invitationId from the preview payload (preview render
+  // showed only "Response: accepted", with no ID, then confirm 400'd with
+  // "invitationId is required in path"). For counter-offers the agent has
+  // preview_negotiate -> confirm_negotiate as a separate path.
   "preview_withdraw_application", "confirm_withdraw_application",
   "preview_attest_completed_shift", "confirm_attest_completed_shift",
   "preview_update_my_profile", "confirm_update_my_profile",
@@ -77,10 +89,15 @@ const PRO_TOOL_NAMES = new Set<string>([
 ]);
 
 const CLINIC_TOOL_NAMES = new Set<string>([
-  "get_my_clinics", "get_my_posted_jobs", "get_action_needed", "get_open_shifts",
+  // get_open_shifts removed: get_my_posted_jobs now accepts optional
+  // clinicId + dayOfWeek + dateFrom/dateTo, covering both use cases.
+  "get_my_clinics", "get_my_posted_jobs", "get_sent_invitations", "get_action_needed",
   "get_scheduled_shifts", "get_completed_shifts",
   "list_applicants_for_job", "get_professional_info",
-  "get_clinic_favorites", "get_job_details",
+  // get_clinic_favorites REMOVED -- read-only listing tool, rarely needed via
+  // chat; pushed the action-group count over Bedrock Agents' 50-function
+  // cap. Clinic users still see favorites on the dashboard.
+  "get_job_details",
   "query_ddb_table",
   "preview_post_temporary_job", "confirm_post_temporary_job",
   "preview_post_consulting_job", "confirm_post_consulting_job",
@@ -95,7 +112,9 @@ const CLINIC_TOOL_NAMES = new Set<string>([
   "preview_edit_job", "confirm_edit_job",
   "preview_cancel_job", "confirm_cancel_job",
   "preview_add_clinic_favorite", "confirm_add_clinic_favorite",
-  "preview_remove_clinic_favorite", "confirm_remove_clinic_favorite",
+  // preview_remove_clinic_favorite / confirm_remove_clinic_favorite REMOVED
+  // for the 50-function cap. Add stays (the natural-language "favorite this
+  // pro" is common); remove via chat is rare and dashboard handles it.
   "search_professionals",
   "preview_invite_team_member", "confirm_invite_team_member",
   "preview_update_team_member", "confirm_update_team_member",
@@ -126,7 +145,8 @@ Tool selection:
 - "Show me jobs near me / Monday hygienist shifts / consulting gigs next week" -> search_jobs_near_me
 - "Apply to job <id>" -> apply_to_job (single-shot, no preview required for vanilla apply)
 - "What are my pending applications / scheduled shifts / completed shifts" -> get_my_applications, get_my_invitations, get_scheduled_shifts, get_completed_shifts
-- "Counter-offer / accept / decline an invitation" -> respond_invitation or preview_negotiate -> confirm_negotiate
+- "Accept invitation / decline invitation" -> respond_invitation (single-shot, no preview/confirm). MANDATORY: when the user message contains "invitationId=X", you MUST include that exact X as the invitationId argument. The single-shot tool requires invitationId in the path. NEVER call respond_invitation without the invitationId.
+- "Counter-offer an invitation / negotiate rate on invitation" -> preview_negotiate -> confirm_negotiate
 - Profile / address / notification edits -> preview_update_my_profile / _home_address / _notification_preferences
 
 Tool errors:
@@ -144,10 +164,11 @@ Hard rules:
 
 Tool selection:
 - "Show my clinics / which clinics do I manage" -> get_my_clinics
-- "My posted jobs / available jobs / list my postings / what jobs have I posted" -> get_my_posted_jobs (returns ALL jobs across ALL the user's clinics in one call; ALWAYS prefer this over chaining get_my_clinics then get_open_shifts per clinic)
-- "Open shifts for clinic X / unfilled shifts at <clinic>" -> get_open_shifts (single clinicId)
+- "My posted jobs / available jobs / open jobs / list my postings / what jobs have I posted" -> get_my_posted_jobs (no args = ALL clinics; pass clinicId for one clinic; pass dayOfWeek=mon|tue|wed|thu|fri|sat|sun to filter by weekday like 'open shifts on Thursday'; pass dateFrom/dateTo for explicit date windows like 'jobs next week'). This SINGLE tool answers all open-jobs questions -- ALWAYS use it instead of chaining get_my_clinics then per-clinic lookups.
+- "Open shifts at clinic X" -> get_my_posted_jobs with clinicId=<X> (and dayOfWeek if user mentioned a day)
 - "What needs my attention" -> get_action_needed (per clinic)
 - "Recent applicants / who applied to my jobs / show applicants" -> list_applicants_for_job. MANDATORY: when the user asks for applicants, you MUST call list_applicants_for_job (it returns the grouped-by-job applicants the UI knows how to render with Accept / Decline / Negotiate buttons). NEVER enumerate applicants by calling get_professional_info repeatedly -- that is a single-profile lookup, not a list, and produces blank profile cards.
+- "Show my invitations / sent invitations / pending invitations / invites I sent" -> get_sent_invitations. NEVER use query_ddb_table on JobInvitations to list a clinic's sent invitations -- the table has no clinic-scoped GSI and the query will fail with "key not allowed". get_sent_invitations does the cross-clinic fan-out and returns {invitations:[...]} the UI renders with per-card Accept / Decline buttons (clinic side: the buttons are for the professional's side; clinic side just sees status).
 - "View / profile of professional <name or userSub>" -> get_professional_info (ONE call for ONE professional only)
 - "Post a temp/consulting/permanent job" -> preview_post_temporary_job / preview_post_consulting_job / preview_post_permanent_job
 - "Accept / reject / invite professionals" -> preview_accept_professional / preview_reject_professional / preview_send_invitations
@@ -399,9 +420,35 @@ export class ChatBedrockAgents extends Construct {
         Description: "Live alias for the Public agent - invoked by runtime container.",
       },
     });
-    this.professionalAgentAliasId = proAlias.getAtt("AgentAliasId").toString();
-    this.clinicAgentAliasId = clinicAlias.getAtt("AgentAliasId").toString();
-    this.publicAgentAliasId = publicAlias.getAtt("AgentAliasId").toString();
+    // Bind reference for downstream consumers - silences "unused" lint
+    // since the alias resources are kept around for IAM hygiene but their
+    // dynamic IDs are no longer used (see TSTALIASID note below).
+    void proAlias; void clinicAlias; void publicAlias;
+
+    // Pin the runtime to the well-known DRAFT alias (TSTALIASID) on all
+    // three agents instead of the CfnAgentAlias-managed numbered version.
+    //
+    // Why: Bedrock CfnAgentAlias auto-publishes a numbered version at
+    // alias-CREATE time and pins the alias to it. On subsequent UPDATE
+    // (CDK redeploys that change action groups, prompts, etc.), AWS does
+    // NOT republish or re-route the alias -- so the runtime keeps hitting
+    // version 1 even after weeks of deploys. The symptom was the agent
+    // ignoring whitelist changes ("removed preview_respond_invitation",
+    // "added get_my_posted_jobs") because those updates landed on DRAFT
+    // but the alias was frozen on version 1.
+    //
+    // TSTALIASID is the AWS-documented constant that routes InvokeAgent
+    // directly at the current DRAFT (no version pinning). Every cdk
+    // deploy updates DRAFT -> the runtime picks it up on the very next
+    // call. The numbered-version aliases above stay deployed for IAM /
+    // observability hygiene, but are NOT what the runtime invokes.
+    //
+    // Trade-off: no version-pinned rollback path via alias swap. Mitigated
+    // by the fact that every change is in source-controlled CDK -- to
+    // rollback, revert the commit + redeploy.
+    this.professionalAgentAliasId = "TSTALIASID";
+    this.clinicAgentAliasId = "TSTALIASID";
+    this.publicAgentAliasId = "TSTALIASID";
   }
 }
 

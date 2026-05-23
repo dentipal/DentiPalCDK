@@ -40,6 +40,18 @@ export interface CallHandlerOptions {
   queryStringParameters?: Record<string, string>;
   body?: any;
   auth: AuthContext;
+  /**
+   * Optional URL to inject as both `event.path` and `event.rawPath`. Required
+   * for handlers that extract path segments via REGEX on the raw URL instead
+   * of reading `event.pathParameters` (respondToInvitation, rejectProf,
+   * getWorkedProfessionals). Without this the handler sees `path: "/"` and
+   * its regex returns null -> 400 "X is required in path".
+   *
+   * Caller is responsible for substituting pathParameters into the URL
+   * template. Example for respondToInvitation:
+   *   pathOverride: `/invitations/${invitationId}/response`
+   */
+  pathOverride?: string;
 }
 
 export interface AdapterResult {
@@ -69,14 +81,18 @@ export async function callHandlerInProcess(
   options: CallHandlerOptions,
 ): Promise<AdapterResult> {
   const synthetic = buildSyntheticAccessToken(options.auth);
+  // Inject the URL handlers regex-extract from. Falls back to "/" for
+  // handlers that read event.pathParameters directly (the majority).
+  const path = options.pathOverride || "/";
   const event: any = {
     httpMethod: options.method,
-    path: "/",
+    path,
+    rawPath: path,
     pathParameters: options.pathParameters || null,
     queryStringParameters: options.queryStringParameters || null,
     headers: { Authorization: `Bearer ${synthetic}` },
     body: options.body !== undefined ? JSON.stringify(options.body) : null,
-    requestContext: { http: { method: options.method } },
+    requestContext: { http: { method: options.method, path } },
     _inProcessAuth: options.auth, // refactored handlers prefer this
   };
 

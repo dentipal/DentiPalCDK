@@ -263,65 +263,257 @@ async function invokeUnderlyingHandler(
       const params = { ...(args.pathParameters || {}), proxy: "open-shifts" };
       return callHandlerInProcess(handler, { ...args, pathParameters: params });
     }
-    case "getMyPostedJobs": {
-      // Composed virtual handler — fans out get_my_clinics → get_open_shifts
-      // per clinic, then merges into a single `{jobs:[...]}` payload the
-      // ResultCards JobResultsList already knows how to render (with the
-      // clinicSide flag flipped on by ToolResultBody).
+    case "getSentInvitations": {
+      // Composed virtual handler — clinic-side aggregator for "invitations
+      // I have sent across my clinics." JobInvitations table lacks a
+      // clinicId/clinicUserSub GSI, so we can't query it directly by clinic;
+      // we have to walk the user's clinics -> jobs -> per-job invitations.
       //
-      // No new business Lambda — this stays in the chat-gateway layer so the
-      // 50 existing handlers remain untouched. Each fan-out is in-process
-      // (callHandlerInProcess) so latency is single-Lambda invocation cost,
-      // not a per-clinic round-trip through API Gateway.
+      // Pattern mirrors getMyPostedJobs: fan out in-process, merge, sort.
+      // Reads JobInvitations directly via the SDK (the only handler we have
+      // for invitations is pro-side and filters by professionalUserSub).
       const { handler: clinicsHandler } = await import("../getUsersClinics");
       const clinicsRes = await callHandlerInProcess(clinicsHandler, args);
       if (clinicsRes.status >= 400) return clinicsRes;
       const clinicList: Array<{ clinicId?: string; name?: string }> =
         (clinicsRes.body?.clinics || clinicsRes.body?.data?.clinics || []) as any[];
       if (!Array.isArray(clinicList) || clinicList.length === 0) {
-        return { status: 200, body: { status: "success", jobs: [], totalClinics: 0, message: "No clinics under this user." } };
+        return { status: 200, body: { status: "success", invitations: [], totalClinics: 0, message: "No clinics under this user." } };
       }
-      const { handler: shiftsHandler } = await import("../getClinicShifts");
-      const allJobs: any[] = [];
-      const perClinicErrors: Array<{ clinicId?: string; error: string }> = [];
-      // Sequential to keep the dispatcher Lambda concurrency footprint
-      // predictable; clinic counts per user are small (<20 in practice) so
-      // serial is fine.
+      const { DynamoDBClient, QueryCommand } = await import("@aws-sdk/client-dynamodb");
+      const ddb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
+      const invitationsTable = process.env.JOB_INVITATIONS_TABLE || "";
+      const jobPostingsTable = process.env.JOB_POSTINGS_TABLE || "";
+      if (!invitationsTable || !jobPostingsTable) {
+        return { status: 500, body: { error: "JOB_INVITATIONS_TABLE / JOB_POSTINGS_TABLE env var missing" } };
+      }
+      const allInvitations: any[] = [];
+      // jobId -> {clinicId, clinicName, jobTitle, role, date} for tagging
+      // each invitation with the context the InvitationsList card needs.
+      const jobMeta: Record<string, { clinicId: string; clinicName?: string; jobTitle?: string; professionalRole?: string; date?: string; rate?: number; payType?: string }> = {};
+      // Query JobPostings DIRECTLY (not via getClinicShifts) so we get every
+      // job the clinic ever posted -- open, filled, past, cancelled. Invites
+      // typically sit on filled / scheduled jobs, NOT just open shifts.
+      // getClinicShifts with proxy=open-shifts hides those, which made
+      // get_sent_invitations always return empty even with hundreds of
+      // historical jobs. JobPostings.clinicUserSub is the partition key.
       for (const c of clinicList) {
         const clinicId = c.clinicId;
         if (!clinicId) continue;
         try {
-          const params = { ...(args.pathParameters || {}), proxy: "open-shifts", clinicId };
-          const r = await callHandlerInProcess(shiftsHandler, { ...args, pathParameters: params });
-          if (r.status >= 400) {
-            perClinicErrors.push({ clinicId, error: r.body?.error || `status ${r.status}` });
-            continue;
+          const jobsOut = await ddb.send(new QueryCommand({
+            TableName: jobPostingsTable,
+            IndexName: "ClinicIdIndex",
+            KeyConditionExpression: "clinicId = :c",
+            ExpressionAttributeValues: { ":c": { S: clinicId } },
+            ProjectionExpression: "jobId, job_title, professional_role, #d, rate, pay_type",
+            ExpressionAttributeNames: { "#d": "date" },
+          }));
+          const items = jobsOut.Items || [];
+          for (const it of items) {
+            const jobId = it.jobId?.S;
+            if (!jobId) continue;
+            jobMeta[jobId] = {
+              clinicId,
+              clinicName: c.name,
+              jobTitle: it.job_title?.S,
+              professionalRole: it.professional_role?.S,
+              date: it.date?.S,
+              rate: it.rate?.N ? parseFloat(it.rate.N) : undefined,
+              payType: it.pay_type?.S,
+            };
           }
-          const shifts = (r.body?.shifts || r.body?.data?.shifts || r.body?.jobs || []) as any[];
-          for (const s of shifts) {
-            allJobs.push({ ...s, clinicId, clinicName: c.name || s.clinicName });
+        } catch (e: any) {
+          console.warn(`[getSentInvitations] JobPostings query failed clinic=${clinicId}:`, e?.message || e);
+        }
+      }
+      // Query JobInvitations per job via the jobId-index-1 GSI.
+      const jobIds = Object.keys(jobMeta);
+      for (const jobId of jobIds) {
+        try {
+          const out = await ddb.send(new QueryCommand({
+            TableName: invitationsTable,
+            IndexName: "jobId-index-1",
+            KeyConditionExpression: "jobId = :j",
+            ExpressionAttributeValues: { ":j": { S: jobId } },
+          }));
+          const items = out.Items || [];
+          const meta = jobMeta[jobId];
+          for (const it of items) {
+            allInvitations.push({
+              invitationId: it.invitationId?.S || "",
+              jobId,
+              clinicId: meta.clinicId,
+              clinicName: meta.clinicName,
+              jobTitle: meta.jobTitle,
+              professionalRole: meta.professionalRole,
+              professionalUserSub: it.professionalUserSub?.S || "",
+              invitationStatus: it.invitationStatus?.S || "pending",
+              sentAt: it.sentAt?.S || "",
+              message: it.message?.S,
+              rateOffered: it.rateOffered?.N ? parseFloat(it.rateOffered.N) : undefined,
+              jobRate: meta.rate,
+              // jobPayType lets InvitationsList render rates as $X/hr,
+              // $X/tx, or X% rev based on the underlying job's pay type
+              // instead of hardcoding /hr for every row.
+              jobPayType: meta.payType,
+              date: meta.date,
+              validUntil: it.validUntil?.S,
+            });
+          }
+        } catch (e: any) {
+          console.warn(`[getSentInvitations] query failed for jobId=${jobId}:`, e?.message || e);
+        }
+      }
+      // Newest first by sentAt so the most recent invites surface first.
+      allInvitations.sort((a, b) => String(b.sentAt || "").localeCompare(String(a.sentAt || "")));
+      return {
+        status: 200,
+        body: {
+          status: "success",
+          invitations: allInvitations,
+          totalInvitations: allInvitations.length,
+          totalClinics: clinicList.length,
+          totalJobs: jobIds.length,
+          message: `${allInvitations.length} invitation(s) across ${jobIds.length} job(s) at ${clinicList.length} clinic(s).`,
+        },
+      };
+    }
+    case "getMyPostedJobs": {
+      // Composed virtual handler — queries JobPostings.ClinicIdIndex DIRECTLY
+      // per clinic so we get the same shape the rest of the platform uses
+      // (matches dashboard's "open jobs" count). Filters server-side to
+      //   status = "active" AND (date >= today OR has future dates[])
+      // so the result mirrors what the user sees in the clinic dashboard.
+      //
+      // Why not getClinicShifts: that handler's open-shifts proxy returns
+      // a denormalized SHIFT view (one row per occurrence date) which makes
+      // multi-day consulting jobs and recurring temp shifts pop multiple
+      // times -- and got us to 351 rows for what the dashboard counts as 49.
+      // Querying JobPostings directly gives one row per posting.
+      // Optional clinicId filter -- when present, scope the fan-out to that
+      // one clinic (replaces the old get_open_shifts tool).
+      const scopeClinicId = String(args.queryStringParameters?.clinicId || args.body?.clinicId || "").trim();
+      const { handler: clinicsHandler } = await import("../getUsersClinics");
+      const clinicsRes = await callHandlerInProcess(clinicsHandler, args);
+      if (clinicsRes.status >= 400) return clinicsRes;
+      const allUserClinics: Array<{ clinicId?: string; name?: string }> =
+        (clinicsRes.body?.clinics || clinicsRes.body?.data?.clinics || []) as any[];
+      if (!Array.isArray(allUserClinics) || allUserClinics.length === 0) {
+        return { status: 200, body: { status: "success", jobs: [], totalClinics: 0, message: "No clinics under this user." } };
+      }
+      // Authorize the clinicId filter against the user's clinic set so a
+      // forged clinicId doesn't pierce the multi-tenant boundary.
+      const clinicList = scopeClinicId
+        ? allUserClinics.filter((c) => c.clinicId === scopeClinicId)
+        : allUserClinics;
+      if (scopeClinicId && clinicList.length === 0) {
+        return { status: 403, body: { error: `clinicId ${scopeClinicId} is not under this user's management` } };
+      }
+      const { DynamoDBClient, QueryCommand } = await import("@aws-sdk/client-dynamodb");
+      const ddb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
+      const jobPostingsTable = process.env.JOB_POSTINGS_TABLE || "";
+      if (!jobPostingsTable) {
+        return { status: 500, body: { error: "JOB_POSTINGS_TABLE env var missing on dispatcher" } };
+      }
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      const allJobs: any[] = [];
+      const perClinicErrors: Array<{ clinicId?: string; error: string }> = [];
+      const unmarshalItem = (it: any): any => {
+        const out: any = {};
+        for (const [k, v] of Object.entries(it)) {
+          if (!v || typeof v !== "object") continue;
+          const av = v as any;
+          if (av.S !== undefined) out[k] = av.S;
+          else if (av.N !== undefined) out[k] = parseFloat(av.N);
+          else if (av.BOOL !== undefined) out[k] = av.BOOL;
+          else if (av.SS) out[k] = av.SS;
+          else if (av.L) out[k] = av.L.map((x: any) => x.S ?? x.N ?? x);
+          else if (av.M) out[k] = av.M; // leave nested map raw — rare in JobPostings
+        }
+        return out;
+      };
+      // Project only the fields JobResultsList renders. Without this, a
+      // 49-job response (full JobPostings rows + statusHistory + huge
+      // descriptions + applications array) blows past API Gateway WebSocket's
+      // 128KB-per-frame cap and chatMessage Lambda 413s on PostToConnection.
+      // Aliased names (#s=status, #d=date, #h=hours) because all three are
+      // DynamoDB reserved words.
+      const projection = [
+        "jobId", "#t", "job_title", "professional_role", "professional_roles",
+        "#d", "dates", "#h", "hours_per_day", "total_days",
+        "rate", "pay_type", "start_time", "end_time", "work_location_type",
+        "salary_min", "salary_max", "#s", "createdAt",
+        "positions_required", "positionsRequired",
+        "city", "state", "pincode", "addressLine1",
+      ].join(", ");
+      const projectionNames = {
+        "#s": "status",
+        "#d": "date",
+        "#h": "hours",
+        "#t": "job_type",
+      };
+      for (const c of clinicList) {
+        const clinicId = c.clinicId;
+        if (!clinicId) continue;
+        try {
+          const out = await ddb.send(new QueryCommand({
+            TableName: jobPostingsTable,
+            IndexName: "ClinicIdIndex",
+            KeyConditionExpression: "clinicId = :c",
+            FilterExpression: "#s = :active",
+            ExpressionAttributeValues: {
+              ":c": { S: clinicId },
+              ":active": { S: "active" },
+            },
+            ExpressionAttributeNames: projectionNames,
+            ProjectionExpression: projection,
+          }));
+          const items = out.Items || [];
+          for (const raw of items) {
+            const job = unmarshalItem(raw);
+            const jobType = String(job.job_type || "").toLowerCase();
+            let keep = jobType === "permanent";
+            if (!keep && typeof job.date === "string" && job.date >= today) keep = true;
+            if (!keep && Array.isArray(job.dates)) keep = job.dates.some((d: any) => typeof d === "string" && d >= today);
+            if (!keep) continue;
+            job.clinicId = clinicId;
+            job.clinicName = c.name || job.clinicName;
+            allJobs.push(job);
           }
         } catch (e: any) {
           perClinicErrors.push({ clinicId, error: e?.message || String(e) });
         }
       }
-      // Newest first so the most recently posted shows up at the top of the
-      // sidebar cards. Falls back to clinicName for stable ordering when no
-      // date field is present.
+      // Newest first by createdAt (or date as fallback) so latest postings
+      // surface at the top of the card list.
       allJobs.sort((a, b) => {
         const ad = a.createdAt || a.date || "";
         const bd = b.createdAt || b.date || "";
         return String(bd).localeCompare(String(ad));
       });
+      // Hard cap on the response so the SSE frame never exceeds API Gateway
+      // WebSocket's 128KB-per-frame limit. JobResultsList renders 10 at a
+      // time with a "show more" affordance, so this cap is plenty for the
+      // initial card view; the user can narrow with clinicId / dayOfWeek /
+      // dateRange filters if they need to see beyond.
+      const MAX = 30;
+      const totalFound = allJobs.length;
+      const capped = allJobs.slice(0, MAX);
+      const truncated = totalFound > MAX;
       return {
         status: 200,
         body: {
           status: "success",
-          jobs: allJobs,
-          totalJobs: allJobs.length,
+          jobs: capped,
+          totalJobs: totalFound,
+          shownJobs: capped.length,
           totalClinics: clinicList.length,
+          truncated,
           errors: perClinicErrors.length ? perClinicErrors : undefined,
-          message: `${allJobs.length} posted job(s) across ${clinicList.length} clinic(s).`,
+          message: truncated
+            ? `Showing the ${MAX} most recent of ${totalFound} active job posting(s) across ${clinicList.length} clinic(s). Filter by clinicId, dayOfWeek, or dateFrom/dateTo to narrow.`
+            : `${totalFound} active job posting(s) across ${clinicList.length} clinic(s).`,
         },
       };
     }
@@ -347,7 +539,14 @@ async function invokeUnderlyingHandler(
     }
     case "respondToInvitation": {
       const { handler } = await import("../respondToInvitation");
-      return callHandlerInProcess(handler, args);
+      // respondToInvitation regex-extracts invitationId from rawPath
+      // (`/invitations/{id}/response`) instead of reading pathParameters.
+      // Synthesize the URL the regex expects so the handler can find the id.
+      const invId = args.pathParameters?.invitationId || "";
+      return callHandlerInProcess(handler, {
+        ...args,
+        pathOverride: `/invitations/${encodeURIComponent(invId)}/response`,
+      });
     }
     case "respondToNegotiation": {
       const { handler } = await import("../respondToNegotiation");
@@ -401,7 +600,13 @@ async function invokeUnderlyingHandler(
     }
     case "rejectProf": {
       const { handler } = await import("../rejectProf");
-      return callHandlerInProcess(handler, args);
+      // rejectProf regex matches `/<jobId>/reject/<professionalUserSub>`.
+      const jobId = args.pathParameters?.jobId || "";
+      const proSub = args.body?.professionalUserSub || args.pathParameters?.professionalUserSub || "";
+      return callHandlerInProcess(handler, {
+        ...args,
+        pathOverride: `/${encodeURIComponent(jobId)}/reject/${encodeURIComponent(proSub)}`,
+      });
     }
     case "sendJobInvitations": {
       const { handler } = await import("../sendJobInvitations");
@@ -425,11 +630,46 @@ async function invokeUnderlyingHandler(
     }
     case "updateJobStatus": {
       const { handler } = await import("../updateJobStatus");
-      // The catalog routes cancel_job here with a generic body; force the
-      // inactive status so the underlying handler doesn't need a per-call
-      // override.
-      const body = { ...(args.body || {}), status: "inactive" };
-      return callHandlerInProcess(handler, { ...args, body });
+      // Pass body through as-is. confirm_cancel_job no longer routes here;
+      // see cancelJobByType. Other lifecycle transitions (open->scheduled
+      // etc.) still use this handler with their natural status values.
+      return callHandlerInProcess(handler, args);
+    }
+    case "cancelJobByType": {
+      // Composed cancel handler. updateJobStatus rejects "inactive" as a
+      // status (only accepts open/scheduled/action_needed/completed), so
+      // cancelling a job must go through deleteTemporaryJob or
+      // deletePermanentJob instead. Both handlers fan out the appropriate
+      // shift-cancelled events to notify any applicants. We look up
+      // job_type from JobPostings first to pick the right one -- the
+      // agent doesn't have to know whether it's temp/consulting/permanent.
+      const jobId = args.pathParameters?.jobId;
+      if (!jobId) return { status: 400, body: { error: "jobId is required" } };
+      const { DynamoDBClient, QueryCommand } = await import("@aws-sdk/client-dynamodb");
+      const ddb = new DynamoDBClient({ region: process.env.REGION || "us-east-1" });
+      const jobPostingsTable = process.env.JOB_POSTINGS_TABLE || "";
+      try {
+        const lookup = await ddb.send(new QueryCommand({
+          TableName: jobPostingsTable,
+          IndexName: "jobId-index-1",
+          KeyConditionExpression: "jobId = :j",
+          ExpressionAttributeValues: { ":j": { S: jobId } },
+          ProjectionExpression: "job_type, clinicUserSub",
+        }));
+        const item = (lookup.Items || [])[0];
+        if (!item) return { status: 404, body: { error: `Job ${jobId} not found` } };
+        const jobType = String(item.job_type?.S || "temporary").toLowerCase();
+        if (jobType === "permanent") {
+          const { handler } = await import("../deletePermanentJob");
+          return callHandlerInProcess(handler, args);
+        }
+        // temporary + multi_day_consulting both go through deleteTemporaryJob
+        // (it handles the dates[] array for consulting).
+        const { handler } = await import("../deleteTemporaryJob");
+        return callHandlerInProcess(handler, args);
+      } catch (e: any) {
+        return { status: 500, body: { error: `Cancel lookup failed: ${e?.message || e}` } };
+      }
     }
     case "addClinicFavorite": {
       const { handler } = await import("../addClinicFavorite");

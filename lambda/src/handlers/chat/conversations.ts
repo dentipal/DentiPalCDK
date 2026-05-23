@@ -105,8 +105,28 @@ function isError(x: CallerAuth | APIGatewayProxyResult): x is APIGatewayProxyRes
 }
 
 function pathParam(event: APIGatewayProxyEvent, name: string): string | undefined {
+  // First try the canonical pathParameters (populated by API Gateway when
+  // routes are defined with parameterized resources directly).
   const v = event.pathParameters?.[name];
-  return typeof v === "string" && v.length > 0 ? v : undefined;
+  if (typeof v === "string" && v.length > 0) return v;
+
+  // Fallback: this monolith routes through a `{proxy+}` catch-all so
+  // pathParameters is empty for every parameterized route. The custom
+  // router in index.ts matches the URL against `{conversationId}` patterns
+  // for dispatch but never extracts the value. Parse it from the URL
+  // ourselves so getConversation / patch / delete / getMessages / regenerate-
+  // title all work end-to-end. Without this the sidebar can list rows but
+  // clicking one returns 400 "Missing conversationId path param".
+  if (name === "conversationId") {
+    const rawPath = (event as any).path || (event as any).rawPath || "";
+    const m = rawPath.match(/\/chat\/conversations\/([^\/?]+)/);
+    // "search" is a literal sibling route, not a UUID — guard against it.
+    if (m && m[1] && m[1] !== "search") {
+      try { return decodeURIComponent(m[1]); }
+      catch { return m[1]; }
+    }
+  }
+  return undefined;
 }
 
 function parseJsonBody(event: APIGatewayProxyEvent): Record<string, any> {

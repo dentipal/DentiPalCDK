@@ -98,7 +98,8 @@ export function buildSystemPrompt(opts: {
  * advertised surface improves tool-selection accuracy on the model side.
  */
 export const PRO_TOOL_NAMES = new Set<string>([
-  "search_jobs_near_me", "get_job_details", "get_my_applications",
+  // get_job_details REMOVED from pro (handler is clinic-only by data shape).
+  "search_jobs_near_me", "get_my_applications",
   "get_my_invitations", "get_scheduled_shifts", "get_completed_shifts",
   "get_my_negotiations",
   "query_ddb_table",
@@ -107,7 +108,9 @@ export const PRO_TOOL_NAMES = new Set<string>([
   // preview_apply_to_job / confirm_apply_to_job intentionally REMOVED so
   // the agent can only route through the single-shot apply_to_job path
   // (no proposedRate / availability / message prompting).
-  "preview_respond_invitation", "confirm_respond_invitation",
+  // preview_respond_invitation / confirm_respond_invitation REMOVED so
+  // the agent can only use single-shot respond_invitation (Accept/Decline
+  // buttons on InvitationsList cards rely on this).
   "preview_withdraw_application", "confirm_withdraw_application",
   "preview_attest_completed_shift", "confirm_attest_completed_shift",
   "preview_update_my_profile", "confirm_update_my_profile",
@@ -118,10 +121,13 @@ export const PRO_TOOL_NAMES = new Set<string>([
 ]);
 
 export const CLINIC_TOOL_NAMES = new Set<string>([
-  "get_my_clinics", "get_my_posted_jobs", "get_action_needed", "get_open_shifts",
+  // get_open_shifts removed -- get_my_posted_jobs now subsumes it.
+  "get_my_clinics", "get_my_posted_jobs", "get_sent_invitations", "get_action_needed",
   "get_scheduled_shifts", "get_completed_shifts",
   "list_applicants_for_job", "get_professional_info",
-  "get_clinic_favorites", "get_job_details",
+  // get_clinic_favorites + remove_clinic_favorite REMOVED to stay under
+  // Bedrock Agents' 50-function-per-agent action-group limit.
+  "get_job_details",
   "query_ddb_table",
   "preview_post_temporary_job", "confirm_post_temporary_job",
   "preview_post_consulting_job", "confirm_post_consulting_job",
@@ -136,7 +142,7 @@ export const CLINIC_TOOL_NAMES = new Set<string>([
   "preview_edit_job", "confirm_edit_job",
   "preview_cancel_job", "confirm_cancel_job",
   "preview_add_clinic_favorite", "confirm_add_clinic_favorite",
-  "preview_remove_clinic_favorite", "confirm_remove_clinic_favorite",
+  // remove_clinic_favorite pair removed for 50-function cap (see above).
   "search_professionals",
   "preview_invite_team_member", "confirm_invite_team_member",
   "preview_update_team_member", "confirm_update_team_member",

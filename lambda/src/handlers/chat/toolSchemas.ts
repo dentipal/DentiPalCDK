@@ -524,20 +524,57 @@ export const GET_ACTION_NEEDED: ToolDefinition = {
   gateway: { handlerModule: "getActionNeeded", method: "GET", inputShape: "path", pathParamKey: "clinicId" },
 };
 
+export const GET_SENT_INVITATIONS: ToolDefinition = {
+  // Aggregated "invitations I have sent" across every clinic the user
+  // manages. Composed virtual handler in the dispatcher (fans out
+  // getUsersClinics -> getClinicShifts per clinic -> JobInvitations
+  // jobId-index per job). Returns {invitations:[...]} so the existing
+  // InvitationsList card renders unchanged with per-card actions.
+  //
+  // PREFER over query_ddb_table: JobInvitations has no clinicId GSI so a
+  // naive query_ddb_table by clinicId fails with "key not allowed".
+  name: "get_sent_invitations", bucket: "info", scope: "clinic",
+  description:
+    "List all invitations the clinic admin has sent across every clinic they manage, newest first. " +
+    "Use for 'show my sent invitations', 'invitations I sent', 'pending invitations to professionals', etc. " +
+    "Returns {invitations:[...]} with each row tagged by clinicName, jobTitle, professional role. " +
+    "PREFER this over query_ddb_table on JobInvitations -- the JobInvitations table has no clinic-scoped GSI.",
+  inputSchema: { type: "object", properties: {} },
+  gateway: { handlerModule: "getSentInvitations", method: "GET", inputShape: "query" },
+};
+
 export const GET_MY_POSTED_JOBS: ToolDefinition = {
-  // Aggregated "all jobs across all my clinics" view. The dispatcher's
-  // composed virtual handler fans out get_my_clinics -> get_open_shifts per
-  // clinic, merges + sorts newest-first. Mirror of the dashboard's "my
-  // posted jobs" page. PREFER over a manual get_my_clinics -> per-clinic
-  // get_open_shifts loop -- this one returns in a single round-trip.
+  // Unified jobs query for the clinic agent. Replaces both the original
+  // "all my jobs" aggregator AND the per-clinic get_open_shifts tool.
+  //
+  // Without clinicId: fans out across every clinic the user manages, returns
+  //   the union of active + future-dated postings (one row per posting,
+  //   matches dashboard's "open jobs" count).
+  // With clinicId:    same filter, scoped to that single clinic.
+  //
+  // The composed dispatcher handler (case "getMyPostedJobs") honours the
+  // optional clinicId by limiting the fan-out to that one clinic when
+  // present.
   name: "get_my_posted_jobs", bucket: "info", scope: "clinic",
   description:
-    "List all jobs the clinic admin has posted across every clinic they manage, newest first. " +
-    "Use for 'show my jobs', 'available jobs', 'recent postings', 'list my postings', etc. " +
-    "Returns {jobs:[...]} with clinicName tagged on each row so the user can tell which clinic owns which job. " +
-    "PREFER this over chaining get_my_clinics -> get_open_shifts per clinic -- it does the fan-out for you.",
-  inputSchema: { type: "object", properties: {} },
-  gateway: { handlerModule: "getMyPostedJobs", method: "GET", inputShape: "query" },
+    "List active future-dated job postings. By default returns jobs across EVERY clinic the user manages. " +
+    "Pass `clinicId` to narrow to one clinic (e.g. 'show open jobs at Qwerty Clinic'). " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) to filter to shifts on a specific weekday " +
+    "(e.g. 'open shifts on Thursday'). " +
+    "Pass `dateFrom`/`dateTo` (YYYY-MM-DD inclusive) for an explicit date window " +
+    "(e.g. 'jobs next week' -> dateFrom=2026-05-26, dateTo=2026-06-01). " +
+    "Returns {jobs:[...]} with clinicName tagged on each row. Use for 'show my jobs', 'open jobs', " +
+    "'available shifts', 'recent postings', etc. -- ONE call regardless of how many clinics the user manages.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      clinicId: STRING,
+      dayOfWeek: STRING,
+      dateFrom: STRING,
+      dateTo: STRING,
+    },
+  },
+  gateway: { handlerModule: "getMyPostedJobs", method: "GET", inputShape: "query", postNormalizers: ["dayDateRangeFilter"] },
 };
 
 export const GET_OPEN_SHIFTS: ToolDefinition = {
@@ -930,7 +967,11 @@ export const CONFIRM_CANCEL_JOB: ToolDefinition = {
     type: "object", required: ["previewToken", "jobId"],
     properties: { previewToken: STRING, jobId: STRING, reason: STRING },
   },
-  gateway: { handlerModule: "updateJobStatus", method: "PUT", inputShape: "pathAndBody", pathParamKey: "jobId" },
+  // Routes to cancelJobByType composed handler (looks up job_type, fans
+  // out to deleteTemporaryJob or deletePermanentJob). updateJobStatus
+  // doesn't support cancellation -- it only validates lifecycle
+  // transitions (open/scheduled/action_needed/completed).
+  gateway: { handlerModule: "cancelJobByType", method: "DELETE", inputShape: "path", pathParamKey: "jobId" },
 };
 
 export const PREVIEW_ADD_CLINIC_FAVORITE: ToolDefinition = {
@@ -1126,7 +1167,10 @@ export const PROFESSIONAL_AGENT_TOOLS: ToolDefinition[] = [
 ];
 
 export const CLINIC_AGENT_TOOLS: ToolDefinition[] = [
-  GET_MY_CLINICS, GET_MY_POSTED_JOBS, GET_ACTION_NEEDED, GET_OPEN_SHIFTS, GET_SCHEDULED_SHIFTS,
+  GET_MY_CLINICS, GET_MY_POSTED_JOBS, GET_SENT_INVITATIONS, GET_ACTION_NEEDED, GET_SCHEDULED_SHIFTS,
+  // GET_OPEN_SHIFTS removed: get_my_posted_jobs now subsumes it (accepts
+  // optional clinicId + dayOfWeek + dateFrom/dateTo filters). One tool for
+  // both "show all my jobs" and "open shifts on Thursday at clinic X".
   GET_COMPLETED_SHIFTS, LIST_APPLICANTS_FOR_JOB, GET_PROFESSIONAL_INFO,
   GET_CLINIC_FAVORITES, GET_JOB_DETAILS,
   // Escape hatch — see ddbQueryTool.ts. Use only when narrow tools above don't fit.
