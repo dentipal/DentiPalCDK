@@ -485,6 +485,124 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
+        // --- Step 9: Auto-reject the remaining applicants (best-effort) ---
+        // Why: this posting is now filled, so every other still-pending /
+        // negotiating / invited applicant should stop showing on the clinic's
+        // Applicants and Action Needed views and stop being able to be
+        // re-actioned. The downstream dashboard filters already drop rows
+        // whose applicationStatus is "rejected", so flipping them here is the
+        // single source-of-truth update that clears all three surfaces at once.
+        //
+        // Safety:
+        //   - Skips the just-hired sub (it's now "scheduled").
+        //   - Only flips rows whose status is NOT already terminal — the
+        //     ConditionExpression makes each write race-safe and idempotent.
+        //   - Wrapped in Promise.allSettled inside a try/catch so a partial
+        //     failure leaves the hire intact and only logs the warning.
+        //   - No EventBridge fan-out: avoids spamming N losers with email on
+        //     each accept; rejection state is auditable via statusHistory.
+        try {
+            const TERMINAL_APP_STATUSES = [
+                "accepted",
+                "rejected",
+                "scheduled",
+                "completed",
+                "hired",
+                "declined",
+                "confirmed",
+                "cancelled",
+            ];
+
+            const otherAppsRes = await dynamo.send(new QueryCommand({
+                TableName: JOB_APPLICATIONS_TABLE,
+                KeyConditionExpression: "jobId = :jid",
+                ExpressionAttributeValues: { ":jid": { S: jobId } },
+                ProjectionExpression: "jobId, professionalUserSub, applicationStatus",
+            }));
+
+            const candidates = (otherAppsRes.Items || []).filter((row) => {
+                const sub = row.professionalUserSub?.S;
+                if (!sub || sub === professionalUserSub) return false;
+                const st = (row.applicationStatus?.S || "").toLowerCase();
+                return st !== "" && !TERMINAL_APP_STATUSES.includes(st);
+            });
+
+            if (candidates.length > 0) {
+                const rejectIso = new Date().toISOString();
+                const results = await Promise.allSettled(candidates.map((row) => {
+                    const otherSub = row.professionalUserSub!.S!;
+                    return dynamo.send(new UpdateItemCommand({
+                        TableName: JOB_APPLICATIONS_TABLE,
+                        Key: {
+                            jobId: { S: jobId },
+                            professionalUserSub: { S: otherSub },
+                        },
+                        UpdateExpression:
+                            "SET applicationStatus = :rejected, updatedAt = :now, " +
+                            "statusHistory = list_append(if_not_exists(statusHistory, :empty), :entry)",
+                        ConditionExpression:
+                            "NOT (applicationStatus IN " +
+                            "(:accepted, :rejected, :scheduled, :completed, :hired, :declined, :confirmed, :cancelled))",
+                        ExpressionAttributeValues: {
+                            ":rejected": { S: "rejected" },
+                            ":now": { S: rejectIso },
+                            ":empty": { L: [] },
+                            ":entry": {
+                                L: [{
+                                    M: {
+                                        status: { S: "rejected" },
+                                        at: { S: rejectIso },
+                                        actorId: { S: acceptingUserSub },
+                                        actorRole: { S: "system" },
+                                        reason: { S: "position_filled" },
+                                    },
+                                }],
+                            },
+                            ":accepted": { S: "accepted" },
+                            ":scheduled": { S: "scheduled" },
+                            ":completed": { S: "completed" },
+                            ":hired": { S: "hired" },
+                            ":declined": { S: "declined" },
+                            ":confirmed": { S: "confirmed" },
+                            ":cancelled": { S: "cancelled" },
+                        },
+                    }));
+                }));
+
+                const flipped = results.filter((r) => r.status === "fulfilled").length;
+                const raced = results.filter((r) =>
+                    r.status === "rejected" &&
+                    ((r as PromiseRejectedResult).reason as { name?: string })?.name === "ConditionalCheckFailedException"
+                ).length;
+                const failed = results.length - flipped - raced;
+                console.log("[acceptProf] auto-reject summary", {
+                    jobId,
+                    candidates: candidates.length,
+                    flipped,
+                    raced,
+                    failed,
+                });
+                if (failed > 0) {
+                    results
+                        .filter((r) => r.status === "rejected")
+                        .forEach((r, i) => {
+                            const reason = (r as PromiseRejectedResult).reason;
+                            if ((reason as { name?: string })?.name !== "ConditionalCheckFailedException") {
+                                console.warn("[acceptProf] auto-reject row failed (non-fatal):", {
+                                    jobId,
+                                    error: (reason as Error)?.message || String(reason),
+                                });
+                            }
+                        });
+                }
+            }
+        } catch (autoRejectErr) {
+            console.error("[acceptProf] auto-reject sweep failed (non-fatal):", {
+                jobId,
+                error: (autoRejectErr as Error).message,
+            });
+        }
+
         return json(event, 200, {
             message: "Professional accepted and status updated to scheduled",
             jobId,

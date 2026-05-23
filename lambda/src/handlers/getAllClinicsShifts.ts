@@ -44,8 +44,11 @@ const COMPLETED_STATUSES = (process.env.COMPLETED_STATUSES || "completed,paid,no
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
-// 3. Ignored: These don't require action and don't count as "open" or "filled"
-const TERMINAL_IGNORE_STATUSES = (process.env.TERMINAL_IGNORE_STATUSES || "rejected,cancelled,declined")
+// 3. Ignored: These don't require action and don't count as "open" or "filled".
+// "filled" is included so a job whose only acceptance write succeeded but whose
+// downstream auto-reject sweep failed cannot leak back into Open Shifts /
+// Action Needed via leftover pending applications. Env override still wins.
+const TERMINAL_IGNORE_STATUSES = (process.env.TERMINAL_IGNORE_STATUSES || "rejected,cancelled,declined,filled")
   .split(",")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
@@ -373,7 +376,17 @@ export const handler = async (
     );
 
     // C. Action Needed: Pending applications (applied, negotiating, etc.)
+    //
+    // Defense-in-depth: drop applications whose PARENT job is in a terminal
+    // state (e.g. "filled", "cancelled"). The auto-reject sweep in acceptProf
+    // normally flips these to "rejected" individually, but this guard catches
+    // legacy data written before the sweep existed and any sweep iteration
+    // that failed silently. Without it, a "filled" job with 69 leftover
+    // pending applications would surface as 69 Action Needed items forever.
     const actionNeededJobs = appsEnriched.filter((a) => {
+      const parentJobStatus = normalizeStatus((a as any).status);
+      if (parentJobStatus && TERMINAL_IGNORE_STATUSES.includes(parentJobStatus)) return false;
+
       const st = a.applicationStatus;
       if (!st) return true;
       if (SCHEDULED_STATUSES.includes(st)) return false;
