@@ -64,6 +64,23 @@ export interface JobPosting {
     parkingRate: number;
     lat?: number;
     lng?: number;
+    // Top-level address mirrors of `location.*`. The Find Jobs frontend reads
+    // city/state/zip and address lines from the top of the row; without these,
+    // the Location text filter and the JobCard address display silently fail
+    // because nothing populates `job.city` etc.
+    addressLine1: string;
+    addressLine2: string;
+    addressLine3: string;
+    city: string;
+    state: string;
+    pincode: string;
+    // Work mode (onsite / us_remote / global_remote). Stored as `work_location_type`
+    // by createJobPosting; the public list never projected it, so the work-mode
+    // filter on Find Jobs matched nothing.
+    workLocationType: string;
+    // Permanent jobs use `start_date` instead of `date`. Surface it so the
+    // dateRange filter can fall back to it.
+    startDate: string;
     location: {
         addressLine1: string;
         addressLine2: string;
@@ -197,6 +214,18 @@ export async function runBrowseJobPostings(
                 parkingRate: item.parking_rate?.N ? parseFloat(item.parking_rate.N) : 0,
                 lat: item.lat?.N ? parseFloat(item.lat.N) : undefined,
                 lng: item.lng?.N ? parseFloat(item.lng.N) : undefined,
+                // Top-level mirrors — see the JobPosting interface comment for why
+                // these duplicate `location.*`. Existing consumers using
+                // `location.city` keep working; the Find Jobs frontend can now
+                // read them off the top level too.
+                addressLine1: item.addressLine1?.S || '',
+                addressLine2: item.addressLine2?.S || '',
+                addressLine3: item.addressLine3?.S || '',
+                city: item.city?.S || '',
+                state: item.state?.S || '',
+                pincode: item.pincode?.S || '',
+                workLocationType: item.work_location_type?.S || '',
+                startDate: item.start_date?.S || '',
                 location: {
                     addressLine1: item.addressLine1?.S || '',
                     addressLine2: item.addressLine2?.S || '',
