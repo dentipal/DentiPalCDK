@@ -240,10 +240,97 @@ export const handler = async (
     console.log(`6. Processing Logic Branch: ${responseData.response}`);
 
     if (responseData.response === "accepted") {
-      // A. Accepted Logic — produce a pending application; clinic still confirms via /jobs/{jobId}/hire.
+      // A. Accepted Logic — direct-schedule flow.
+      //
+      // When a pro accepts an invitation we treat it as an immediate hire and
+      // skip the clinic's "Action Needed" confirmation step. Mirrors
+      // acceptProf.ts so the resulting state is identical to a clinic-side
+      // accept:
+      //   1. Atomically claim a position on the JobPostings row (capacity
+      //      check). Two concurrent accepts on the last open seat cannot
+      //      both win — the loser gets a clean 409.
+      //   2. Reuse the pro's existing non-rejected application if one exists
+      //      (cold-apply → invite, etc.), otherwise create a fresh one.
+      //      Either way the row ends in applicationStatus = "scheduled".
+      //   3. acceptedRate is sourced from the job posting (no negotiation
+      //      occurred on this path; the pro accepted the invite terms).
+      //   4. When the hire fills the last position, flip the job to
+      //      "filled" and auto-reject any remaining pending / negotiating
+      //      applicants — best-effort, same posture as acceptProf step 9.
+      //   5. Publish both `invite-accepted` (existing: notifies the clinic
+      //      team + opens the inbox conversation) and `shift-scheduled`
+      //      (notifies the pro and posts the "Shift Scheduled" confirmation
+      //      into the same inbox thread).
+      const clinicUserSubFromJob = job.clinicUserSub?.S;
+      if (!clinicUserSubFromJob) {
+        return {
+          statusCode: 500,
+          headers: corsHeaders(event),
+          body: JSON.stringify({
+            error: "Job posting is missing clinicUserSub; cannot claim a position.",
+          }),
+        };
+      }
 
-      // Dedup: if the pro previously cold-applied (or was invited and accepted) for this job,
-      // reuse the existing application instead of overwriting it. A "rejected" record does not block.
+      // 7.A.1 — Atomically claim a position. Legacy rows without
+      // positionsFilled/positionsRequired are treated as 1 required / 0 filled
+      // (matches the prior "first hire fills the job" behavior).
+      let positionsFilledAfter: number | null = null;
+      let positionsRequiredAfter: number | null = null;
+      try {
+        const incrRes = await dynamodb.send(
+          new UpdateItemCommand({
+            TableName: JOB_POSTINGS_TABLE,
+            Key: {
+              clinicUserSub: { S: clinicUserSubFromJob },
+              jobId: { S: jobId },
+            },
+            UpdateExpression:
+              "SET positionsFilled = if_not_exists(positionsFilled, :zero) + :one, " +
+              "positionsRequired = if_not_exists(positionsRequired, :one), " +
+              "updatedAt = :now",
+            ConditionExpression:
+              "attribute_not_exists(positionsFilled) OR positionsFilled < positionsRequired",
+            ExpressionAttributeValues: {
+              ":zero": { N: "0" },
+              ":one": { N: "1" },
+              ":now": { S: timestamp },
+            },
+            ReturnValues: "ALL_NEW",
+          })
+        );
+        const pf = incrRes.Attributes?.positionsFilled?.N;
+        const pr = incrRes.Attributes?.positionsRequired?.N;
+        positionsFilledAfter = pf ? Number(pf) : null;
+        positionsRequiredAfter = pr ? Number(pr) : null;
+      } catch (capErr: any) {
+        if (capErr?.name === "ConditionalCheckFailedException") {
+          return {
+            statusCode: 409,
+            headers: corsHeaders(event),
+            body: JSON.stringify({
+              error: "JobAlreadyFilled",
+              message: "All positions for this job have already been filled.",
+            }),
+          };
+        }
+        throw capErr;
+      }
+
+      // 7.A.2 — Resolve accepted rate from the job posting. No negotiation
+      // lookup needed: the pro accepted the original invite terms as-is.
+      const rateNum =
+        (job.rate?.N && Number(job.rate.N)) ||
+        (job.hourlyRate?.N && Number(job.hourlyRate.N)) ||
+        (job.proposedRate?.N && Number(job.proposedRate.N)) ||
+        null;
+      const acceptedRate: number | null =
+        rateNum != null && Number.isFinite(rateNum) && rateNum > 0 ? rateNum : null;
+
+      // 7.A.3 — Reuse an existing non-rejected application if one exists
+      // (e.g. the pro had cold-applied for this job before being invited);
+      // otherwise create a fresh one. Either way the row ends in
+      // applicationStatus = "scheduled".
       const existingApps = await dynamodb.send(
         new QueryCommand({
           TableName: JOB_APPLICATIONS_TABLE,
@@ -254,81 +341,318 @@ export const handler = async (
           },
         })
       );
-
       const existingApp = existingApps.Items?.find(
         (item) => (item.applicationStatus?.S || "").toLowerCase() !== "rejected"
       );
 
       if (existingApp) {
         applicationId = existingApp.applicationId?.S || null;
-        console.log(`   Existing application found, reusing ID: ${applicationId}`);
+        const updateExprParts: string[] = [
+          "applicationStatus = :status",
+          "updatedAt = :now",
+          "fromInvitation = :fromInv",
+          "invitationResponseDate = :now",
+          "statusHistory = list_append(if_not_exists(statusHistory, :empty), :entry)",
+        ];
+        const exprVals: { [key: string]: AttributeValue } = {
+          ":status": { S: "scheduled" },
+          ":now": { S: timestamp },
+          ":empty": { L: [] },
+          ":fromInv": { BOOL: true },
+          ":entry": {
+            L: [
+              {
+                M: {
+                  status: { S: "scheduled" },
+                  at: { S: timestamp },
+                  actorId: { S: userSub },
+                  actorRole: { S: "professional" },
+                  reason: { S: "invitation_accepted" },
+                },
+              },
+            ],
+          },
+        };
+        if (acceptedRate != null) {
+          updateExprParts.push("acceptedRate = :acceptedRate");
+          exprVals[":acceptedRate"] = { N: String(acceptedRate) };
+        }
+        await dynamodb.send(
+          new UpdateItemCommand({
+            TableName: JOB_APPLICATIONS_TABLE,
+            Key: {
+              jobId: { S: jobId },
+              professionalUserSub: { S: userSub },
+            },
+            UpdateExpression: "SET " + updateExprParts.join(", "),
+            ExpressionAttributeValues: exprVals,
+          })
+        );
+        console.log(`   Existing application updated to scheduled. ID: ${applicationId}`);
       } else {
         applicationId = uuidv4();
-        console.log(`   Action: Creating Application (Pending). ID: ${applicationId}`);
-
+        const applicationItem: { [key: string]: AttributeValue } = {
+          applicationId: { S: applicationId },
+          jobId: { S: jobId },
+          professionalUserSub: { S: userSub },
+          clinicUserSub: { S: clinicUserSub },
+          clinicId: { S: clinicId },
+          applicationStatus: { S: "scheduled" },
+          appliedAt: { S: timestamp },
+          updatedAt: { S: timestamp },
+          applicationMessage: { S: responseData.message || "" },
+          fromInvitation: { BOOL: true },
+          invitationResponseDate: { S: timestamp },
+          // Seed the audit trail directly at "scheduled" since the invite
+          // acceptance IS the hire on this path.
+          statusHistory: {
+            L: [
+              {
+                M: {
+                  status: { S: "scheduled" },
+                  at: { S: timestamp },
+                  actorId: { S: userSub },
+                  actorRole: { S: "professional" },
+                  reason: { S: "invitation_accepted" },
+                },
+              },
+            ],
+          },
+        };
+        if (acceptedRate != null) {
+          applicationItem.acceptedRate = { N: String(acceptedRate) };
+        }
         await dynamodb.send(
           new PutItemCommand({
             TableName: JOB_APPLICATIONS_TABLE,
-            Item: {
-              applicationId: { S: applicationId },
-              jobId: { S: jobId },
-              professionalUserSub: { S: userSub },
-              clinicUserSub: { S: clinicUserSub },
-              clinicId: { S: clinicId },
-              applicationStatus: { S: "pending" },
-              appliedAt: { S: timestamp },
-              updatedAt: { S: timestamp },
-              applicationMessage: { S: responseData.message || "" },
-              fromInvitation: { BOOL: true },
-              invitationResponseDate: { S: timestamp },
-              // Seed the audit trail with the initial transition. Subsequent
-              // transitions append via list_append in acceptProf / rejectProf.
-              statusHistory: {
-                L: [
-                  {
-                    M: {
-                      status: { S: "pending" },
-                      at: { S: timestamp },
-                      actorId: { S: userSub },
-                      actorRole: { S: "professional" },
-                    },
-                  },
-                ],
-              },
-            },
+            Item: applicationItem,
           })
         );
-        console.log("   -> Application Created.");
+        console.log(`   Action: Created Application (Scheduled). ID: ${applicationId}`);
       }
 
-      // --- Publish EventBridge event to trigger inbox conversation ---
+      // 7.A.4 — If this hire filled the last position, flip the job posting
+      // to "filled" and auto-reject any remaining pending / negotiating
+      // applicants so they leave the clinic's Action Needed list. Best-effort
+      // — failures here don't unwind the successful hire.
+      const positionsAreFilled =
+        positionsFilledAfter != null &&
+        positionsRequiredAfter != null &&
+        positionsFilledAfter >= positionsRequiredAfter;
+
+      if (positionsAreFilled) {
+        try {
+          await dynamodb.send(
+            new UpdateItemCommand({
+              TableName: JOB_POSTINGS_TABLE,
+              Key: {
+                clinicUserSub: { S: clinicUserSubFromJob },
+                jobId: { S: jobId },
+              },
+              UpdateExpression: "SET #s = :filled, updatedAt = :now",
+              ExpressionAttributeNames: { "#s": "status" },
+              ExpressionAttributeValues: {
+                ":filled": { S: "filled" },
+                ":now": { S: timestamp },
+              },
+            })
+          );
+        } catch (markErr: any) {
+          console.warn(
+            "[respondToInvitation] Failed to mark job posting as filled (non-fatal):",
+            markErr?.message
+          );
+        }
+
+        try {
+          const remainingRes = await dynamodb.send(
+            new QueryCommand({
+              TableName: JOB_APPLICATIONS_TABLE,
+              KeyConditionExpression: "jobId = :jid",
+              FilterExpression:
+                "(applicationStatus = :pending OR applicationStatus = :negotiating) AND professionalUserSub <> :hired",
+              ExpressionAttributeValues: {
+                ":jid": { S: jobId },
+                ":pending": { S: "pending" },
+                ":negotiating": { S: "negotiating" },
+                ":hired": { S: userSub },
+              },
+            })
+          );
+
+          await Promise.allSettled(
+            (remainingRes.Items || []).map(async (it) => {
+              const otherSub = it.professionalUserSub?.S;
+              if (!otherSub) return;
+              try {
+                await dynamodb.send(
+                  new UpdateItemCommand({
+                    TableName: JOB_APPLICATIONS_TABLE,
+                    Key: {
+                      jobId: { S: jobId },
+                      professionalUserSub: { S: otherSub },
+                    },
+                    UpdateExpression:
+                      "SET applicationStatus = :rejected, updatedAt = :now, " +
+                      "statusHistory = list_append(if_not_exists(statusHistory, :empty), :entry)",
+                    ConditionExpression:
+                      "applicationStatus = :pending OR applicationStatus = :negotiating",
+                    ExpressionAttributeValues: {
+                      ":rejected": { S: "rejected" },
+                      ":now": { S: timestamp },
+                      ":pending": { S: "pending" },
+                      ":negotiating": { S: "negotiating" },
+                      ":empty": { L: [] },
+                      ":entry": {
+                        L: [
+                          {
+                            M: {
+                              status: { S: "rejected" },
+                              at: { S: timestamp },
+                              actorId: { S: "system" },
+                              actorRole: { S: "system" },
+                              reason: { S: "job_filled" },
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  })
+                );
+              } catch (rejErr: any) {
+                if (rejErr?.name !== "ConditionalCheckFailedException") {
+                  console.warn(
+                    "[respondToInvitation] Auto-reject failed (non-fatal):",
+                    { jobId, otherSub, error: rejErr?.message }
+                  );
+                }
+              }
+            })
+          );
+        } catch (sweepErr: any) {
+          console.warn(
+            "[respondToInvitation] Auto-reject sweep failed (non-fatal):",
+            sweepErr?.message
+          );
+        }
+      }
+
+      // 7.A.5 — Publish EventBridge events. Build a shared shiftDetails
+      // payload that matches what acceptProf.ts emits so the downstream
+      // notification / email / inbox consumers render identically.
+      const rawRole =
+        job.role?.S ||
+        job.professionalRole?.S ||
+        job.professional_role?.S ||
+        job.jobTitle?.S ||
+        "Professional";
+      const shiftRoleLabel =
+        typeof rawRole === "string"
+          ? rawRole
+              .split("_")
+              .map((w) => (w ? w.charAt(0).toUpperCase() + w.slice(1) : w))
+              .join(" ")
+          : rawRole;
+      const rawDate =
+        job.date?.S || job.shiftDate?.S || job.start_date?.S || "TBD";
+      let formattedDate = rawDate;
+      try {
+        const d = new Date(rawDate);
+        if (!isNaN(d.getTime())) {
+          formattedDate = d.toLocaleDateString("en-US", {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          });
+        }
+      } catch {
+        // Leave formattedDate as the raw string if parsing fails.
+      }
+      const shiftRate =
+        acceptedRate != null
+          ? acceptedRate
+          : job.rate?.N
+          ? Number(job.rate.N)
+          : job.hourlyRate?.N
+          ? Number(job.hourlyRate.N)
+          : 0;
+
       const shiftDetails = {
-        date: job.date?.S || job.shiftDate?.S || "TBD",
-        role: job.role?.S || job.professionalRole?.S || job.professional_role?.S || job.jobTitle?.S || "Professional",
-        rate: job.rate?.N ? Number(job.rate.N) : (job.hourlyRate?.N ? Number(job.hourlyRate.N) : (job.proposedRate?.N ? Number(job.proposedRate.N) : 0)),
+        date: formattedDate,
+        role: shiftRoleLabel,
+        rate: shiftRate,
+        startTime: job.start_time?.S || job.startTime?.S || "",
+        endTime: job.end_time?.S || job.endTime?.S || "",
+        location: job.city?.S || job.fullAddress?.S || "",
+        jobType: job.job_type?.S || jobType || "",
       };
 
+      // invite-accepted: existing channel. Notifies the clinic team via the
+      // bell + opens the inbox conversation with the "Invite Accepted!" line.
+      // Kept as a hard requirement (rethrow on failure) to match the prior
+      // posture — the clinic must have a way to communicate with the hired pro.
       try {
-        await eb.send(new PutEventsCommand({
-          Entries: [{
-            Source: "denti-pal.api",
-            DetailType: "ShiftEvent",
-            Detail: JSON.stringify({
-              eventType: "invite-accepted",
-              actor: "professional",
-              clinicId,
-              professionalSub: userSub,
-              jobId,
-              shiftDetails,
-            }),
-          }],
-        }));
-        console.log("   -> EventBridge ShiftEvent (invite-accepted) published for inbox conversation.");
+        await eb.send(
+          new PutEventsCommand({
+            Entries: [
+              {
+                Source: "denti-pal.api",
+                DetailType: "ShiftEvent",
+                Detail: JSON.stringify({
+                  eventType: "invite-accepted",
+                  actor: "professional",
+                  clinicId,
+                  professionalSub: userSub,
+                  jobId,
+                  shiftDetails,
+                }),
+              },
+            ],
+          })
+        );
+        console.log(
+          "   -> EventBridge ShiftEvent (invite-accepted) published for inbox conversation."
+        );
       } catch (ebError: any) {
-        console.error("   -> FAILED to publish EventBridge event:", ebError.message);
-        // Re-throw — if the inbox conversation can't be created, the clinic can't communicate with the hired professional.
-        // The invitation acceptance should be retried rather than silently losing the conversation.
+        console.error(
+          "   -> FAILED to publish invite-accepted event:",
+          ebError.message
+        );
         throw ebError;
+      }
+
+      // shift-scheduled: notifies the pro that they're scheduled and adds
+      // the "Shift Scheduled! ✅" confirmation message into the same inbox
+      // thread (same consumer as the clinic-side acceptProf flow). Best-effort
+      // — pro can still see the scheduled row on their dashboard if this
+      // notification publish hiccups.
+      try {
+        await eb.send(
+          new PutEventsCommand({
+            Entries: [
+              {
+                Source: "denti-pal.api",
+                DetailType: "ShiftEvent",
+                Detail: JSON.stringify({
+                  eventType: "shift-scheduled",
+                  clinicId,
+                  professionalSub: userSub,
+                  jobId,
+                  shiftDetails,
+                }),
+              },
+            ],
+          })
+        );
+        console.log(
+          "   -> EventBridge ShiftEvent (shift-scheduled) published for pro notification."
+        );
+      } catch (ebError: any) {
+        console.warn(
+          "[respondToInvitation] shift-scheduled publish failed (non-fatal):",
+          ebError?.message
+        );
       }
     } else if (responseData.response === "negotiating") {
       // B. Negotiating Logic
@@ -568,7 +892,7 @@ export const handler = async (
         jobType: jobType,
         nextSteps:
           responseData.response === "accepted"
-            ? "Application submitted. Waiting for clinic to confirm."
+            ? "Invitation accepted. You're scheduled — check your Scheduled tab."
             : responseData.response === "negotiating"
             ? "Negotiation started. Clinic will review your proposal."
             : "Invitation declined. Thank you for your response.",
