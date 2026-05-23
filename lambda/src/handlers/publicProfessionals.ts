@@ -185,11 +185,23 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       })
     );
 
+    // Drop empty shells that would render as "N/A · N/A · 00 years exp." on
+    // the Find Professionals card. A profile is "renderable" only when it has
+    // at least a name AND a role AND a city — those are the three pieces of
+    // identity shown on the collapsed card row. Without all three the row is
+    // unusable to a clinic browsing the marketplace.
+    const renderable = profiles.filter((p) => {
+      const hasName = !!(p.firstName?.trim() || p.lastName?.trim());
+      const hasRole = !!p.role?.trim();
+      const hasCity = !!p.city?.trim();
+      return hasName && hasRole && hasCity;
+    });
+
     return json(event, 200, {
       success: true,
       message: "Professional profiles with address details (city, state, pincode) retrieved successfully",
-      profiles,
-      count: profiles.length,
+      profiles: renderable,
+      count: renderable.length,
     });
 
   } catch (error: any) {
