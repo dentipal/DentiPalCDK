@@ -13,6 +13,11 @@ import { CognitoIdentityProviderClient, AdminGetUserCommand } from "@aws-sdk/cli
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { extractUserFromBearerToken, listAccessibleClinicIds } from "./utils";
 import { corsHeaders } from "./corsHeaders";
+import {
+  getProfessionalAvailability,
+  getScheduledOccurrences,
+  jobBlockedByAvailability,
+} from "./professionalAvailability";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
@@ -383,7 +388,7 @@ export const handler = async (
     // legacy data written before the sweep existed and any sweep iteration
     // that failed silently. Without it, a "filled" job with 69 leftover
     // pending applications would surface as 69 Action Needed items forever.
-    const actionNeededJobs = appsEnriched.filter((a) => {
+    const actionNeededPreAvailability = appsEnriched.filter((a) => {
       const parentJobStatus = normalizeStatus((a as any).status);
       if (parentJobStatus && TERMINAL_IGNORE_STATUSES.includes(parentJobStatus)) return false;
 
@@ -393,6 +398,65 @@ export const handler = async (
       if (COMPLETED_STATUSES.includes(st)) return false;
       if (TERMINAL_IGNORE_STATUSES.includes(st)) return false;
       return true;
+    });
+
+    // Availability filter: hide pros who have become unavailable for the job's
+    // slot since they applied (master toggle OFF, removed the weekday, blocked
+    // the date, narrowed the time window, or got booked elsewhere). The
+    // underlying application row is left untouched — only the read-time view
+    // hides it, so a pro who flips availability back ON re-appears here.
+    //
+    // Performance: dedupes pros so each unique sub gets exactly one availability
+    // + scheduled lookup per request. Runs in parallel. On any per-pro lookup
+    // failure we default to KEEPING the row visible (transient DDB hiccup
+    // shouldn't accidentally hide the whole Action Needed bucket).
+    const uniqueProSubs = [
+      ...new Set(actionNeededPreAvailability.map((a: any) => a.professionalUserSub).filter(Boolean)),
+    ] as string[];
+
+    type AvailCache = { availability: any; scheduled: any[] } | null;
+    const availabilityCache = new Map<string, AvailCache>();
+    await Promise.all(uniqueProSubs.map(async (sub) => {
+      try {
+        const [availability, scheduled] = await Promise.all([
+          getProfessionalAvailability(sub),
+          getScheduledOccurrences(sub),
+        ]);
+        availabilityCache.set(sub, { availability, scheduled });
+      } catch (err) {
+        availabilityCache.set(sub, null);
+        console.warn("[getAllClinicsShifts] availability lookup failed; keeping pro visible:", {
+          sub,
+          error: (err as Error).message,
+        });
+      }
+    }));
+
+    // Build a synthetic AV item from the flattened job fields the helpers need.
+    // Mirrors the `buildSyntheticJob` pattern used elsewhere — the helpers only
+    // read date/start_date/dates/start_time/end_time, so we don't need to
+    // re-marshall every field on the enriched row.
+    const jobToAvForAvailability = (job: any): Record<string, AttributeValue> => {
+      const av: Record<string, AttributeValue> = {};
+      if (job?.date) av.date = { S: String(job.date) };
+      if (job?.start_date) av.start_date = { S: String(job.start_date) };
+      if (Array.isArray(job?.dates) && job.dates.length > 0) av.dates = { SS: job.dates };
+      if (job?.start_time) av.start_time = { S: String(job.start_time) };
+      if (job?.end_time) av.end_time = { S: String(job.end_time) };
+      return av;
+    };
+
+    const actionNeededJobs = actionNeededPreAvailability.filter((a: any) => {
+      const cached = availabilityCache.get(a.professionalUserSub);
+      // No sub on the row, or lookup failed — default to showing (don't hide
+      // due to data gaps, that would silently empty the Action Needed bucket).
+      if (!cached) return true;
+      const jobAv = jobToAvForAvailability(a);
+      // No date/time fields to check against — keep visible (legacy rows or
+      // job types without slot info).
+      if (Object.keys(jobAv).length === 0) return true;
+      const blockedReason = jobBlockedByAvailability(jobAv, cached.availability, cached.scheduled);
+      return blockedReason === null;
     });
 
     // D. Open Shifts: 

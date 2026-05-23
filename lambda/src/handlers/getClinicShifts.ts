@@ -16,6 +16,11 @@ import { corsHeaders } from "./corsHeaders";
 // Additive: read-time enrichment with live Clinics-table address. Never
 // mutates DynamoDB; on failure the response carries the original snapshot.
 import { enrichRecordsWithLiveClinicAddress } from "./clinicAddressEnricher";
+import {
+  getProfessionalAvailability,
+  getScheduledOccurrences,
+  jobBlockedByAvailability,
+} from "./professionalAvailability";
 
 const dynamodb = new DynamoDBClient({ region: process.env.REGION });
 const cognito = new CognitoIdentityProviderClient({ region: process.env.REGION });
@@ -381,7 +386,7 @@ export const handler = async (
       // normally flips these to "rejected" individually, but this guard catches
       // legacy data written before the sweep existed and any sweep iteration
       // that failed silently. Mirrors the same check in getAllClinicsShifts.
-      const actionNeededJobs = appsEnriched.filter((a) => {
+      const actionNeededPreAvailability = appsEnriched.filter((a) => {
         const parentJobStatus = normalizeStatus((a as any).status);
         if (parentJobStatus && TERMINAL_IGNORE_STATUSES.includes(parentJobStatus)) return false;
 
@@ -391,6 +396,53 @@ export const handler = async (
         if (COMPLETED_STATUSES.includes(st)) return false;
         if (TERMINAL_IGNORE_STATUSES.includes(st)) return false;
         return true;
+      });
+
+      // Availability filter: hide pros who have become unavailable for the
+      // job's slot since they applied (toggle OFF / weekday removed / date
+      // blocked / time narrowed / booked elsewhere). The underlying row is
+      // untouched, so flipping availability back ON re-shows the pro.
+      // Performance: dedupes per request, parallel lookups, defaults to
+      // "keep visible" on any lookup failure. Mirrors getAllClinicsShifts.
+      const uniqueProSubs = [
+        ...new Set(actionNeededPreAvailability.map((a: any) => a.professionalUserSub).filter(Boolean)),
+      ] as string[];
+
+      type AvailCache = { availability: any; scheduled: any[] } | null;
+      const availabilityCache = new Map<string, AvailCache>();
+      await Promise.all(uniqueProSubs.map(async (sub) => {
+        try {
+          const [availability, scheduled] = await Promise.all([
+            getProfessionalAvailability(sub),
+            getScheduledOccurrences(sub),
+          ]);
+          availabilityCache.set(sub, { availability, scheduled });
+        } catch (err) {
+          availabilityCache.set(sub, null);
+          console.warn("[getClinicShifts] availability lookup failed; keeping pro visible:", {
+            sub,
+            error: (err as Error).message,
+          });
+        }
+      }));
+
+      const jobToAvForAvailability = (job: any): Record<string, AttributeValue> => {
+        const av: Record<string, AttributeValue> = {};
+        if (job?.date) av.date = { S: String(job.date) };
+        if (job?.start_date) av.start_date = { S: String(job.start_date) };
+        if (Array.isArray(job?.dates) && job.dates.length > 0) av.dates = { SS: job.dates };
+        if (job?.start_time) av.start_time = { S: String(job.start_time) };
+        if (job?.end_time) av.end_time = { S: String(job.end_time) };
+        return av;
+      };
+
+      const actionNeededJobs = actionNeededPreAvailability.filter((a: any) => {
+        const cached = availabilityCache.get(a.professionalUserSub);
+        if (!cached) return true;
+        const jobAv = jobToAvForAvailability(a);
+        if (Object.keys(jobAv).length === 0) return true;
+        const blockedReason = jobBlockedByAvailability(jobAv, cached.availability, cached.scheduled);
+        return blockedReason === null;
       });
 
       const profSubs = [...new Set(actionNeededJobs.map((a: any) => a.professionalUserSub).filter(Boolean))];

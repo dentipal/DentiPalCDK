@@ -305,12 +305,58 @@ export const handler = async (
         positionsRequiredAfter = pr ? Number(pr) : null;
       } catch (capErr: any) {
         if (capErr?.name === "ConditionalCheckFailedException") {
+          // Self-expire THIS invitation row before returning. The global
+          // expire sweep that fires when a job fills (Step 7.A.4.b) handles
+          // most cases, but the pro who races us here can still slip through
+          // if their accept arrives before the sweep finishes, or if their
+          // invitation was created after the previous accept's sweep ran.
+          // Without this, the pro's UI keeps showing an Accept button that
+          // always 409s. Best-effort: a failed expire still returns the 409
+          // and the pro at least sees the right error message.
+          try {
+            await dynamodb.send(
+              new UpdateItemCommand({
+                TableName: JOB_INVITATIONS_TABLE,
+                Key: {
+                  jobId: { S: jobId },
+                  professionalUserSub: { S: professionalUserSub! },
+                },
+                UpdateExpression:
+                  "SET invitationStatus = :expired, updatedAt = :now, expiredAt = :now, expiredReason = :reason",
+                ConditionExpression:
+                  "attribute_not_exists(invitationStatus) OR invitationStatus = :sent",
+                ExpressionAttributeValues: {
+                  ":expired": { S: "expired" },
+                  ":sent": { S: "sent" },
+                  ":now": { S: timestamp },
+                  ":reason": { S: "job_filled" },
+                },
+              })
+            );
+            console.log("[respondToInvitation] Self-expired invitation on 409 JobAlreadyFilled", {
+              invitationId,
+              jobId,
+              professionalUserSub,
+            });
+          } catch (selfExpErr: any) {
+            // Most likely the global sweep already flipped it — that's the
+            // ConditionalCheckFailedException case, which is the desired
+            // end-state and not worth surfacing. Any other error is logged
+            // but doesn't change the 409 we're about to return.
+            if (selfExpErr?.name !== "ConditionalCheckFailedException") {
+              console.warn(
+                "[respondToInvitation] Self-expire on 409 failed (non-fatal):",
+                { invitationId, jobId, error: selfExpErr?.message }
+              );
+            }
+          }
           return {
             statusCode: 409,
             headers: corsHeaders(event),
             body: JSON.stringify({
               error: "JobAlreadyFilled",
               message: "All positions for this job have already been filled.",
+              invitationStatus: "expired",
             }),
           };
         }
