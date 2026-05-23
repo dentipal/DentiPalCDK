@@ -1710,6 +1710,17 @@ export class DentiPalCDKStack extends cdk.Stack {
                 RANKING_V2_PROFILE_SIGNALS: "true",
                 RANKING_V2_SCORE: "true",
                 RANKING_V2_DIVERSITY: "true",
+
+                // Stripe payment integration — read from your shell at deploy
+                // time so secrets never sit in source control:
+                //   $env:STRIPE_SECRET_KEY="sk_test_..."
+                //   $env:STRIPE_WEBHOOK_SECRET="whsec_..."
+                //   cdk deploy
+                // STRIPE_WEBHOOK_SECRET starts blank — you get it from the
+                // Stripe Dashboard AFTER creating the webhook endpoint, then
+                // redeploy with the value set.
+                STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || '',
+                STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET || '',
             },
             timeout: cdk.Duration.seconds(60),
             // Lambda CPU scales with memory. The monolith init (imports every handler + AWS SDK v3)

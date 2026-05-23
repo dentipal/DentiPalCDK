@@ -15,13 +15,150 @@ const ddbDoc = DynamoDBDocumentClient.from(client);
 // was stored on the item. New records always carry their own durationDays.
 const LEGACY_FALLBACK_DURATION_DAYS = 7;
 
+export interface ActivatedPromotion {
+  promotionId: string;
+  jobId: string;
+  planId: string;
+  status: "active";
+  activatedAt: string;
+  expiresAt: string;
+  durationDays: number;
+  /**
+   * True if the promotion was already active and this call was a no-op.
+   * Webhook callers use this to distinguish "I just activated it" from
+   * "Stripe delivered the same event twice".
+   */
+  alreadyActive: boolean;
+}
+
 /**
- * Activates a promotion after payment is confirmed.
- * Currently acts as a placeholder — in production, this will be called
- * by the Stripe webhook handler after payment_intent.succeeded.
+ * Core activation logic — no auth, no HTTP concerns. Safe to call from:
+ *   • the HTTP activatePromotion handler (after permission check)
+ *   • the Stripe webhook handler (Stripe is the trusted caller; auth is via
+ *     signature verification, not Cognito)
+ *
+ * Idempotent: calling on an already-active promotion returns the existing
+ * record with alreadyActive=true. This matters because Stripe may deliver
+ * the same checkout.session.completed event more than once.
+ *
+ * Throws on: promotion not found, cancelled/expired state.
+ */
+export async function activatePromotionById(
+  promotionId: string,
+  clinicId: string
+): Promise<ActivatedPromotion> {
+  // Find the promotion within the clinic's partition on the clinicId GSI.
+  const result = await ddbDoc.send(new QueryCommand({
+    TableName: JOB_PROMOTIONS_TABLE,
+    IndexName: "clinicId-createdAt-index",
+    KeyConditionExpression: "clinicId = :cid",
+    FilterExpression: "promotionId = :pid",
+    ExpressionAttributeValues: {
+      ":cid": clinicId,
+      ":pid": promotionId,
+    },
+  }));
+
+  const promotion = result.Items?.[0];
+  if (!promotion) {
+    const err: any = new Error("Promotion not found");
+    err.code = "PROMOTION_NOT_FOUND";
+    throw err;
+  }
+
+  // Idempotent short-circuit: already-active promotions are a no-op so that
+  // a duplicate Stripe webhook delivery doesn't return an error to Stripe
+  // (which would cause Stripe to retry forever).
+  if (promotion.status === "active") {
+    return {
+      promotionId,
+      jobId: promotion.jobId,
+      planId: promotion.planId,
+      status: "active",
+      activatedAt: promotion.activatedAt,
+      expiresAt: promotion.expiresAt,
+      durationDays: promotion.durationDays ?? LEGACY_FALLBACK_DURATION_DAYS,
+      alreadyActive: true,
+    };
+  }
+
+  if (promotion.status === "cancelled" || promotion.status === "expired") {
+    const err: any = new Error(`Cannot activate a ${promotion.status} promotion`);
+    err.code = "PROMOTION_NOT_ACTIVATABLE";
+    throw err;
+  }
+
+  const now = new Date();
+  const durationDays =
+    typeof promotion.durationDays === "number" && promotion.durationDays > 0
+      ? promotion.durationDays
+      : LEGACY_FALLBACK_DURATION_DAYS;
+  const expiresAt = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000);
+
+  // Activate the promotion record.
+  // ConditionExpression guards against the race where two webhook deliveries
+  // arrive in parallel — only the first flip succeeds.
+  await ddbDoc.send(new UpdateCommand({
+    TableName: JOB_PROMOTIONS_TABLE,
+    Key: { jobId: promotion.jobId, promotionId },
+    UpdateExpression: "SET #status = :active, activatedAt = :now, expiresAt = :expires, updatedAt = :now",
+    ConditionExpression: "#status <> :active",
+    ExpressionAttributeNames: { "#status": "status" },
+    ExpressionAttributeValues: {
+      ":active": "active",
+      ":now": now.toISOString(),
+      ":expires": expiresAt.toISOString(),
+    },
+  })).catch((err: any) => {
+    // ConditionalCheckFailedException means another caller activated first.
+    // That's a successful no-op for us.
+    if (err?.name !== "ConditionalCheckFailedException") throw err;
+  });
+
+  // Denormalize promotion flags onto the job posting so search/list pages
+  // can render the badge without a join.
+  const jobQuery = await ddbDoc.send(new QueryCommand({
+    TableName: JOB_POSTINGS_TABLE,
+    IndexName: "jobId-index-1",
+    KeyConditionExpression: "jobId = :jobId",
+    ExpressionAttributeValues: { ":jobId": promotion.jobId },
+    Limit: 1,
+  }));
+
+  const job = jobQuery.Items?.[0];
+  if (job) {
+    await ddbDoc.send(new UpdateCommand({
+      TableName: JOB_POSTINGS_TABLE,
+      Key: { clinicUserSub: job.clinicUserSub, jobId: promotion.jobId },
+      UpdateExpression: "SET isPromoted = :true, promotionId = :pid, promotionPlanId = :planId, promotionExpiresAt = :expires, updatedAt = :now",
+      ExpressionAttributeValues: {
+        ":true": true,
+        ":pid": promotionId,
+        ":planId": promotion.planId,
+        ":expires": expiresAt.toISOString(),
+        ":now": now.toISOString(),
+      },
+    }));
+  }
+
+  return {
+    promotionId,
+    jobId: promotion.jobId,
+    planId: promotion.planId,
+    status: "active",
+    activatedAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+    durationDays,
+    alreadyActive: false,
+  };
+}
+
+/**
+ * HTTP handler for PUT /promotions/{promotionId}/activate.
+ * Used by trusted admin tooling for manual activation. Stripe-driven
+ * activation goes through stripeWebhook → activatePromotionById directly.
  */
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-
   try {
     const user = extractUserFromBearerToken(event.headers?.Authorization || event.headers?.authorization);
     if (!user?.sub) {
@@ -48,97 +185,35 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return { statusCode: 403, headers: corsHeaders(event), body: JSON.stringify({ error: "You do not have permission to activate this clinic's promotions" }) };
     }
 
-    // Find the promotion within the clinic's partition on the clinicId GSI.
-    const result = await ddbDoc.send(new QueryCommand({
-      TableName: JOB_PROMOTIONS_TABLE,
-      IndexName: "clinicId-createdAt-index",
-      KeyConditionExpression: "clinicId = :cid",
-      FilterExpression: "promotionId = :pid",
-      ExpressionAttributeValues: {
-        ":cid": clinicId,
-        ":pid": promotionId,
-      },
-    }));
-
-    const promotion = result.Items?.[0];
-    if (!promotion) {
-      return { statusCode: 404, headers: corsHeaders(event), body: JSON.stringify({ error: "Promotion not found" }) };
-    }
-
-    if (promotion.status === "active") {
-      return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: "Promotion is already active" }) };
-    }
-
-    if (promotion.status === "cancelled" || promotion.status === "expired") {
-      return { statusCode: 400, headers: corsHeaders(event), body: JSON.stringify({ error: `Cannot activate a ${promotion.status} promotion` }) };
-    }
-
-    const now = new Date();
-    const durationDays =
-      typeof promotion.durationDays === "number" && promotion.durationDays > 0
-        ? promotion.durationDays
-        : LEGACY_FALLBACK_DURATION_DAYS;
-    const expiresAt = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000);
-
-    // Activate the promotion
-    await ddbDoc.send(new UpdateCommand({
-      TableName: JOB_PROMOTIONS_TABLE,
-      Key: { jobId: promotion.jobId, promotionId },
-      UpdateExpression: "SET #status = :active, activatedAt = :now, expiresAt = :expires, updatedAt = :now",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: {
-        ":active": "active",
-        ":now": now.toISOString(),
-        ":expires": expiresAt.toISOString(),
-      },
-    }));
-
-    // Update the job posting with promotion flags (denormalized for fast queries)
-    const jobQuery = await ddbDoc.send(new QueryCommand({
-      TableName: JOB_POSTINGS_TABLE,
-      IndexName: "jobId-index-1",
-      KeyConditionExpression: "jobId = :jobId",
-      ExpressionAttributeValues: { ":jobId": promotion.jobId },
-      Limit: 1,
-    }));
-
-    const job = jobQuery.Items?.[0];
-    if (job) {
-      await ddbDoc.send(new UpdateCommand({
-        TableName: JOB_POSTINGS_TABLE,
-        Key: { clinicUserSub: job.clinicUserSub, jobId: promotion.jobId },
-        UpdateExpression: "SET isPromoted = :true, promotionId = :pid, promotionPlanId = :planId, promotionExpiresAt = :expires, updatedAt = :now",
-        ExpressionAttributeValues: {
-          ":true": true,
-          ":pid": promotionId,
-          ":planId": promotion.planId,
-          ":expires": expiresAt.toISOString(),
-          ":now": now.toISOString(),
-        },
-      }));
-    }
+    const activated = await activatePromotionById(promotionId, clinicId);
 
     return {
       statusCode: 200,
       headers: corsHeaders(event),
       body: JSON.stringify({
         status: "success",
-        message: "Promotion activated successfully",
+        message: activated.alreadyActive
+          ? "Promotion was already active"
+          : "Promotion activated successfully",
         promotion: {
-          promotionId,
-          jobId: promotion.jobId,
-          planId: promotion.planId,
-          status: "active",
-          activatedAt: now.toISOString(),
-          expiresAt: expiresAt.toISOString(),
-          durationDays,
+          promotionId: activated.promotionId,
+          jobId: activated.jobId,
+          planId: activated.planId,
+          status: activated.status,
+          activatedAt: activated.activatedAt,
+          expiresAt: activated.expiresAt,
+          durationDays: activated.durationDays,
         },
       }),
     };
   } catch (error: any) {
     console.error("Error activating promotion:", error);
+    const statusCode =
+      error?.code === "PROMOTION_NOT_FOUND" ? 404 :
+      error?.code === "PROMOTION_NOT_ACTIVATABLE" ? 400 :
+      500;
     return {
-      statusCode: 500,
+      statusCode,
       headers: corsHeaders(event),
       body: JSON.stringify({ error: `Failed to activate promotion: ${error.message || "unknown"}` }),
     };
