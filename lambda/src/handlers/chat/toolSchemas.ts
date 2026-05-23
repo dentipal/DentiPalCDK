@@ -108,8 +108,13 @@ export const SEARCH_JOBS_NEAR_ME: ToolDefinition = {
 };
 
 export const GET_JOB_DETAILS: ToolDefinition = {
-  name: "get_job_details", bucket: "info", scope: "both",
-  description: "Get full details for a job by jobId.",
+  // CLINIC-ONLY: handler getJobPosting.ts keys by (clinicUserSub=caller, jobId),
+  // so only the clinic that owns the posting can fetch it. Professionals see
+  // the same job data via search_jobs_near_me result cards, so exposing this
+  // to the pro agent just produces "Job not found or access denied" 500s
+  // before an apply flow. Scope flipped from "both" to "clinic".
+  name: "get_job_details", bucket: "info", scope: "clinic",
+  description: "Get full details for a job by jobId. Clinic-only — the caller must be the clinic that posted the job.",
   inputSchema: { type: "object", required: ["jobId"], properties: { jobId: STRING } },
   gateway: { handlerModule: "getJobPosting", method: "GET", inputShape: "path", pathParamKey: "jobId" },
 };
