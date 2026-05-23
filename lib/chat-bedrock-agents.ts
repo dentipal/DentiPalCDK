@@ -60,7 +60,12 @@ const PRO_TOOL_NAMES = new Set<string>([
   "query_ddb_table",
   "apply_to_job", "respond_invitation",
   "preview_negotiate", "confirm_negotiate",
-  "preview_apply_to_job", "confirm_apply_to_job",
+  // preview_apply_to_job / confirm_apply_to_job intentionally REMOVED.
+  // When both apply paths were exposed, the agent inconsistently picked
+  // the preview pair and asked the user for proposedRate/availability/
+  // message even though apply_to_job is a single-shot zero-question tool.
+  // For custom-rate applies the agent should use preview_negotiate AFTER
+  // applying, not block the apply flow itself.
   "preview_respond_invitation", "confirm_respond_invitation",
   "preview_withdraw_application", "confirm_withdraw_application",
   "preview_attest_completed_shift", "confirm_attest_completed_shift",
@@ -72,7 +77,7 @@ const PRO_TOOL_NAMES = new Set<string>([
 ]);
 
 const CLINIC_TOOL_NAMES = new Set<string>([
-  "get_my_clinics", "get_action_needed", "get_open_shifts",
+  "get_my_clinics", "get_my_posted_jobs", "get_action_needed", "get_open_shifts",
   "get_scheduled_shifts", "get_completed_shifts",
   "list_applicants_for_job", "get_professional_info",
   "get_clinic_favorites", "get_job_details",
@@ -138,13 +143,29 @@ Hard rules:
 - Server enforces business rules. positions_required is required on every job-post tool; if the user doesn't specify it, ASK before previewing -- do not assume 1.
 
 Tool selection:
-- "What needs my attention" -> get_action_needed (across the user's clinics)
+- "Show my clinics / which clinics do I manage" -> get_my_clinics
+- "My posted jobs / available jobs / list my postings / what jobs have I posted" -> get_my_posted_jobs (returns ALL jobs across ALL the user's clinics in one call; ALWAYS prefer this over chaining get_my_clinics then get_open_shifts per clinic)
+- "Open shifts for clinic X / unfilled shifts at <clinic>" -> get_open_shifts (single clinicId)
+- "What needs my attention" -> get_action_needed (per clinic)
+- "Recent applicants / who applied to my jobs / show applicants" -> list_applicants_for_job. MANDATORY: when the user asks for applicants, you MUST call list_applicants_for_job (it returns the grouped-by-job applicants the UI knows how to render with Accept / Decline / Negotiate buttons). NEVER enumerate applicants by calling get_professional_info repeatedly -- that is a single-profile lookup, not a list, and produces blank profile cards.
+- "View / profile of professional <name or userSub>" -> get_professional_info (ONE call for ONE professional only)
 - "Post a temp/consulting/permanent job" -> preview_post_temporary_job / preview_post_consulting_job / preview_post_permanent_job
-- "Show applicants / accept / reject / invite professionals" -> list_applicants_for_job, preview_accept_professional, preview_reject_professional, preview_send_invitations
+- "Accept / reject / invite professionals" -> preview_accept_professional / preview_reject_professional / preview_send_invitations
+- "Cancel / delete / deactivate job posting" -> preview_cancel_job -> confirm_cancel_job
+- "Edit job posting (rate, hours, positions, etc.)" -> preview_edit_job -> confirm_edit_job
 - "Search professionals" -> search_professionals (use BEFORE preview_send_invitations to pick targets)
 - "Mark shift completed / report no-show" -> preview_mark_shift_completed / preview_report_no_show
 - "Manage team (invite / update / remove)" -> preview_invite_team_member / preview_update_team_member / preview_remove_team_member
 - Profile / favorites / notification edits -> preview_update_clinic_profile / preview_add_clinic_favorite / preview_update_notification_preferences
+
+Single-clinic affinity: when the user has previously named or clicked a single clinic ("I want to work with clinic X (clinicId=...)"), remember that clinicId for the rest of the turn and pass it implicitly to per-clinic tools (get_open_shifts, get_action_needed, list_applicants_for_job, search_professionals). Do NOT re-ask which clinic.
+
+NEVER enumerate clinics during a post-job flow. When the user says "Post a temporary/consulting/permanent shift" or similar:
+1. Do NOT call get_my_clinics first.
+2. If the user has only one clinic (cached in session context), use it implicitly.
+3. If the user has multiple clinics and hasn't named one in this turn, ASK in one sentence: "Which clinic should this be posted to?" -- do NOT dump the full clinics list as cards. The clinics list visually competes with the post flow and slows the user down.
+
+The same rule applies to all per-clinic action flows (send invitations, edit a job, etc.): ask the missing clinicId via short text, never via a clinics list card.
 
 When a tool returns an error (e.g. validation), THEN and only then ask the user for the specific missing field. Never pre-emptively interrogate.
 

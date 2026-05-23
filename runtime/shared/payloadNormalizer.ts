@@ -127,6 +127,19 @@ function perToolRemap(toolName: string, body: any): any | null {
         return { professional: body.profiles };
       }
       return null;
+    case "get_open_shifts":
+    case "get_scheduled_shifts":
+    case "get_completed_shifts":
+      // getClinicShifts returns `{ message, data: [...shifts...] }` -- array
+      // directly under `data`, NOT `{shifts:[...]}`. Without this remap the
+      // JobResultsList card never matches and the agent falls back to a
+      // markdown-table recap (which is also where past-dated shifts leak
+      // through visually even after trimPastDates trims the array). Remap
+      // to the discriminator key the renderer expects.
+      if (body && Array.isArray(body.data)) {
+        return { shifts: body.data, message: body.message };
+      }
+      return null;
     default:
       return null;
   }

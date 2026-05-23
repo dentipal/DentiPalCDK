@@ -293,6 +293,111 @@ export async function deleteConversation(
 }
 
 /**
+ * Derive a short, human-readable title from a user's first message.
+ * Rule-based (no extra LLM round-trip): strip whitespace, take the first
+ * sentence (up to '.', '!', '?'), cap at ~60 chars, capitalize the leading
+ * letter. Falls back to "New chat" only when the user's text is empty.
+ *
+ * Examples:
+ *   "find jobs near me on monday"        -> "Find jobs near me on monday"
+ *   "post a hygienist shift for tuesday" -> "Post a hygienist shift for tuesday"
+ *   "what's my schedule? also clinic A"  -> "What's my schedule"
+ */
+export function deriveTitleFromUserText(userText: string): string {
+  const s = (userText || "").trim().replace(/\s+/g, " ");
+  if (!s) return "New chat";
+  // Take first sentence (split on first sentence-ender). Avoid splitting on
+  // decimals or "Dr." abbreviations by requiring a space/end after the punct.
+  const sentMatch = s.match(/^([^.!?]+?)(?=[.!?](?:\s|$))/);
+  const firstSent = (sentMatch ? sentMatch[1] : s).trim();
+  // Cap length so DDB GSI projections stay small and the sidebar doesn't
+  // wrap weirdly. 60 chars is roughly the longest one-line title at the
+  // sidebar's default width.
+  const capped = firstSent.length > 60 ? firstSent.slice(0, 59).trimEnd() + "..." : firstSent;
+  return capped.charAt(0).toUpperCase() + capped.slice(1);
+}
+
+/**
+ * Ensure-or-create + bump activity in one call. Idempotent. Used by the
+ * chatMessage WS Lambda after every turn so the sidebar stays in sync.
+ *
+ * Behavior:
+ *   - If the row doesn't exist (deferred-create flow — frontend mints a UUID
+ *     on "New chat" click but only sends it with the first message), create
+ *     it with title derived from `userText` and `messageCount=1`.
+ *   - If the row exists and its current title is the placeholder "New chat",
+ *     overwrite the title from `userText`. (Edge case: row was created via
+ *     the legacy POST /chat/conversations path, never typed in, then finally
+ *     used — the placeholder gets replaced on the first real turn.)
+ *   - Always bump lastMessageAt, increment messageCount, update lastPreview.
+ *
+ * Returns the (possibly fresh) row.
+ */
+export async function ensureAndTouchConversation(opts: {
+  userSub: string;
+  conversationId: string;
+  agentRoute: AgentRoute;
+  userText: string;
+  assistantText?: string;
+}): Promise<ChatConversation | null> {
+  if (!CHAT_CONVERSATIONS_TABLE) return null;
+  const { userSub, conversationId, agentRoute, userText, assistantText } = opts;
+  const preview = trimPreview(assistantText || userText);
+
+  // Fast path: try touch first. If the row exists we just bump and return.
+  // Common case after the first turn — saves a GetItem round-trip.
+  const touched = await touchConversation(userSub, conversationId, { preview });
+  if (touched !== null) {
+    // Row existed and was touched. Check whether the title still has the
+    // placeholder; if so, rewrite from userText. Cheap GetItem only when
+    // messageCount transitions out of the early window.
+    if (touched <= 2) {
+      const row = await getConversation(userSub, conversationId);
+      if (row && row.title === "New chat") {
+        const newTitle = deriveTitleFromUserText(userText);
+        if (newTitle !== "New chat") {
+          await patchConversation(userSub, conversationId, { title: newTitle });
+        }
+      }
+    }
+    return getConversation(userSub, conversationId);
+  }
+
+  // Row didn't exist — deferred-create path. Mint it with the derived
+  // title and a starting messageCount of 1.
+  const now = nowIso();
+  const conv: ChatConversation = {
+    userSub,
+    conversationId,
+    title: deriveTitleFromUserText(userText),
+    agentRoute,
+    createdAt: now,
+    lastMessageAt: now,
+    lastPreview: preview,
+    messageCount: 1,
+  };
+  try {
+    await ddb.send(new PutCommand({
+      TableName: CHAT_CONVERSATIONS_TABLE,
+      Item: conv,
+      // Race guard: if a concurrent request created the row, fall through
+      // and treat it as touch instead. ConditionalCheckFailedException is
+      // the documented signal.
+      ConditionExpression: "attribute_not_exists(conversationId)",
+    }));
+    return conv;
+  } catch (e: any) {
+    if (e?.name === "ConditionalCheckFailedException") {
+      // Someone else created it between our touch and our put — touch again.
+      await touchConversation(userSub, conversationId, { preview });
+      return getConversation(userSub, conversationId);
+    }
+    console.warn(`[chatConvos] ensureAndTouch failed (conv=${conversationId}): ${e?.name || ""} ${e?.message || e}`);
+    return null;
+  }
+}
+
+/**
  * Wipe every conversation row for a user. Called from the account-deletion
  * cascade (alongside clearChatHistory + clearUserMemory). BatchWrite caps at
  * 25 keys per call, so we page.

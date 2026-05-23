@@ -535,6 +535,73 @@ export const handler = async (
             sweepErr?.message
           );
         }
+
+        // 7.A.4.b — Auto-expire any still-outstanding invitations for this
+        // job. The seat just claimed was the last one, so other invitees
+        // can't take it anymore. Flip "sent" → "expired" so the pro UI hides
+        // the Accept/Decline CTA and shows "Position filled". Best-effort:
+        // failures are logged but never unwind the successful hire. Skips
+        // the just-hired pro's own invitation row (their respondToInvitation
+        // update at step 8 flips it to "accepted").
+        try {
+          const pendingInvitesRes = await dynamodb.send(
+            new QueryCommand({
+              TableName: JOB_INVITATIONS_TABLE,
+              KeyConditionExpression: "jobId = :jid",
+              FilterExpression:
+                "(attribute_not_exists(invitationStatus) OR invitationStatus = :sent) " +
+                "AND professionalUserSub <> :hired",
+              ExpressionAttributeValues: {
+                ":jid": { S: jobId },
+                ":sent": { S: "sent" },
+                ":hired": { S: userSub },
+              },
+              ProjectionExpression: "jobId, professionalUserSub",
+            })
+          );
+
+          await Promise.allSettled(
+            (pendingInvitesRes.Items || []).map(async (it) => {
+              const inviteeSub = it.professionalUserSub?.S;
+              if (!inviteeSub) return;
+              try {
+                await dynamodb.send(
+                  new UpdateItemCommand({
+                    TableName: JOB_INVITATIONS_TABLE,
+                    Key: {
+                      jobId: { S: jobId },
+                      professionalUserSub: { S: inviteeSub },
+                    },
+                    UpdateExpression:
+                      "SET invitationStatus = :expired, updatedAt = :now, expiredAt = :now, expiredReason = :reason",
+                    // Idempotent: leave alone any invite that meanwhile
+                    // transitioned to accepted/declined/negotiating.
+                    ConditionExpression:
+                      "attribute_not_exists(invitationStatus) OR invitationStatus = :sent",
+                    ExpressionAttributeValues: {
+                      ":expired": { S: "expired" },
+                      ":sent": { S: "sent" },
+                      ":now": { S: timestamp },
+                      ":reason": { S: "job_filled" },
+                    },
+                  })
+                );
+              } catch (expErr: any) {
+                if (expErr?.name !== "ConditionalCheckFailedException") {
+                  console.warn(
+                    "[respondToInvitation] Invitation expire failed (non-fatal):",
+                    { jobId, inviteeSub, error: expErr?.message }
+                  );
+                }
+              }
+            })
+          );
+        } catch (expSweepErr: any) {
+          console.warn(
+            "[respondToInvitation] Invitation-expire sweep failed (non-fatal):",
+            expSweepErr?.message
+          );
+        }
       }
 
       // 7.A.5 — Publish EventBridge events. Build a shared shiftDetails

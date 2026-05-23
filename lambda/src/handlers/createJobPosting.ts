@@ -45,6 +45,11 @@ interface BaseJobData {
     work_location_type?: string;
     pay_type?: string;
     rate?: number;
+    // Number of hires the clinic wants to make for this single posting.
+    // Defaults to 1 to preserve legacy single-position behavior. Capped at 20
+    // (same cap the type-specific creators enforce) to keep a UI mistake from
+    // creating a posting that can never sensibly be filled.
+    positions_required?: number;
 }
 
 // 2. Specific Job Interfaces
@@ -258,6 +263,18 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
+        // Multi-position support. Default 1 so existing clients (and any
+        // frontend that hasn't been updated to send the field) keep producing
+        // single-seat postings — behaves identically to the pre-multi-position
+        // codebase. Capped at 20 to match the type-specific creators.
+        const positionsRequired = jobData.positions_required ?? 1;
+        if (!Number.isInteger(positionsRequired) || positionsRequired < 1 || positionsRequired > 20) {
+            return json(event, 400, {
+                error: "positions_required must be an integer between 1 and 20",
+                details: { received: jobData.positions_required }
+            });
+        }
+
         // Validate work location type if provided
         const VALID_WORK_LOCATIONS = ['onsite', 'us_remote', 'global_remote'];
         if (jobData.work_location_type && !VALID_WORK_LOCATIONS.includes(jobData.work_location_type)) {
@@ -373,6 +390,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             shift_speciality: jobData.shift_speciality,
             assisted_hygiene: jobData.assisted_hygiene ?? false,
             status: jobData.status || 'active',
+            // Multi-position fields — read by acceptProf's atomic seat claim.
+            // positionsFilled starts at 0; each successful hire increments it,
+            // and the job auto-flips to status="filled" when filled == required.
+            positionsRequired,
+            positionsFilled: 0,
             createdAt: timestamp,
             updatedAt: timestamp,
             created_by: `${cognitoFirstName} ${cognitoLastName}`.trim() || (userEmail && userEmail.includes("@") ? userEmail.split("@")[0].toLowerCase() : userEmail.toLowerCase()) || "Unknown",
