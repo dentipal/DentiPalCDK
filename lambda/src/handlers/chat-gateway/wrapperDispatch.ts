@@ -36,6 +36,7 @@ import {
   normalizeClinicIdsInPlace,
   normalizeProfessionalRoleInPlace,
   normalizeDatesInPlace,
+  normalizePayTypeInPlace,
   filterApplicationsByStatusInResult,
   filterShiftsByDayAndDateRange,
   filterApplicantsToActionableInResult,
@@ -119,6 +120,12 @@ function runPreNormalizers(
       case "dates":
         normalizeDatesInPlace(input);
         break;
+      case "payTypeAlias":
+        // Map "hourly" / "salary" / etc. to the handler's canonical pay_type
+        // values BEFORE the gate stores the preview payload, so the diff
+        // guard on confirm compares apples-to-apples.
+        normalizePayTypeInPlace(input);
+        break;
       // Pre-call slots reserved for the response-transform tags; safe no-ops here.
       case "applicationStatusFilter":
       case "dayDateRangeFilter":
@@ -166,13 +173,18 @@ function runPostNormalizers(
         break;
       case "trimPastDates": {
         // Trim past dates from whichever array shape the handler returned.
-        const postings = r.body?.jobs || r.body?.jobPostings || r.body?.shifts;
+        // getClinicShifts returns `{ message, data: [...] }` (array DIRECTLY
+        // under `data`), not `{shifts:[...]}` — the original whitelist missed
+        // that and past-dated shifts leaked through.
+        const dataIsArray = Array.isArray(r.body?.data);
+        const postings = r.body?.jobs || r.body?.jobPostings || r.body?.shifts || (dataIsArray ? r.body.data : null);
         if (Array.isArray(postings)) {
           const trimmed = trimPastDatesFromPostings(postings);
           const next = { ...r.body };
           if (r.body?.jobs) next.jobs = trimmed;
           else if (r.body?.jobPostings) next.jobPostings = trimmed;
           else if (r.body?.shifts) next.shifts = trimmed;
+          else if (dataIsArray) next.data = trimmed;
           if (typeof next.totalCount === "number") next.totalCount = trimmed.length;
           r = { status: r.status, body: next };
         }
@@ -182,6 +194,7 @@ function runPostNormalizers(
       case "clinicIds":
       case "professionalRole":
       case "dates":
+      case "payTypeAlias":
         break;
     }
   }
@@ -249,6 +262,68 @@ async function invokeUnderlyingHandler(
       // Force "open-shifts" so get_open_shifts always hits that branch.
       const params = { ...(args.pathParameters || {}), proxy: "open-shifts" };
       return callHandlerInProcess(handler, { ...args, pathParameters: params });
+    }
+    case "getMyPostedJobs": {
+      // Composed virtual handler — fans out get_my_clinics → get_open_shifts
+      // per clinic, then merges into a single `{jobs:[...]}` payload the
+      // ResultCards JobResultsList already knows how to render (with the
+      // clinicSide flag flipped on by ToolResultBody).
+      //
+      // No new business Lambda — this stays in the chat-gateway layer so the
+      // 50 existing handlers remain untouched. Each fan-out is in-process
+      // (callHandlerInProcess) so latency is single-Lambda invocation cost,
+      // not a per-clinic round-trip through API Gateway.
+      const { handler: clinicsHandler } = await import("../getUsersClinics");
+      const clinicsRes = await callHandlerInProcess(clinicsHandler, args);
+      if (clinicsRes.status >= 400) return clinicsRes;
+      const clinicList: Array<{ clinicId?: string; name?: string }> =
+        (clinicsRes.body?.clinics || clinicsRes.body?.data?.clinics || []) as any[];
+      if (!Array.isArray(clinicList) || clinicList.length === 0) {
+        return { status: 200, body: { status: "success", jobs: [], totalClinics: 0, message: "No clinics under this user." } };
+      }
+      const { handler: shiftsHandler } = await import("../getClinicShifts");
+      const allJobs: any[] = [];
+      const perClinicErrors: Array<{ clinicId?: string; error: string }> = [];
+      // Sequential to keep the dispatcher Lambda concurrency footprint
+      // predictable; clinic counts per user are small (<20 in practice) so
+      // serial is fine.
+      for (const c of clinicList) {
+        const clinicId = c.clinicId;
+        if (!clinicId) continue;
+        try {
+          const params = { ...(args.pathParameters || {}), proxy: "open-shifts", clinicId };
+          const r = await callHandlerInProcess(shiftsHandler, { ...args, pathParameters: params });
+          if (r.status >= 400) {
+            perClinicErrors.push({ clinicId, error: r.body?.error || `status ${r.status}` });
+            continue;
+          }
+          const shifts = (r.body?.shifts || r.body?.data?.shifts || r.body?.jobs || []) as any[];
+          for (const s of shifts) {
+            allJobs.push({ ...s, clinicId, clinicName: c.name || s.clinicName });
+          }
+        } catch (e: any) {
+          perClinicErrors.push({ clinicId, error: e?.message || String(e) });
+        }
+      }
+      // Newest first so the most recently posted shows up at the top of the
+      // sidebar cards. Falls back to clinicName for stable ordering when no
+      // date field is present.
+      allJobs.sort((a, b) => {
+        const ad = a.createdAt || a.date || "";
+        const bd = b.createdAt || b.date || "";
+        return String(bd).localeCompare(String(ad));
+      });
+      return {
+        status: 200,
+        body: {
+          status: "success",
+          jobs: allJobs,
+          totalJobs: allJobs.length,
+          totalClinics: clinicList.length,
+          errors: perClinicErrors.length ? perClinicErrors : undefined,
+          message: `${allJobs.length} posted job(s) across ${clinicList.length} clinic(s).`,
+        },
+      };
     }
     case "getJobApplicantsOfAClinic": {
       const { handler } = await import("../getJobApplicantsOfAClinic");

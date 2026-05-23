@@ -23,6 +23,7 @@ export type GatewayNormalizer =
   | "clinicIds"
   | "professionalRole"
   | "dates"
+  | "payTypeAlias"
   | "applicationStatusFilter"
   | "dayDateRangeFilter"
   | "actionableApplicants"
@@ -523,6 +524,22 @@ export const GET_ACTION_NEEDED: ToolDefinition = {
   gateway: { handlerModule: "getActionNeeded", method: "GET", inputShape: "path", pathParamKey: "clinicId" },
 };
 
+export const GET_MY_POSTED_JOBS: ToolDefinition = {
+  // Aggregated "all jobs across all my clinics" view. The dispatcher's
+  // composed virtual handler fans out get_my_clinics -> get_open_shifts per
+  // clinic, merges + sorts newest-first. Mirror of the dashboard's "my
+  // posted jobs" page. PREFER over a manual get_my_clinics -> per-clinic
+  // get_open_shifts loop -- this one returns in a single round-trip.
+  name: "get_my_posted_jobs", bucket: "info", scope: "clinic",
+  description:
+    "List all jobs the clinic admin has posted across every clinic they manage, newest first. " +
+    "Use for 'show my jobs', 'available jobs', 'recent postings', 'list my postings', etc. " +
+    "Returns {jobs:[...]} with clinicName tagged on each row so the user can tell which clinic owns which job. " +
+    "PREFER this over chaining get_my_clinics -> get_open_shifts per clinic -- it does the fan-out for you.",
+  inputSchema: { type: "object", properties: {} },
+  gateway: { handlerModule: "getMyPostedJobs", method: "GET", inputShape: "query" },
+};
+
 export const GET_OPEN_SHIFTS: ToolDefinition = {
   name: "get_open_shifts", bucket: "info", scope: "clinic",
   description:
@@ -584,7 +601,7 @@ export const PREVIEW_POST_TEMPORARY_JOB: ToolDefinition = {
       positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "payTypeAlias"] },
 };
 
 export const CONFIRM_POST_TEMPORARY_JOB: ToolDefinition = {
@@ -605,7 +622,7 @@ export const CONFIRM_POST_TEMPORARY_JOB: ToolDefinition = {
       positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "createTemporaryJob", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
+  gateway: { handlerModule: "createTemporaryJob", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "payTypeAlias"] },
 };
 
 export const PREVIEW_POST_CONSULTING_JOB: ToolDefinition = {
@@ -625,7 +642,7 @@ export const PREVIEW_POST_CONSULTING_JOB: ToolDefinition = {
       positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "dates"] },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "dates", "payTypeAlias"] },
 };
 
 export const CONFIRM_POST_CONSULTING_JOB: ToolDefinition = {
@@ -645,7 +662,7 @@ export const CONFIRM_POST_CONSULTING_JOB: ToolDefinition = {
       positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "createMultiDayConsulting", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "dates"] },
+  gateway: { handlerModule: "createMultiDayConsulting", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "dates", "payTypeAlias"] },
 };
 
 export const PREVIEW_POST_PERMANENT_JOB: ToolDefinition = {
@@ -665,7 +682,7 @@ export const PREVIEW_POST_PERMANENT_JOB: ToolDefinition = {
       pay_type: PAY_TYPE_ENUM, rate: NUMBER, positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "payTypeAlias"] },
 };
 
 export const CONFIRM_POST_PERMANENT_JOB: ToolDefinition = {
@@ -686,7 +703,7 @@ export const CONFIRM_POST_PERMANENT_JOB: ToolDefinition = {
       pay_type: PAY_TYPE_ENUM, rate: NUMBER, positions_required: NUMBER,
     },
   },
-  gateway: { handlerModule: "createPermanentJob", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
+  gateway: { handlerModule: "createPermanentJob", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "payTypeAlias"] },
 };
 
 export const PREVIEW_ACCEPT_PROFESSIONAL: ToolDefinition = {
@@ -1109,7 +1126,7 @@ export const PROFESSIONAL_AGENT_TOOLS: ToolDefinition[] = [
 ];
 
 export const CLINIC_AGENT_TOOLS: ToolDefinition[] = [
-  GET_MY_CLINICS, GET_ACTION_NEEDED, GET_OPEN_SHIFTS, GET_SCHEDULED_SHIFTS,
+  GET_MY_CLINICS, GET_MY_POSTED_JOBS, GET_ACTION_NEEDED, GET_OPEN_SHIFTS, GET_SCHEDULED_SHIFTS,
   GET_COMPLETED_SHIFTS, LIST_APPLICANTS_FOR_JOB, GET_PROFESSIONAL_INFO,
   GET_CLINIC_FAVORITES, GET_JOB_DETAILS,
   // Escape hatch — see ddbQueryTool.ts. Use only when narrow tools above don't fit.

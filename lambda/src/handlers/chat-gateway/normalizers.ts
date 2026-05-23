@@ -508,6 +508,51 @@ export function normalizeClinicIdsInPlace(input: any, userContext: ClinicResolve
   }
 }
 
+/**
+ * Map LLM-friendly pay_type aliases ("hourly", "salary", "tx", "commission")
+ * to the handler-required canonical values. The schema's enum is a SOFT
+ * constraint -- the Bedrock Agents LLM sometimes still picks the common-
+ * English form ("hourly") because that's what the user typed. This server-
+ * side mapping is the hard floor: handlers always see a canonical value
+ * regardless of what the LLM sent.
+ *
+ * Idempotent: a value already in canonical form passes through unchanged.
+ * Unknown values are LEFT AS-IS so the handler's validation still fires
+ * with a clear "invalid pay type" message instead of being silently rewritten.
+ *
+ * Runs in-place on both preview_ and confirm_ inputs so the gate diff guard
+ * compares identical canonical values on both sides (otherwise preview
+ * stores "hourly", confirm normalizes to "per_hour", diff triggers a 409).
+ */
+export function normalizePayTypeInPlace(input: any): void {
+  if (!input || typeof input !== "object") return;
+  const raw = input.pay_type;
+  if (typeof raw !== "string") return;
+  const key = raw.trim().toLowerCase().replace(/[-\s]+/g, "_");
+  const ALIASES: Record<string, string> = {
+    "hourly": "per_hour",
+    "per_hour": "per_hour",
+    "hour": "per_hour",
+    "per_hr": "per_hour",
+    "transaction": "per_transaction",
+    "per_transaction": "per_transaction",
+    "per_tx": "per_transaction",
+    "tx": "per_transaction",
+    "commission": "percentage_of_revenue",
+    "percentage_of_revenue": "percentage_of_revenue",
+    "percent_of_revenue": "percentage_of_revenue",
+    "revenue_share": "percentage_of_revenue",
+    "annual": "annual",
+    "salary": "annual",
+    "yearly": "annual",
+    "per_year": "annual",
+  };
+  const mapped = ALIASES[key];
+  if (mapped && mapped !== raw) {
+    input.pay_type = mapped;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Misc small helpers also shared
 // ─────────────────────────────────────────────────────────────────────────

@@ -2149,6 +2149,14 @@ export class DentiPalCDKStack extends cdk.Stack {
                 // against. Resolved at synth time via Fn::ImportValue against
                 // DentiPalChatbotStackV5's CfnOutputs (CHATBOT_EXPORTS).
                 PREVIEW_GATES_TABLE: cdk.Fn.importValue(CHATBOT_EXPORTS.previewGatesTableName),
+                // ChatConversations table — sidebar's source of truth. The
+                // chatMessage Lambda calls ensureAndTouchConversation after
+                // every turn to (a) lazily create the DDB row on the first
+                // message (deferred-create flow) and (b) bump lastMessageAt
+                // + auto-title from the user's first message. Without this
+                // env var the call silently no-ops and the sidebar stays
+                // empty -- which is exactly what was happening before.
+                CHAT_CONVERSATIONS_TABLE: cdk.Fn.importValue(CHATBOT_EXPORTS.chatConversationsTableName),
                 // Hybrid migration: hardcoded V5 runtime ARNs as string
                 // literals. The chatbot stack's runtime ARN exports got
                 // stuck mid-transition (new runtimes created, output update
@@ -2237,6 +2245,22 @@ export class DentiPalCDKStack extends cdk.Stack {
                 'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem',
             ],
             resources: [cdk.Fn.importValue(CHATBOT_EXPORTS.previewGatesTableArn)],
+        }));
+        // ChatConversations RW + its GSI (lastMessageAt-index) so
+        // ensureAndTouchConversation can PutItem on first message and
+        // UpdateItem (touch) on every subsequent turn. Without this grant
+        // the call would AccessDeniedException -> .catch() swallows it ->
+        // sidebar stays empty silently. Mirrors the PreviewGates grant above.
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem',
+                'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan',
+                'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem',
+            ],
+            resources: [
+                cdk.Fn.importValue(CHATBOT_EXPORTS.chatConversationsTableArn),
+                cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.chatConversationsTableArn), '/index/*']),
+            ],
         }));
         // Hardcoded V5 runtime ARNs (matches env vars above). InvokeAgentRuntime
         // permission scoped to the 3 specific runtime ARNs + their session/

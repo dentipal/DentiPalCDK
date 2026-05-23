@@ -21,6 +21,7 @@ import { executeTool } from "./toolExecutor";
 import { fetchUserContext } from "./userContext";
 import { writeMemoryEvent, ConversationTurn } from "./agentCoreMemory";
 import { writeTurn as writeChatHistoryTurn, legacyConversationId } from "./chatHistoryStore";
+import { ensureAndTouchConversation } from "./conversationStore";
 import { AuthContext, CLINIC_ROLES } from "../utils";
 // Every chat turn routes through AgentCore Runtime (WS-4 agents). The
 // runtimeInvoker translates Runtime SSE events into WS frames the widget
@@ -500,6 +501,21 @@ async function invokeViaRuntime(opts: {
       assistantText,
       agentType: session.agentType,
     }).catch((e) => console.warn(`[chatMessage:WS-5] chat-history write (${stopReason}) failed:`, e));
+
+    // Sidebar sync — ensures the row exists (deferred-create path), bumps
+    // lastMessageAt + lastPreview, and auto-titles from the first user
+    // message so conversations don't all read "New chat" forever.
+    // Public agent skips (anon subs would orphan rows immediately) — same
+    // guard the memory write above uses.
+    if (session.agentType !== "public") {
+      void ensureAndTouchConversation({
+        userSub: session.userSub,
+        conversationId,
+        agentRoute: session.agentType,
+        userText,
+        assistantText,
+      }).catch((e) => console.warn(`[chatMessage:WS-5] ensureAndTouchConversation (${stopReason}) failed:`, e));
+    }
 
     return { statusCode: 200, body: "ok" };
   } catch (err: any) {
