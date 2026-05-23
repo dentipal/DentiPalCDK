@@ -55,6 +55,9 @@ interface JobData {
     vacation_days?: number;
     work_schedule?: string;
     start_date?: string;
+
+    // Hiring capacity (all job types)
+    positions_required?: number;
 }
 
 interface ProfileData {
@@ -368,6 +371,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
+        const positionsRequired = jobData.positions_required ?? 1;
+        if (!Number.isInteger(positionsRequired) || positionsRequired < 1 || positionsRequired > 20) {
+            return json(event, 400, {
+                error: "Bad Request",
+                message: "positions_required must be an integer between 1 and 20",
+                details: { providedPositions: jobData.positions_required, validRange: "1-20" }
+            });
+        }
+
         // Verify user has membership + write role for every clinic they're posting to.
         // Every role — including Root — must pass the membership gate inside canWriteClinic.
         // ClinicViewer is blocked (read-only role).
@@ -444,6 +456,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                     professional_role: professionalRoles[0],
                     professional_roles: professionalRoles,
                     shift_speciality: jobData.shift_speciality,
+                    positionsRequired: positionsRequired,
+                    positionsFilled: 0,
                     status: "active",
                     createdAt: timestamp,
                     updatedAt: timestamp,
@@ -566,6 +580,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 createdJobs,
                 jobType: jobData.job_type,
                 professionalRole: jobData.professional_role,
+                positionsRequired: positionsRequired,
                 successCount: jobIds.length,
                 totalRequested: jobData.clinicIds.length
             },

@@ -107,6 +107,13 @@ export const handler = async (
       return json(event, 404, { error: "Clinic not found" });
     }
 
+    // Defense in depth — canAccessClinic already returns false for soft-
+    // deleted clinics, but if someone ever loosens that gate, this check
+    // keeps the roster hidden.
+    if (res.Item.deletedAt?.S) {
+      return json(event, 404, { error: "Clinic not found" });
+    }
+
     // Extract AssociatedUsers from DynamoDB item
     const au = res.Item.AssociatedUsers;
     let associatedUsers: string[] = [];

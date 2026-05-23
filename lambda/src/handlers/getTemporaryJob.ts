@@ -163,6 +163,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 job.fullAddress?.S ||
                 `${job.addressLine1?.S || ""} ${job.addressLine2?.S || ""} ${job.addressLine3?.S || ""}`,
             status: job.status?.S || "active",
+            positionsRequired: job.positionsRequired?.N ? parseInt(job.positionsRequired.N, 10) : 1,
+            positionsFilled: job.positionsFilled?.N ? parseInt(job.positionsFilled.N, 10) : 0,
             createdAt: job.createdAt?.S || "",
             updatedAt: job.updatedAt?.S || "",
             created_by: job.created_by?.S || "",

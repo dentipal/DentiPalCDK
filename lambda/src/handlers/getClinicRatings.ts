@@ -78,9 +78,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             dynamodb.send(new GetItemCommand({
                 TableName: CLINICS_TABLE,
                 Key: { clinicId: { S: clinicId } },
-                ProjectionExpression: "avgRating, ratingCount, ratingSum",
+                ProjectionExpression: "avgRating, ratingCount, ratingSum, deletedAt",
             })),
         ]);
+
+        // Refuse to surface ratings for a soft-deleted clinic. The row may
+        // still hold the aggregate fields from before the soft-delete, but
+        // exposing them here would let any authenticated user pull historic
+        // reviews of clinics that are pending permanent removal.
+        if (profileRes.Item?.deletedAt?.S) {
+            return json(event, 404, {
+                error: "Not Found",
+                statusCode: 404,
+                message: "Clinic not found.",
+            });
+        }
 
         const ratings = (ratingsRes.Items || []).map(unmarshallItem);
 

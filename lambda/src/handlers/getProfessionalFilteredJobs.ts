@@ -808,6 +808,7 @@ export const handler = async (
     // applications endpoints are intentionally untouched: the pro must still
     // see jobs they're already committed to.
     if (!availability.isAvailableForJobs) {
+      console.log(`[Promotions] DROPPED ALL — pro userSub=${userSub} has isAvailableForJobs=false. Toggle it on to see jobs (including promoted slots).`);
       return json(event, 200, {
         totalJobs: 0,
         totalMatched: 0,
@@ -820,6 +821,8 @@ export const handler = async (
         availability: { isAvailableForJobs: false, availableDays: [] },
       });
     }
+
+    console.log(`[Promotions] isFirstPage=${isFirstPage}, active promotions fetched from DDB=${promotedItems.length}`);
 
     const appliedJobIds = appliedInfo.jobIds;
     const appliedClinicIds = appliedInfo.clinicIds;
@@ -1013,69 +1016,48 @@ export const handler = async (
     //     surfaces (Promoted section vs. organic feed) to the UI.
     //     Promoted entries take priority over organic ones on jobId collision
     //     (the organic scan may surface the same job independently).
-    const PROMOTED_RADIUS_MI = 50;
     const promotedMatched: RankedJob[] = [];
     if (promotedItems.length > 0) {
-      let droppedOutsideRadius = 0;
-      let droppedMissingCoords = 0;
+      const dropReasons: Record<string, string> = {};
 
+      // Promoted jobs are paid placements — the product rule is "if it's
+      // promoted, professionals see it." We deliberately do NOT apply the
+      // pro's search filters (role / location / rate / payType / work mode /
+      // weekday availability / user-set radius / jobType filter / unavailable
+      // dates / scheduled conflicts / distance) here. The only gates left are
+      // the ones that would surface a useless promotion no matter the pro's
+      // intent:
+      //   - jobId missing (corrupt promotion record)
+      //   - pro already applied (no point re-showing)
+      //   - job is no longer open/active (clinic closed it)
+      //   - job's date is fully in the past (would be misleading)
+      // Distance is still computed when both coords are present, for ranking;
+      // we just don't drop on it.
       for (const item of promotedItems) {
         const jobId = str(item.jobId);
-        if (!jobId || appliedJobIds.has(jobId)) continue;
+        if (!jobId) { continue; }
+        if (appliedJobIds.has(jobId)) {
+          dropReasons[jobId] = "alreadyApplied";
+          continue;
+        }
 
-        // Only surface jobs that are still open/active (promotion may outlive the job).
         const jobStatus = str(item.status);
-        if (jobStatus !== "open" && jobStatus !== "active") continue;
+        if (jobStatus !== "open" && jobStatus !== "active") {
+          dropReasons[jobId] = `jobStatus=${jobStatus}`;
+          continue;
+        }
 
-        // Skip past-date jobs even when promoted — a paid boost on a job
-        // that's already happened helps nobody and would distort counts.
-        if (isJobFullyPast(item)) continue;
+        if (isJobFullyPast(item)) {
+          dropReasons[jobId] = "jobFullyPast";
+          continue;
+        }
 
-        // Soft 50-mile relevance gate. When both the pro and the job are
-        // geocoded we enforce the radius — a paid boost in Houston is not
-        // relevant to a Dallas pro. When either side lacks coords (common in
-        // dev/test environments and for newly-created jobs whose geocoding
-        // hasn't completed yet), we surface the promoted job anyway so a paid
-        // boost is never silently swallowed by missing metadata.
+        // Distance is informational only — used for ranking score, never to
+        // drop a promotion from the section.
         const jobCoords = getJobCoords(item);
-        let distanceMi: number | null = null;
-        if (profCoords && jobCoords) {
-          distanceMi = haversineDistance(
-            profCoords.lat, profCoords.lng,
-            jobCoords.lat, jobCoords.lng,
-          );
-          if (distanceMi > PROMOTED_RADIUS_MI) { droppedOutsideRadius++; continue; }
-        } else {
-          droppedMissingCoords++;
-          // Note: counter is incremented but we DO NOT `continue` — the
-          // promotion still surfaces. The log line below uses this counter
-          // to flag "X promoted jobs surfaced without coord verification".
-        }
-
-        // Two-phase: gate by non-jobType filters first, bucket, then jobType.
-        if (!matchesFilters(item, filtersSansJobType)) continue;
-
-        // Weekday gate (same semantics as the organic loop above).
-        if (!jobMatchesWeekdays(item, availability.availableDays)) continue;
-
-        // Phase 2 gates — same set as the organic loop. Promoted placements
-        // must not break the pro's actual availability rules.
-        {
-          const occDates = jobDates(item);
-          let blocked = false;
-          for (const d of occDates) {
-            if (dateIsBlocked(d, availability.unavailableDates)) { blocked = true; break; }
-          }
-          if (blocked) continue;
-
-          if (jobConflictsWithScheduled(item, scheduledOccurrences)) continue;
-        }
-
-        // Also honour the user-set radius filter when one is active and is
-        // tighter than the promoted gate (e.g. pro restricted feed to 10 mi).
-        // Skip this gate when distance is unknown (missing coords) so the
-        // promoted slot still surfaces.
-        if (radiusMiles && distanceMi !== null && distanceMi > radiusMiles) continue;
+        const distanceMi: number | null = profCoords && jobCoords
+          ? haversineDistance(profCoords.lat, profCoords.lng, jobCoords.lat, jobCoords.lng)
+          : null;
 
         const jt = (str(item.job_type) || str(item.jobType)).toLowerCase();
         if (computeCounts) {
@@ -1084,11 +1066,8 @@ export const handler = async (
           else if (jt === "consulting" || jt === "multi_day_consulting") counts.multiday++;
         }
 
-        if (!itemMatchesSelectedType(jt)) continue;
-
-        // Always compute relevance for promoted jobs (every sort mode) — the
-        // promoted section ranks by tier × score regardless of which mode the
-        // pro picked for the organic feed.
+        // Relevance score is still computed for ordering inside the Promoted
+        // section, but it never gates inclusion.
         const score = computeRelevanceScore(item, {
           role: filters.role,
           location: filters.location,
@@ -1113,7 +1092,10 @@ export const handler = async (
         matchedJobs = matchedJobs.filter((m) => !promotedIds.has(str(m.item.jobId)));
       }
 
-      console.log(`[Promotions] ${promotedMatched.length} promoted jobs surfaced; dropped ${droppedOutsideRadius} outside ${PROMOTED_RADIUS_MI}mi, ${droppedMissingCoords} surfaced without coord verification (missing lat/lng on pro or job).`);
+      console.log(`[Promotions] ${promotedMatched.length} promoted jobs surfaced; dropped ${Object.keys(dropReasons).length} (only applied/closed/past-date are dropped — search filters do not gate promoted slots).`);
+      if (Object.keys(dropReasons).length > 0) {
+        console.log(`[Promotions] drop reasons by jobId: ${JSON.stringify(dropReasons)}`);
+      }
     }
 
     // 3) Sort organic jobs by the requested mode. Promoted jobs are sorted

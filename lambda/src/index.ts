@@ -219,10 +219,20 @@ import { handler as listNotificationsHandler } from "./handlers/listNotification
 import { handler as markNotificationsReadHandler } from "./handlers/markNotificationsRead";
 import { handler as deleteNotificationsHandler } from "./handlers/deleteNotifications";
 
-// Persistent chat transcript — backs the "scroll up to see prior chats" UI
-// (single continuous thread per user). Writes happen on the chat WebSocket
-// Lambda; this reads.
+// Persistent chat transcript — backs the "scroll up to see prior chats" UI.
+// Writes happen on the chat WebSocket Lambda; these endpoints read + manage.
 import { handler as getChatHistoryHandler } from "./handlers/chat/getChatHistory";
+// Chatbot conversation management (sidebar). Each named export is a route.
+import {
+    listConversationsHandler,
+    createConversationHandler,
+    getConversationHandler,
+    patchConversationHandler,
+    deleteConversationHandler,
+    getConversationMessagesHandler,
+    searchConversationsHandler,
+    regenerateTitleHandler,
+} from "./handlers/chat/conversations";
 
 import { corsHeaders } from "./handlers/corsHeaders";
 
@@ -309,6 +319,10 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         "PUT:/profiles": updateProfessionalProfileHandler,
         "DELETE:/profiles": deleteProfessionalProfileHandler,
         "DELETE:/professionals/me/account": deleteProfessionalAccountHandler,
+        // These three are role-agnostic — clinic-side users (Root/ClinicAdmin/
+        // ClinicManager/ClinicViewer) also call them from the Settings page.
+        // Handler reads userSub from the JWT, so each user can only change
+        // their own password regardless of which side they're on.
         "POST:/professionals/me/password/request": requestPasswordChangeHandler,
         "POST:/professionals/me/password/verify": verifyPasswordOtpHandler,
         "POST:/professionals/me/password/confirm": confirmPasswordChangeHandler,
@@ -555,6 +569,19 @@ const getRouteHandler = (resource: string, httpMethod: string): RouteHandler | n
         // Chat transcript — paginated user-facing history (scroll up to see
         // prior chats). Writes happen on the chat WebSocket Lambda.
         "GET:/chat/history": getChatHistoryHandler,
+
+        // Chatbot conversation management — sidebar list / CRUD / per-convo
+        // transcript / search / re-title. `search` is declared BEFORE the
+        // `{conversationId}` patterns so the literal segment match wins
+        // (matchesPattern walks the route table in declaration order).
+        "GET:/chat/conversations": listConversationsHandler,
+        "POST:/chat/conversations": createConversationHandler,
+        "GET:/chat/conversations/search": searchConversationsHandler,
+        "GET:/chat/conversations/{conversationId}": getConversationHandler,
+        "PATCH:/chat/conversations/{conversationId}": patchConversationHandler,
+        "DELETE:/chat/conversations/{conversationId}": deleteConversationHandler,
+        "GET:/chat/conversations/{conversationId}/messages": getConversationMessagesHandler,
+        "POST:/chat/conversations/{conversationId}/regenerate-title": regenerateTitleHandler,
 
     };
 

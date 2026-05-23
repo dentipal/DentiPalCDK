@@ -1,9 +1,5 @@
 import { APIGatewayProxyResult } from "aws-lambda";
 import {
-  BedrockAgentRuntimeClient,
-  InvokeAgentCommand,
-} from "@aws-sdk/client-bedrock-agent-runtime";
-import {
   ApiGatewayManagementApiClient,
   PostToConnectionCommand,
   GoneException,
@@ -18,28 +14,23 @@ import {
   createSessionForConnection,
   setUserContext,
   setUserGroupsAndAgentType,
-  markContextInjected,
   AgentType,
   ChatSession,
 } from "./sessionStore";
-import { executeTool, ToolCall } from "./toolExecutor";
-import { fetchUserContext, renderContextPreamble, UserContext } from "./userContext";
-import { hydrateMemoryPreamble, writeMemoryEvent, ConversationTurn } from "./agentCoreMemory";
-import { writeTurn as writeChatHistoryTurn } from "./chatHistoryStore";
+import { executeTool } from "./toolExecutor";
+import { fetchUserContext } from "./userContext";
+import { writeMemoryEvent, ConversationTurn } from "./agentCoreMemory";
+import { writeTurn as writeChatHistoryTurn, legacyConversationId } from "./chatHistoryStore";
 import { AuthContext, CLINIC_ROLES } from "../utils";
+// Every chat turn routes through AgentCore Runtime (WS-4 agents). The
+// runtimeInvoker translates Runtime SSE events into WS frames the widget
+// already understands.
+import { getRuntimeArn, invokeAgentRuntime } from "./runtimeInvoker";
 
 const REGION = process.env.REGION || "us-east-1";
 const CONNS_TABLE = process.env.CONNS_TABLE || "DentiPal-V5-Connections"; // existing user-to-user table
 const USER_POOL_ID = process.env.USER_POOL_ID || "";
 
-const PROFESSIONAL_AGENT_ID = process.env.BEDROCK_PROFESSIONAL_AGENT_ID || "";
-const PROFESSIONAL_AGENT_ALIAS_ID = process.env.BEDROCK_PROFESSIONAL_AGENT_ALIAS_ID || "";
-const CLINIC_AGENT_ID = process.env.BEDROCK_CLINIC_AGENT_ID || "";
-const CLINIC_AGENT_ALIAS_ID = process.env.BEDROCK_CLINIC_AGENT_ALIAS_ID || "";
-const PUBLIC_AGENT_ID = process.env.BEDROCK_PUBLIC_AGENT_ID || "";
-const PUBLIC_AGENT_ALIAS_ID = process.env.BEDROCK_PUBLIC_AGENT_ALIAS_ID || "";
-
-const bedrock = new BedrockAgentRuntimeClient({ region: REGION });
 const ddb = new DynamoDBClient({ region: REGION });
 const cognito = new CognitoIdentityProviderClient({ region: REGION });
 
@@ -79,6 +70,13 @@ interface ChatMessageFrame {
   text: string;
   /** Required only on the first chatMessage of a connection; ignored thereafter. */
   agent?: AgentType;
+  /** Optional. WS-7 frontend (conversation sidebar) sends one per frame so
+   *  the transcript row gets persisted under that conversationId. Pre-WS-5
+   *  this is the only path that lets multi-conversation sidebars work —
+   *  the chat session itself is still single, but each frame's writes are
+   *  scoped to whichever conversation the user has open. Omitted by old
+   *  frontends → server falls back to legacy-<userSub>. */
+  conversationId?: string;
 }
 
 interface ConfirmActionFrame {
@@ -87,6 +85,9 @@ interface ConfirmActionFrame {
   toolName: string;
   /** The exact payload the preview card was rendered with, plus `previewToken`. */
   payload: Record<string, any>;
+  /** Same as chatMessage — scopes the synthesized "Confirmed: …" memory
+   *  event to the right conversation when the user clicks a confirm card. */
+  conversationId?: string;
 }
 
 type InboundFrame = ChatMessageFrame | ConfirmActionFrame;
@@ -165,27 +166,6 @@ async function bootstrapSessionFromExistingConnection(
   }
 
   return session;
-}
-
-const decoder = new TextDecoder("utf-8");
-
-/**
- * Looks up which Bedrock agent + alias to invoke for a given session's agentType.
- */
-function getAgentTarget(agentType: string): { agentId: string; agentAliasId: string } | null {
-  switch (agentType) {
-    case "professional":
-      if (!PROFESSIONAL_AGENT_ID || !PROFESSIONAL_AGENT_ALIAS_ID) return null;
-      return { agentId: PROFESSIONAL_AGENT_ID, agentAliasId: PROFESSIONAL_AGENT_ALIAS_ID };
-    case "clinic":
-      if (!CLINIC_AGENT_ID || !CLINIC_AGENT_ALIAS_ID) return null;
-      return { agentId: CLINIC_AGENT_ID, agentAliasId: CLINIC_AGENT_ALIAS_ID };
-    case "public":
-      if (!PUBLIC_AGENT_ID || !PUBLIC_AGENT_ALIAS_ID) return null;
-      return { agentId: PUBLIC_AGENT_ID, agentAliasId: PUBLIC_AGENT_ALIAS_ID };
-    default:
-      return null;
-  }
 }
 
 /**
@@ -418,18 +398,6 @@ async function handlerBody(
     }
   }
 
-  // ---- 3. Resolve Bedrock target ----
-  const target = getAgentTarget(session.agentType);
-  if (!target) {
-    console.error(`chatMessage: no Bedrock agent configured for agentType=${session.agentType}`);
-    await postFrame(api, connectionId, {
-      type: "error",
-      reason: "agent_not_configured",
-      detail: `No Bedrock agent ID set for '${session.agentType}'`,
-    });
-    return { statusCode: 500, body: "Agent not configured" };
-  }
-
   // Auth context handed to every tool invocation. For the public agent we use
   // the synthetic anon-* userSub the connect handler stored.
   const auth: AuthContext = {
@@ -438,255 +406,111 @@ async function handlerBody(
     userType: session.agentType === "clinic" ? "clinic" : session.agentType === "professional" ? "professional" : "public",
   };
 
-  // ---- 4. Invoke Bedrock and stream ----
-  // The early `return` above for `confirmAction` means we're now guaranteed
-  // dealing with a `chatMessage` frame, but TS doesn't always narrow through
-  // the if-return — assert explicitly.
-  const userText = (frame as ChatMessageFrame).text;
-
-  // First turn of the 15-min session: prepend a one-time user-context preamble
-  // so the agent grounds itself in who's talking, their role, home address,
-  // and which clinics they manage. Subsequent turns send the raw user text;
-  // Bedrock keeps the preamble in the session memory keyed by bedrockSessionId.
-  //
-  // Authenticated sessions also get a memory preamble pulled from AgentCore
-  // Memory — rolling summaries of prior sessions plus extracted preferences,
-  // so the assistant carries context across days/weeks. Public (anon) sessions
-  // skip this because their userSub rotates per connection.
-  let firstTurnText = userText;
-  if (!session.contextInjected && session.userContext) {
-    try {
-      const profilePreamble = renderContextPreamble(session.userContext as unknown as UserContext);
-      let memoryPreamble = "";
-      if (session.agentType !== "public") {
-        // Bound first-turn latency: race the AgentCore retrieve against a
-        // 1.5s timer. If AgentCore is slow/unreachable we proceed without
-        // memory rather than making the user wait. Memory is a
-        // quality-of-life signal, not load-bearing.
-        const HYDRATE_TIMEOUT_MS = 1500;
-        memoryPreamble = await Promise.race([
-          hydrateMemoryPreamble(session.userSub),
-          new Promise<string>((resolve) =>
-            setTimeout(() => {
-              console.warn(`[chatMessage] hydrateMemoryPreamble timed out after ${HYDRATE_TIMEOUT_MS}ms`);
-              resolve("");
-            }, HYDRATE_TIMEOUT_MS),
-          ),
-        ]).catch((e) => {
-          console.warn("[chatMessage] hydrateMemoryPreamble failed (continuing without):", e);
-          return "";
-        });
-      }
-      firstTurnText = [memoryPreamble, profilePreamble, `User said: ${userText}`]
-        .filter(Boolean)
-        .join("\n\n");
-      await markContextInjected(session.userSub, connectionId);
-    } catch (e) {
-      console.warn("[chatMessage] preamble assembly failed (continuing without):", e);
-    }
-  }
-
-  // Accumulates the assistant's user-visible text across every InvokeAgent
-  // loop within this single user turn, so we can persist the complete turn
-  // pair to AgentCore Memory once the loop settles.
-  let assistantTextAcrossLoops = "";
-  // Fire-and-forget memory write — never awaited on the user-visible path,
-  // so memory latency / errors can't block the chat turn. Safe because
-  // Lambda's default `callbackWaitsForEmptyEventLoop=true` keeps the
-  // runtime alive until pending promises settle. (Verified: no caller in
-  // this codebase sets that flag to false.)
-  const persistTurnToMemory = (stopReason: string) => {
-    if (session.agentType === "public") return; // anon userSubs are ephemeral
-    const turns: ConversationTurn[] = [{ role: "USER", text: userText }];
-    const assistant = assistantTextAcrossLoops.trim();
-    if (assistant) turns.push({ role: "ASSISTANT", text: assistant });
-    // Don't await; log on failure inside writeMemoryEvent.
-    void writeMemoryEvent(session.userSub, session.bedrockSessionId, turns)
-      .catch((e) => console.warn(`[chatMessage] memory write (stop=${stopReason}) failed:`, e));
-    // Also persist to the user-facing transcript table. Separate store
-    // because AgentCore Memory only retains compressed summaries; this
-    // table backs the "scroll up to see prior chats" UI.
-    void writeChatHistoryTurn({
-      userSub: session.userSub,
-      sessionId: session.bedrockSessionId,
-      userText,
-      assistantText: assistant,
-      agentType: session.agentType,
-    }).catch((e) => console.warn(`[chatMessage] chat-history write (stop=${stopReason}) failed:`, e));
-  };
-
-  try {
-    let inputText: string | undefined = firstTurnText;
-    let returnControlInvocationResults: any[] | undefined;
-    let invocationId: string | undefined;
-
-    // The agent may need multiple "turns" within one user message if it calls
-    // multiple tools. Cap at 6 to prevent runaway loops.
-    const MAX_TOOL_LOOPS = 6;
-
-    for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
-      const command = new InvokeAgentCommand({
-        agentId: target.agentId,
-        agentAliasId: target.agentAliasId,
-        sessionId: session.bedrockSessionId,
-        inputText: returnControlInvocationResults ? undefined : inputText,
-        sessionState: returnControlInvocationResults
-          ? {
-              invocationId,
-              returnControlInvocationResults,
-            }
-          : undefined,
-        // Trace enabled: surfaces guardrail decisions, model rationale, and
-        // any safety-decline cause in the event stream. Required to diagnose
-        // canned "Sorry, I am unable to assist..." responses — without trace
-        // we only see the user-facing text and have no idea why.
-        enableTrace: true,
-      });
-
-      console.log(`[chatMessage] InvokeAgent loop=${loop} sessionId=${session.bedrockSessionId} hasReturnControl=${!!returnControlInvocationResults} inputText="${(inputText || "").slice(0, 120)}"`);
-
-      const response = await bedrock.send(command);
-      if (!response.completion) {
-        // Persist whatever turn we have so memory continuity isn't lost,
-        // then return — falling through to the loop-cap path below would
-        // send a second contradictory error frame.
-        persistTurnToMemory("empty_completion");
-        await postFrame(api, connectionId, { type: "error", reason: "empty_completion" });
-        return { statusCode: 200, body: "ok" };
-      }
-
-      let pendingToolCalls: ToolCall[] = [];
-      let pendingInvocationId: string | undefined;
-      let assistantTextThisTurn = "";
-
-      for await (const event of response.completion) {
-        if (event.chunk?.bytes) {
-          const delta = decoder.decode(event.chunk.bytes);
-          assistantTextThisTurn += delta;
-          await postFrame(api, connectionId, { type: "token", delta });
-          continue;
-        }
-
-        if (event.returnControl) {
-          pendingInvocationId = event.returnControl.invocationId;
-          const inputs = event.returnControl.invocationInputs || [];
-          for (const inv of inputs) {
-            const fn = inv.functionInvocationInput;
-            if (fn?.function) {
-              const params: Record<string, any> = {};
-              for (const p of fn.parameters || []) {
-                if (p.name) params[p.name] = coerceParam(p.value, p.type);
-              }
-              pendingToolCalls.push({
-                toolName: fn.function,
-                input: params,
-                // Echo the EXACT action-group name back in functionResult.
-                // With chunked groups (DentiPalProTools1/2/3) hardcoding is wrong.
-                actionGroup: fn.actionGroup,
-              });
-            }
-          }
-        }
-
-        // Trace events — log a compact view so we can see what Bedrock was
-        // actually doing on every turn. The trace object is deep; stringify
-        // and truncate to keep the log bytes reasonable.
-        if (event.trace) {
-          try {
-            const t = event.trace;
-            const truncated = JSON.stringify(t).slice(0, 1800);
-            console.log(`[chatMessage] trace loop=${loop}: ${truncated}`);
-          } catch {
-            console.log(`[chatMessage] trace loop=${loop}: <unserializable>`);
-          }
-        }
-
-        // Catch any other unhandled event keys.
-        const knownKeys = new Set(["chunk", "returnControl", "trace"]);
-        const unknown = Object.keys(event).filter((k) => !knownKeys.has(k));
-        if (unknown.length > 0) {
-          console.log(`[chatMessage] unknown event keys loop=${loop}: ${unknown.join(",")} payload=${JSON.stringify(event).slice(0, 800)}`);
-        }
-      }
-
-      console.log(`[chatMessage] turn complete loop=${loop} pendingToolCalls=${pendingToolCalls.length} assistantTextLen=${assistantTextThisTurn.length} text="${assistantTextThisTurn.slice(0, 200)}"`);
-
-      // Roll into the cross-loop accumulator so memory captures the
-      // full assistant utterance even when it was split by tool calls.
-      assistantTextAcrossLoops += assistantTextThisTurn;
-
-      // No tool calls => assistant turn is complete.
-      if (pendingToolCalls.length === 0) {
-        persistTurnToMemory("end_turn");
-        await postFrame(api, connectionId, { type: "final", stopReason: "end_turn" });
-        return { statusCode: 200, body: "ok" };
-      }
-
-      // Execute every tool the agent asked for, forward results to client,
-      // then feed them back into Bedrock for the next loop.
-      const results: any[] = [];
-      for (const call of pendingToolCalls) {
-        const result = await executeTool(call, auth, connectionId, session.userContext as any);
-        await postFrame(api, connectionId, {
-          type: "toolResult",
-          tool: call.toolName,
-          ok: result.ok,
-          data: result.ok ? result.data : undefined,
-          error: result.ok ? undefined : result.error,
-        });
-        results.push({
-          functionResult: {
-            actionGroup: call.actionGroup || 'DentiPalProTools1', // fallback, but should always be set
-            function: call.toolName,
-            responseBody: {
-              TEXT: {
-                body: JSON.stringify(result.ok ? result.data : { error: result.error }),
-              },
-            },
-          },
-        });
-      }
-
-      // Re-enter the loop with tool results so the model can keep reasoning.
-      invocationId = pendingInvocationId;
-      returnControlInvocationResults = results;
-      inputText = undefined;
-    }
-
-    // Hit the loop cap.
-    persistTurnToMemory("tool_loop_cap");
+  // ---- 3. Route to AgentCore Runtime ----
+  // Single path now — the legacy Bedrock Agents InvokeAgentCommand loop
+  // was removed when the runtime took over. If the per-agentType runtime
+  // ARN env var is missing (misconfigured deploy), error out loudly so
+  // the user sees something specific instead of a silent hang.
+  const runtimeArn = getRuntimeArn(session.agentType);
+  if (!runtimeArn) {
+    console.error(`chatMessage: no runtime ARN configured for agentType=${session.agentType}`);
     await postFrame(api, connectionId, {
       type: "error",
-      reason: "tool_loop_cap",
-      detail: `Agent exceeded ${MAX_TOOL_LOOPS} tool-call rounds in one turn`,
+      reason: "runtime_not_configured",
+      detail: `No BEDROCK_RUNTIME_*_ARN env var set for '${session.agentType}'`,
     });
-    return { statusCode: 200, body: "ok" };
-
-  } catch (err: any) {
-    console.error("chatMessage: Bedrock invoke failed", err);
-    // Memory still gets the (possibly partial) turn — useful for diagnostic
-    // continuity across sessions even when this one errored out.
-    persistTurnToMemory("agent_failure");
-    await postFrame(api, connectionId, {
-      type: "error",
-      reason: "agent_failure",
-      detail: err?.message || "Bedrock InvokeAgent failed",
-    });
-    return { statusCode: 500, body: err?.message || "agent_failure" };
+    return { statusCode: 500, body: "Runtime not configured" };
   }
+  return await invokeViaRuntime({ runtimeArn, session, auth, frame, api, connectionId });
 };
 
-function coerceParam(value: string | undefined, type: string | undefined): any {
-  if (value === undefined || value === null) return undefined;
-  const t = (type || "").toLowerCase();
-  if (t === "number" || t === "integer") {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : value;
+/**
+ * WS-5 branch: route the turn through AgentCore Runtime (LangGraph agent
+ * containers from WS-4) instead of the legacy Bedrock Agents loop.
+ *
+ * The runtime owns the plan/execute/reflect loop, tool calls (via Gateway
+ * MCP), and memory hydrate. This Lambda becomes a thin transport:
+ *   1. Build the invocation payload (auth, conversationId, user text).
+ *   2. Stream the runtime's SSE events back as WS frames.
+ *   3. Persist the turn pair to ChatMessages + AgentCore Memory once
+ *      streaming settles — same fire-and-forget pattern the legacy path
+ *      uses, so transcript continuity is preserved across paths.
+ *
+ * runtimeSessionId is the per-conversation id from the WS frame (or the
+ * legacy fallback). Same conversation reuses the same warm runtime
+ * container; different conversations get fresh sessions so working memory
+ * doesn't leak across them.
+ */
+async function invokeViaRuntime(opts: {
+  runtimeArn: string;
+  session: ChatSession;
+  auth: AuthContext;
+  frame: InboundFrame;
+  api: ApiGatewayManagementApiClient;
+  connectionId: string;
+}): Promise<APIGatewayProxyResult> {
+  const { runtimeArn, session, auth, frame, api, connectionId } = opts;
+  // Confirm path is unreachable here — handlerBody returned earlier for
+  // confirmAction frames. Narrow explicitly.
+  const userText = (frame as ChatMessageFrame).text;
+  const conversationId =
+    (frame as ChatMessageFrame).conversationId || legacyConversationId(session.userSub);
+
+  // runtimeSessionId: use the conversationId so all turns in one
+  // conversation share a runtime session (warm container, persistent
+  // working memory). AgentCore Runtime keys session storage by this id.
+  const runtimeSessionId = conversationId;
+
+  // Forward the cached clinics list so the runtime's MCP tools can
+  // resolve clinic names → UUIDs without an extra round-trip. The user
+  // context cache is populated at session bootstrap.
+  const clinics = ((session.userContext as any)?.clinics || []) as Array<{ clinicId: string; name?: string }>;
+
+  try {
+    const { assistantText, stopReason } = await invokeAgentRuntime({
+      runtimeArn,
+      runtimeSessionId,
+      userText,
+      identity: {
+        userSub: auth.userSub,
+        userType: session.agentType,
+        userGroups: auth.userGroups || [],
+        email: auth.email,
+        clinics,
+      },
+      conversationId,
+      api,
+      connectionId,
+    });
+
+    // Persist the turn (fire-and-forget, mirrors the legacy path).
+    if (session.agentType !== "public" && assistantText.trim()) {
+      const turns: ConversationTurn[] = [
+        { role: "USER", text: userText },
+        { role: "ASSISTANT", text: assistantText },
+      ];
+      void writeMemoryEvent(session.userSub, session.bedrockSessionId, turns)
+        .catch((e) => console.warn(`[chatMessage:WS-5] memory write (${stopReason}) failed:`, e));
+    }
+    void writeChatHistoryTurn({
+      userSub: session.userSub,
+      conversationId,
+      sessionId: session.bedrockSessionId,
+      userText,
+      assistantText,
+      agentType: session.agentType,
+    }).catch((e) => console.warn(`[chatMessage:WS-5] chat-history write (${stopReason}) failed:`, e));
+
+    return { statusCode: 200, body: "ok" };
+  } catch (err: any) {
+    console.error("[chatMessage:WS-5] InvokeAgentRuntime failed", err);
+    await postFrame(api, connectionId, {
+      type: "error",
+      reason: "runtime_failure",
+      detail: err?.message || "InvokeAgentRuntime failed",
+    });
+    return { statusCode: 500, body: err?.message || "runtime_failure" };
   }
-  if (t === "boolean") return value === "true";
-  if (t === "array" || t === "object") {
-    try { return JSON.parse(value); } catch { return value; }
-  }
-  return value;
 }
+
 

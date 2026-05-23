@@ -14,6 +14,50 @@
 export type ToolBucket = "info" | "search" | "response" | "audit";
 export type AgentScope = "clinic" | "professional" | "both";
 
+/**
+ * Pre/post normalizer tags. Matches the switch in
+ * chat-gateway/wrapperDispatch.ts → runPreNormalizers / runPostNormalizers.
+ * Adding a new tag here also requires a case in that switch.
+ */
+export type GatewayNormalizer =
+  | "clinicIds"
+  | "professionalRole"
+  | "dates"
+  | "applicationStatusFilter"
+  | "dayDateRangeFilter"
+  | "actionableApplicants"
+  | "trimPastDates";
+
+/**
+ * Routing metadata for the AgentCore Gateway dispatcher. Tools without a
+ * `gateway` field are visible to the model (the schema is still emitted)
+ * but the dispatcher returns 501 if it ever sees one — useful for schemas
+ * we want advertised but not yet implemented.
+ *
+ *   handlerModule  — file under lambda/src/handlers/ (no .ts). Special
+ *                    markers: "__preview__" for preview_* tools (dispatcher
+ *                    handles inline, no handler call); "__ddbQuery__" for
+ *                    the generic DDB escape hatch.
+ *   method         — HTTP method the underlying handler reads from the
+ *                    synthetic API-Gateway event.
+ *   inputShape     — where the input maps:
+ *                      body          → JSON body
+ *                      path          → pathParameters[pathParamKey]
+ *                      query         → queryStringParameters (stringified)
+ *                      pathAndBody   → pathParamKey to path, rest to body
+ *   pathParamKey   — required for "path" / "pathAndBody".
+ *   preNormalizers — run on input BEFORE the handler call.
+ *   postNormalizers — run on response BEFORE returning to the agent.
+ */
+export interface GatewayRouting {
+  handlerModule: string;
+  method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
+  inputShape: "body" | "path" | "query" | "pathAndBody";
+  pathParamKey?: string;
+  preNormalizers?: GatewayNormalizer[];
+  postNormalizers?: GatewayNormalizer[];
+}
+
 export interface ToolDefinition {
   name: string;
   bucket: ToolBucket;
@@ -21,6 +65,9 @@ export interface ToolDefinition {
   description: string;
   inputSchema: Record<string, any>;
   pairedPreview?: string;
+  /** Optional — present when the tool is wired through AgentCore Gateway
+   *  (WS-3). When absent, dispatcher returns 501. */
+  gateway?: GatewayRouting;
 }
 
 const NUMBER = { type: "number" };
@@ -47,23 +94,37 @@ export const SEARCH_JOBS_NEAR_ME: ToolDefinition = {
       assistedHygiene: BOOL, limit: NUMBER,
     },
   },
+  gateway: {
+    handlerModule: "getProfessionalFilteredJobs", method: "GET", inputShape: "query",
+    postNormalizers: ["trimPastDates", "dayDateRangeFilter"],
+  },
 };
 
 export const GET_JOB_DETAILS: ToolDefinition = {
   name: "get_job_details", bucket: "info", scope: "both",
   description: "Get full details for a job by jobId.",
   inputSchema: { type: "object", required: ["jobId"], properties: { jobId: STRING } },
+  gateway: { handlerModule: "getJobPosting", method: "GET", inputShape: "path", pathParamKey: "jobId" },
 };
 
 export const GET_MY_APPLICATIONS: ToolDefinition = {
   name: "get_my_applications", bucket: "info", scope: "professional",
   description:
-    "List the professional's applications and their statuses. " +
-    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) or `dateFrom`/`dateTo` (YYYY-MM-DD) " +
-    "to filter by the underlying shift's date. Server filters.",
+    "List the professional's applications. " +
+    "Pass `status` to scope to one tab: 'pending' (pending + negotiating — anything awaiting clinic action), " +
+    "'scheduled' (accepted/hired/confirmed), 'completed', 'no_show', 'rejected' (rejected/declined/canceled). " +
+    "Omit `status` to return EVERY application across all statuses (use this only for 'show me all my applications'). " +
+    "Pass `dayOfWeek` (mon|tue|wed|thu|fri|sat|sun) or `dateFrom`/`dateTo` (YYYY-MM-DD) to filter by shift date. Server filters.",
   inputSchema: {
     type: "object",
-    properties: { dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+    properties: {
+      status: { type: "string", enum: ["pending", "scheduled", "completed", "no_show", "rejected"] },
+      dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING,
+    },
+  },
+  gateway: {
+    handlerModule: "getJobApplications", method: "GET", inputShape: "query",
+    postNormalizers: ["applicationStatusFilter", "dayDateRangeFilter"],
   },
 };
 
@@ -77,6 +138,10 @@ export const GET_MY_INVITATIONS: ToolDefinition = {
     type: "object",
     properties: { dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
   },
+  gateway: {
+    handlerModule: "getJobInvitations", method: "GET", inputShape: "query",
+    postNormalizers: ["dayDateRangeFilter"],
+  },
 };
 
 export const GET_SCHEDULED_SHIFTS: ToolDefinition = {
@@ -88,6 +153,10 @@ export const GET_SCHEDULED_SHIFTS: ToolDefinition = {
   inputSchema: {
     type: "object",
     properties: { clinicId: STRING, dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
+  },
+  gateway: {
+    handlerModule: "getScheduledShifts", method: "GET", inputShape: "path",
+    pathParamKey: "clinicId", postNormalizers: ["dayDateRangeFilter"],
   },
 };
 
@@ -101,12 +170,17 @@ export const GET_COMPLETED_SHIFTS: ToolDefinition = {
     type: "object",
     properties: { clinicId: STRING, dayOfWeek: STRING, dateFrom: STRING, dateTo: STRING },
   },
+  gateway: {
+    handlerModule: "getCompletedShifts", method: "GET", inputShape: "path",
+    pathParamKey: "clinicId", postNormalizers: ["dayDateRangeFilter"],
+  },
 };
 
 export const GET_MY_NEGOTIATIONS: ToolDefinition = {
   name: "get_my_negotiations", bucket: "info", scope: "professional",
   description: "List all of the professional's open negotiations.",
   inputSchema: { type: "object", properties: {} },
+  gateway: { handlerModule: "getAllNegotiations-Prof", method: "GET", inputShape: "query" },
 };
 
 export const APPLY_TO_JOB: ToolDefinition = {
@@ -121,6 +195,10 @@ export const APPLY_TO_JOB: ToolDefinition = {
       notes: STRING,
     },
   },
+  gateway: {
+    handlerModule: "createJobApplication", method: "POST",
+    inputShape: "pathAndBody", pathParamKey: "jobId",
+  },
 };
 
 export const RESPOND_INVITATION: ToolDefinition = {
@@ -134,6 +212,10 @@ export const RESPOND_INVITATION: ToolDefinition = {
       message: STRING,
     },
   },
+  gateway: {
+    handlerModule: "respondToInvitation", method: "POST",
+    inputShape: "pathAndBody", pathParamKey: "invitationId",
+  },
 };
 
 export const PREVIEW_APPLY_TO_JOB: ToolDefinition = {
@@ -146,6 +228,7 @@ export const PREVIEW_APPLY_TO_JOB: ToolDefinition = {
       startDate: STRING, notes: STRING,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_APPLY_TO_JOB: ToolDefinition = {
@@ -159,6 +242,7 @@ export const CONFIRM_APPLY_TO_JOB: ToolDefinition = {
       availability: STRING, startDate: STRING, notes: STRING,
     },
   },
+  gateway: { handlerModule: "createJobApplication", method: "POST", inputShape: "pathAndBody", pathParamKey: "jobId" },
 };
 
 export const PREVIEW_RESPOND_INVITATION: ToolDefinition = {
@@ -174,6 +258,7 @@ export const PREVIEW_RESPOND_INVITATION: ToolDefinition = {
       availabilityNotes: STRING, counterProposalMessage: STRING,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_RESPOND_INVITATION: ToolDefinition = {
@@ -188,12 +273,14 @@ export const CONFIRM_RESPOND_INVITATION: ToolDefinition = {
       proposedSalaryMax: NUMBER, availabilityNotes: STRING, counterProposalMessage: STRING,
     },
   },
+  gateway: { handlerModule: "respondToInvitation", method: "POST", inputShape: "pathAndBody", pathParamKey: "invitationId" },
 };
 
 export const PREVIEW_WITHDRAW_APPLICATION: ToolDefinition = {
   name: "preview_withdraw_application", bucket: "response", scope: "professional",
   description: "Render confirm-card for withdrawing an application.",
   inputSchema: { type: "object", required: ["applicationId"], properties: { applicationId: STRING, reason: STRING } },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_WITHDRAW_APPLICATION: ToolDefinition = {
@@ -204,6 +291,7 @@ export const CONFIRM_WITHDRAW_APPLICATION: ToolDefinition = {
     type: "object", required: ["previewToken", "applicationId"],
     properties: { previewToken: STRING, applicationId: STRING, reason: STRING },
   },
+  gateway: { handlerModule: "deleteJobApplication", method: "DELETE", inputShape: "path", pathParamKey: "applicationId" },
 };
 
 // --- PRO Phase 4: standalone negotiate, attest, profile, address, notifications, feedback, referral ---
@@ -222,6 +310,7 @@ export const PREVIEW_NEGOTIATE_PRO: ToolDefinition = {
       payType: STRING,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_NEGOTIATE_PRO: ToolDefinition = {
@@ -238,6 +327,7 @@ export const CONFIRM_NEGOTIATE_PRO: ToolDefinition = {
       payType: STRING,
     },
   },
+  gateway: { handlerModule: "respondToNegotiation", method: "PUT", inputShape: "pathAndBody", pathParamKey: "applicationId" },
 };
 
 export const PREVIEW_ATTEST_COMPLETED_SHIFT: ToolDefinition = {
@@ -250,6 +340,7 @@ export const PREVIEW_ATTEST_COMPLETED_SHIFT: ToolDefinition = {
       signedAt: STRING, notes: STRING,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_ATTEST_COMPLETED_SHIFT: ToolDefinition = {
@@ -263,6 +354,7 @@ export const CONFIRM_ATTEST_COMPLETED_SHIFT: ToolDefinition = {
       signedAt: STRING, notes: STRING,
     },
   },
+  gateway: { handlerModule: "updateCompletedShifts", method: "PUT", inputShape: "body" },
 };
 
 export const PREVIEW_UPDATE_MY_PROFILE: ToolDefinition = {
@@ -276,6 +368,7 @@ export const PREVIEW_UPDATE_MY_PROFILE: ToolDefinition = {
       years_experience: NUMBER, license_number: STRING, license_state: STRING,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_UPDATE_MY_PROFILE: ToolDefinition = {
@@ -291,6 +384,7 @@ export const CONFIRM_UPDATE_MY_PROFILE: ToolDefinition = {
       years_experience: NUMBER, license_number: STRING, license_state: STRING,
     },
   },
+  gateway: { handlerModule: "updateProfessionalProfile", method: "PUT", inputShape: "body" },
 };
 
 export const PREVIEW_UPDATE_HOME_ADDRESS: ToolDefinition = {
@@ -303,6 +397,7 @@ export const PREVIEW_UPDATE_HOME_ADDRESS: ToolDefinition = {
       city: STRING, state: STRING, pincode: STRING, country: STRING,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_UPDATE_HOME_ADDRESS: ToolDefinition = {
@@ -317,6 +412,7 @@ export const CONFIRM_UPDATE_HOME_ADDRESS: ToolDefinition = {
       city: STRING, state: STRING, pincode: STRING, country: STRING,
     },
   },
+  gateway: { handlerModule: "updateUserAddress", method: "PUT", inputShape: "body" },
 };
 
 export const PREVIEW_UPDATE_NOTIFICATION_PREFS: ToolDefinition = {
@@ -330,6 +426,7 @@ export const PREVIEW_UPDATE_NOTIFICATION_PREFS: ToolDefinition = {
       negotiationUpdates: BOOL, shiftReminders: BOOL,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_UPDATE_NOTIFICATION_PREFS: ToolDefinition = {
@@ -345,6 +442,7 @@ export const CONFIRM_UPDATE_NOTIFICATION_PREFS: ToolDefinition = {
       negotiationUpdates: BOOL, shiftReminders: BOOL,
     },
   },
+  gateway: { handlerModule: "updateNotificationPreferences", method: "PUT", inputShape: "body" },
 };
 
 export const PREVIEW_SUBMIT_FEEDBACK: ToolDefinition = {
@@ -357,6 +455,7 @@ export const PREVIEW_SUBMIT_FEEDBACK: ToolDefinition = {
       targetUserSub: STRING, targetClinicId: STRING, jobId: STRING,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_SUBMIT_FEEDBACK: ToolDefinition = {
@@ -370,6 +469,7 @@ export const CONFIRM_SUBMIT_FEEDBACK: ToolDefinition = {
       targetUserSub: STRING, targetClinicId: STRING, jobId: STRING,
     },
   },
+  gateway: { handlerModule: "submitFeedback", method: "POST", inputShape: "body" },
 };
 
 export const PREVIEW_SEND_REFERRAL: ToolDefinition = {
@@ -379,6 +479,7 @@ export const PREVIEW_SEND_REFERRAL: ToolDefinition = {
     type: "object", required: ["referredEmail", "referredName"],
     properties: { referredEmail: STRING, referredName: STRING, message: STRING },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_SEND_REFERRAL: ToolDefinition = {
@@ -389,6 +490,7 @@ export const CONFIRM_SEND_REFERRAL: ToolDefinition = {
     type: "object", required: ["previewToken", "referredEmail", "referredName"],
     properties: { previewToken: STRING, referredEmail: STRING, referredName: STRING, message: STRING },
   },
+  gateway: { handlerModule: "sendReferralInvite", method: "POST", inputShape: "body" },
 };
 
 // =========================================================================
@@ -399,12 +501,14 @@ export const GET_MY_CLINICS: ToolDefinition = {
   name: "get_my_clinics", bucket: "info", scope: "clinic",
   description: "List the clinics the current user manages. Use BEFORE post_*_job to pick clinicId(s).",
   inputSchema: { type: "object", properties: {} },
+  gateway: { handlerModule: "getUsersClinics", method: "GET", inputShape: "query" },
 };
 
 export const GET_ACTION_NEEDED: ToolDefinition = {
   name: "get_action_needed", bucket: "info", scope: "clinic",
   description: "List items needing the clinic's action — pending applications, open negotiations.",
   inputSchema: { type: "object", required: ["clinicId"], properties: { clinicId: STRING } },
+  gateway: { handlerModule: "getActionNeeded", method: "GET", inputShape: "path", pathParamKey: "clinicId" },
 };
 
 export const GET_OPEN_SHIFTS: ToolDefinition = {
@@ -425,6 +529,7 @@ export const GET_OPEN_SHIFTS: ToolDefinition = {
       dateTo: STRING,
     },
   },
+  gateway: { handlerModule: "getClinicShifts", method: "GET", inputShape: "path", pathParamKey: "clinicId", postNormalizers: ["trimPastDates", "dayDateRangeFilter"] },
 };
 
 export const LIST_APPLICANTS_FOR_JOB: ToolDefinition = {
@@ -434,34 +539,40 @@ export const LIST_APPLICANTS_FOR_JOB: ToolDefinition = {
     type: "object", required: ["clinicId"],
     properties: { clinicId: STRING, jobId: STRING },
   },
+  gateway: { handlerModule: "getJobApplicantsOfAClinic", method: "GET", inputShape: "path", pathParamKey: "clinicId", postNormalizers: ["actionableApplicants"] },
 };
 
 export const GET_PROFESSIONAL_INFO: ToolDefinition = {
   name: "get_professional_info", bucket: "info", scope: "clinic",
   description: "Get a professional's public profile by userSub.",
   inputSchema: { type: "object", required: ["userSub"], properties: { userSub: STRING } },
+  gateway: { handlerModule: "getPublicProfessionalProfile", method: "GET", inputShape: "path", pathParamKey: "userSub" },
 };
 
 export const GET_CLINIC_FAVORITES: ToolDefinition = {
   name: "get_clinic_favorites", bucket: "info", scope: "clinic",
   description: "List professionals the clinic has marked as favorites.",
   inputSchema: { type: "object", properties: {} },
+  gateway: { handlerModule: "getClinicFavorites", method: "GET", inputShape: "query" },
 };
 
 export const PREVIEW_POST_TEMPORARY_JOB: ToolDefinition = {
   name: "preview_post_temporary_job", bucket: "response", scope: "clinic",
-  description: "Render confirm-card for a single-shift temp job posting. ALWAYS preview before confirm.",
+  description: "Render confirm-card for a single-shift temp job posting. ALWAYS preview before confirm. You MUST ask the clinic how many professionals they need for the shift (`positions_required`, integer 1-20) before calling this tool — do not assume 1.",
   inputSchema: {
     type: "object",
-    required: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time"],
+    required: ["clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time", "positions_required", "work_location_type"],
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       date: STRING, shift_speciality: STRING, hours: NUMBER, rate: NUMBER,
       pay_type: STRING, start_time: STRING, end_time: STRING, meal_break: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      assisted_hygiene: BOOL, work_location_type: STRING,
+      assisted_hygiene: BOOL,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
+      positions_required: NUMBER,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
 };
 
 export const CONFIRM_POST_TEMPORARY_JOB: ToolDefinition = {
@@ -470,33 +581,39 @@ export const CONFIRM_POST_TEMPORARY_JOB: ToolDefinition = {
   description: "Create the temp job posting. Requires previewToken.",
   inputSchema: {
     type: "object",
-    required: ["previewToken", "clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time"],
+    required: ["previewToken", "clinicIds", "professional_role", "date", "shift_speciality", "hours", "rate", "start_time", "end_time", "positions_required", "work_location_type"],
     properties: {
       previewToken: STRING,
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       date: STRING, shift_speciality: STRING, hours: NUMBER, rate: NUMBER,
       pay_type: STRING, start_time: STRING, end_time: STRING, meal_break: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      assisted_hygiene: BOOL, work_location_type: STRING,
+      assisted_hygiene: BOOL,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
+      positions_required: NUMBER,
     },
   },
+  gateway: { handlerModule: "createTemporaryJob", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
 };
 
 export const PREVIEW_POST_CONSULTING_JOB: ToolDefinition = {
   name: "preview_post_consulting_job", bucket: "response", scope: "clinic",
-  description: "Render confirm-card for a multi-day consulting job posting.",
+  description: "Render confirm-card for a multi-day consulting job posting. You MUST ask the clinic how many professionals they need (`positions_required`, 1-20) AND the work mode (`work_location_type`: onsite | us_remote | global_remote) before calling this tool — do not assume defaults.",
   inputSchema: {
     type: "object",
-    required: ["clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time"],
+    required: ["clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time", "positions_required", "work_location_type"],
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       dates: STRING_ARRAY, total_days: NUMBER, hours_per_day: NUMBER,
       shift_speciality: STRING, rate: NUMBER, pay_type: STRING,
       start_time: STRING, end_time: STRING, meal_break: STRING,
       project_duration: STRING, job_title: STRING, job_description: STRING,
-      requirements: STRING_ARRAY, work_location_type: STRING,
+      requirements: STRING_ARRAY,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
+      positions_required: NUMBER,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "dates"] },
 };
 
 export const CONFIRM_POST_CONSULTING_JOB: ToolDefinition = {
@@ -505,23 +622,26 @@ export const CONFIRM_POST_CONSULTING_JOB: ToolDefinition = {
   description: "Create the consulting job. Requires previewToken.",
   inputSchema: {
     type: "object",
-    required: ["previewToken", "clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time"],
+    required: ["previewToken", "clinicIds", "professional_role", "dates", "total_days", "hours_per_day", "shift_speciality", "rate", "start_time", "end_time", "positions_required", "work_location_type"],
     properties: {
       previewToken: STRING, clinicIds: STRING_ARRAY, professional_role: STRING,
       professional_roles: STRING_ARRAY, dates: STRING_ARRAY, total_days: NUMBER,
       hours_per_day: NUMBER, shift_speciality: STRING, rate: NUMBER, pay_type: STRING,
       start_time: STRING, end_time: STRING, meal_break: STRING, project_duration: STRING,
-      job_title: STRING, job_description: STRING, requirements: STRING_ARRAY, work_location_type: STRING,
+      job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
+      positions_required: NUMBER,
     },
   },
+  gateway: { handlerModule: "createMultiDayConsulting", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole", "dates"] },
 };
 
 export const PREVIEW_POST_PERMANENT_JOB: ToolDefinition = {
   name: "preview_post_permanent_job", bucket: "response", scope: "clinic",
-  description: "Render confirm-card for a permanent job posting.",
+  description: "Render confirm-card for a permanent job posting. You MUST ask the clinic how many professionals they want to hire (`positions_required`, 1-20) AND the work mode (`work_location_type`: onsite | us_remote | global_remote) before calling this tool — do not assume defaults.",
   inputSchema: {
     type: "object",
-    required: ["clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits"],
+    required: ["clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits", "positions_required", "work_location_type"],
     properties: {
       clinicIds: STRING_ARRAY, professional_role: STRING, professional_roles: STRING_ARRAY,
       shift_speciality: STRING,
@@ -529,9 +649,11 @@ export const PREVIEW_POST_PERMANENT_JOB: ToolDefinition = {
       salary_min: NUMBER, salary_max: NUMBER, benefits: STRING_ARRAY,
       vacation_days: NUMBER, work_schedule: STRING, start_date: STRING,
       job_title: STRING, job_description: STRING, requirements: STRING_ARRAY,
-      work_location_type: STRING, pay_type: STRING, rate: NUMBER,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
+      pay_type: STRING, rate: NUMBER, positions_required: NUMBER,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
 };
 
 export const CONFIRM_POST_PERMANENT_JOB: ToolDefinition = {
@@ -540,17 +662,19 @@ export const CONFIRM_POST_PERMANENT_JOB: ToolDefinition = {
   description: "Create the permanent job. Requires previewToken.",
   inputSchema: {
     type: "object",
-    required: ["previewToken", "clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits"],
+    required: ["previewToken", "clinicIds", "professional_role", "shift_speciality", "employment_type", "benefits", "positions_required", "work_location_type"],
     properties: {
       previewToken: STRING, clinicIds: STRING_ARRAY, professional_role: STRING,
       professional_roles: STRING_ARRAY, shift_speciality: STRING,
       employment_type: STRING, salary_min: NUMBER, salary_max: NUMBER,
       benefits: STRING_ARRAY, vacation_days: NUMBER, work_schedule: STRING,
       start_date: STRING, job_title: STRING, job_description: STRING,
-      requirements: STRING_ARRAY, work_location_type: STRING,
-      pay_type: STRING, rate: NUMBER,
+      requirements: STRING_ARRAY,
+      work_location_type: { type: "string", enum: ["onsite", "us_remote", "global_remote"] },
+      pay_type: STRING, rate: NUMBER, positions_required: NUMBER,
     },
   },
+  gateway: { handlerModule: "createPermanentJob", method: "POST", inputShape: "body", preNormalizers: ["clinicIds", "professionalRole"] },
 };
 
 export const PREVIEW_ACCEPT_PROFESSIONAL: ToolDefinition = {
@@ -560,6 +684,7 @@ export const PREVIEW_ACCEPT_PROFESSIONAL: ToolDefinition = {
     type: "object", required: ["jobId", "professionalUserSub"],
     properties: { jobId: STRING, professionalUserSub: STRING, acceptedRate: NUMBER, message: STRING },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_ACCEPT_PROFESSIONAL: ToolDefinition = {
@@ -570,6 +695,7 @@ export const CONFIRM_ACCEPT_PROFESSIONAL: ToolDefinition = {
     type: "object", required: ["previewToken", "jobId", "professionalUserSub"],
     properties: { previewToken: STRING, jobId: STRING, professionalUserSub: STRING, acceptedRate: NUMBER, message: STRING },
   },
+  gateway: { handlerModule: "acceptProf", method: "POST", inputShape: "pathAndBody", pathParamKey: "jobId" },
 };
 
 export const PREVIEW_REJECT_PROFESSIONAL: ToolDefinition = {
@@ -579,6 +705,7 @@ export const PREVIEW_REJECT_PROFESSIONAL: ToolDefinition = {
     type: "object", required: ["clinicId", "jobId", "professionalUserSub"],
     properties: { clinicId: STRING, jobId: STRING, professionalUserSub: STRING, reason: STRING },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_REJECT_PROFESSIONAL: ToolDefinition = {
@@ -589,6 +716,7 @@ export const CONFIRM_REJECT_PROFESSIONAL: ToolDefinition = {
     type: "object", required: ["previewToken", "clinicId", "jobId", "professionalUserSub"],
     properties: { previewToken: STRING, clinicId: STRING, jobId: STRING, professionalUserSub: STRING, reason: STRING },
   },
+  gateway: { handlerModule: "rejectProf", method: "POST", inputShape: "pathAndBody", pathParamKey: "jobId" },
 };
 
 export const PREVIEW_SEND_INVITATIONS: ToolDefinition = {
@@ -602,6 +730,7 @@ export const PREVIEW_SEND_INVITATIONS: ToolDefinition = {
       urgency: { type: "string", enum: ["low", "medium", "high"] },
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_SEND_INVITATIONS: ToolDefinition = {
@@ -615,6 +744,7 @@ export const CONFIRM_SEND_INVITATIONS: ToolDefinition = {
       invitationMessage: STRING, urgency: STRING,
     },
   },
+  gateway: { handlerModule: "sendJobInvitations", method: "POST", inputShape: "pathAndBody", pathParamKey: "jobId" },
 };
 
 // --- Clinic Phase 4: mark-completed, no-show, profile, edit/cancel, favorites, team, search-pros ---
@@ -629,6 +759,7 @@ export const PREVIEW_MARK_SHIFT_COMPLETED: ToolDefinition = {
       attestedHours: NUMBER, attestedRate: NUMBER, clinicNotes: STRING,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_MARK_SHIFT_COMPLETED: ToolDefinition = {
@@ -642,6 +773,7 @@ export const CONFIRM_MARK_SHIFT_COMPLETED: ToolDefinition = {
       attestedHours: NUMBER, attestedRate: NUMBER, clinicNotes: STRING,
     },
   },
+  gateway: { handlerModule: "confirmShiftCompletion", method: "POST", inputShape: "pathAndBody", pathParamKey: "jobId" },
 };
 
 export const PREVIEW_REPORT_NO_SHOW: ToolDefinition = {
@@ -651,6 +783,7 @@ export const PREVIEW_REPORT_NO_SHOW: ToolDefinition = {
     type: "object", required: ["jobId", "professionalUserSub", "reason"],
     properties: { jobId: STRING, professionalUserSub: STRING, reason: STRING, details: STRING },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_REPORT_NO_SHOW: ToolDefinition = {
@@ -661,6 +794,7 @@ export const CONFIRM_REPORT_NO_SHOW: ToolDefinition = {
     type: "object", required: ["previewToken", "jobId", "professionalUserSub", "reason"],
     properties: { previewToken: STRING, jobId: STRING, professionalUserSub: STRING, reason: STRING, details: STRING },
   },
+  gateway: { handlerModule: "reportNoShow", method: "POST", inputShape: "pathAndBody", pathParamKey: "jobId" },
 };
 
 export const PREVIEW_UPDATE_CLINIC_PROFILE: ToolDefinition = {
@@ -683,6 +817,7 @@ export const PREVIEW_UPDATE_CLINIC_PROFILE: ToolDefinition = {
       special_requirements: STRING_ARRAY, notes: STRING, description: STRING,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_UPDATE_CLINIC_PROFILE: ToolDefinition = {
@@ -706,11 +841,12 @@ export const CONFIRM_UPDATE_CLINIC_PROFILE: ToolDefinition = {
       special_requirements: STRING_ARRAY, notes: STRING, description: STRING,
     },
   },
+  gateway: { handlerModule: "updateClinicProfile", method: "PUT", inputShape: "pathAndBody", pathParamKey: "clinicId" },
 };
 
 export const PREVIEW_EDIT_JOB: ToolDefinition = {
   name: "preview_edit_job", bucket: "response", scope: "clinic",
-  description: "Render confirm-card for editing an existing job posting. Pass only fields to change.",
+  description: "Render confirm-card for editing an existing job posting. Pass only fields to change. `positions_required` (1-20) is the hiring headcount; raising it on a filled job reopens it for more hires; lowering it below positions already filled is rejected.",
   inputSchema: {
     type: "object", required: ["jobId"],
     properties: {
@@ -721,8 +857,10 @@ export const PREVIEW_EDIT_JOB: ToolDefinition = {
       date: STRING, dates: STRING_ARRAY, hours_per_day: NUMBER, total_days: NUMBER,
       salary_min: NUMBER, salary_max: NUMBER, benefits: STRING_ARRAY,
       employment_type: STRING, vacation_days: NUMBER, work_schedule: STRING,
+      positions_required: NUMBER,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_EDIT_JOB: ToolDefinition = {
@@ -739,8 +877,10 @@ export const CONFIRM_EDIT_JOB: ToolDefinition = {
       date: STRING, dates: STRING_ARRAY, hours_per_day: NUMBER, total_days: NUMBER,
       salary_min: NUMBER, salary_max: NUMBER, benefits: STRING_ARRAY,
       employment_type: STRING, vacation_days: NUMBER, work_schedule: STRING,
+      positions_required: NUMBER,
     },
   },
+  gateway: { handlerModule: "updateJobPosting", method: "PUT", inputShape: "pathAndBody", pathParamKey: "jobId" },
 };
 
 export const PREVIEW_CANCEL_JOB: ToolDefinition = {
@@ -750,6 +890,7 @@ export const PREVIEW_CANCEL_JOB: ToolDefinition = {
     type: "object", required: ["jobId"],
     properties: { jobId: STRING, reason: STRING },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_CANCEL_JOB: ToolDefinition = {
@@ -760,6 +901,7 @@ export const CONFIRM_CANCEL_JOB: ToolDefinition = {
     type: "object", required: ["previewToken", "jobId"],
     properties: { previewToken: STRING, jobId: STRING, reason: STRING },
   },
+  gateway: { handlerModule: "updateJobStatus", method: "PUT", inputShape: "pathAndBody", pathParamKey: "jobId" },
 };
 
 export const PREVIEW_ADD_CLINIC_FAVORITE: ToolDefinition = {
@@ -769,6 +911,7 @@ export const PREVIEW_ADD_CLINIC_FAVORITE: ToolDefinition = {
     type: "object", required: ["professionalUserSub"],
     properties: { professionalUserSub: STRING },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_ADD_CLINIC_FAVORITE: ToolDefinition = {
@@ -779,6 +922,7 @@ export const CONFIRM_ADD_CLINIC_FAVORITE: ToolDefinition = {
     type: "object", required: ["previewToken", "professionalUserSub"],
     properties: { previewToken: STRING, professionalUserSub: STRING },
   },
+  gateway: { handlerModule: "addClinicFavorite", method: "POST", inputShape: "body" },
 };
 
 export const PREVIEW_REMOVE_CLINIC_FAVORITE: ToolDefinition = {
@@ -788,6 +932,7 @@ export const PREVIEW_REMOVE_CLINIC_FAVORITE: ToolDefinition = {
     type: "object", required: ["professionalUserSub"],
     properties: { professionalUserSub: STRING },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_REMOVE_CLINIC_FAVORITE: ToolDefinition = {
@@ -798,6 +943,7 @@ export const CONFIRM_REMOVE_CLINIC_FAVORITE: ToolDefinition = {
     type: "object", required: ["previewToken", "professionalUserSub"],
     properties: { previewToken: STRING, professionalUserSub: STRING },
   },
+  gateway: { handlerModule: "removeClinicFavorite", method: "DELETE", inputShape: "path", pathParamKey: "professionalUserSub" },
 };
 
 export const SEARCH_PROFESSIONALS: ToolDefinition = {
@@ -807,6 +953,7 @@ export const SEARCH_PROFESSIONALS: ToolDefinition = {
     type: "object",
     properties: { role: STRING, speciality: STRING, limit: NUMBER },
   },
+  gateway: { handlerModule: "getAllProfessionals", method: "GET", inputShape: "query" },
 };
 
 export const PREVIEW_INVITE_TEAM_MEMBER: ToolDefinition = {
@@ -820,6 +967,7 @@ export const PREVIEW_INVITE_TEAM_MEMBER: ToolDefinition = {
       first_name: STRING, last_name: STRING,
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_INVITE_TEAM_MEMBER: ToolDefinition = {
@@ -833,6 +981,7 @@ export const CONFIRM_INVITE_TEAM_MEMBER: ToolDefinition = {
       first_name: STRING, last_name: STRING,
     },
   },
+  gateway: { handlerModule: "createAssignment", method: "POST", inputShape: "body" },
 };
 
 export const PREVIEW_UPDATE_TEAM_MEMBER: ToolDefinition = {
@@ -845,6 +994,7 @@ export const PREVIEW_UPDATE_TEAM_MEMBER: ToolDefinition = {
       role: { type: "string", enum: ["ClinicAdmin", "ClinicManager", "ClinicViewer"] },
     },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_UPDATE_TEAM_MEMBER: ToolDefinition = {
@@ -855,6 +1005,7 @@ export const CONFIRM_UPDATE_TEAM_MEMBER: ToolDefinition = {
     type: "object", required: ["previewToken", "userSub", "clinicId", "role"],
     properties: { previewToken: STRING, userSub: STRING, clinicId: STRING, role: STRING },
   },
+  gateway: { handlerModule: "updateAssignment", method: "PUT", inputShape: "body" },
 };
 
 export const PREVIEW_REMOVE_TEAM_MEMBER: ToolDefinition = {
@@ -864,6 +1015,7 @@ export const PREVIEW_REMOVE_TEAM_MEMBER: ToolDefinition = {
     type: "object", required: ["userSub", "clinicId"],
     properties: { userSub: STRING, clinicId: STRING },
   },
+  gateway: { handlerModule: "__preview__", method: "POST", inputShape: "body" },
 };
 
 export const CONFIRM_REMOVE_TEAM_MEMBER: ToolDefinition = {
@@ -874,6 +1026,7 @@ export const CONFIRM_REMOVE_TEAM_MEMBER: ToolDefinition = {
     type: "object", required: ["previewToken", "userSub", "clinicId"],
     properties: { previewToken: STRING, userSub: STRING, clinicId: STRING },
   },
+  gateway: { handlerModule: "deleteAssignment", method: "DELETE", inputShape: "query" },
 };
 
 // =========================================================================
@@ -913,6 +1066,7 @@ export const QUERY_DDB_TABLE: ToolDefinition = {
       limit: NUMBER,        // 1-50, default 25
     },
   },
+  gateway: { handlerModule: "__ddbQuery__", method: "POST", inputShape: "body" },
 };
 
 // =========================================================================

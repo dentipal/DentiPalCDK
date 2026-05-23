@@ -43,6 +43,7 @@ interface UpdateTemporaryJobBody {
     professionalRoles?: string[]; // Maps to professional_roles (SS)
     shiftSpeciality?: string; // Maps to shift_speciality
     workLocationType?: string; // Maps to work_location_type
+    positionsRequired?: number; // Maps to positionsRequired (N)
     [key: string]: any;
 }
 
@@ -141,12 +142,34 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             });
         }
 
-        // --- Status gate: only open jobs are editable ---
+        // --- Status gate: only open/active jobs are editable, EXCEPT that
+        //     `positionsRequired` may be raised on a 'filled' job to reopen it
+        //     for more hires. Any other field change on a filled job still
+        //     requires cancel & repost.
         const status = existingJob.status?.S;
-        if (status && status !== 'open' && status !== 'active') {
+        const positionsFilled = existingJob.positionsFilled?.N ? Number(existingJob.positionsFilled.N) : 0;
+        const onlyPositionsEdit =
+            updateData.positionsRequired !== undefined &&
+            Object.keys(updateData).every((k) => k === "positionsRequired");
+        if (status && status !== 'open' && status !== 'active' && !(status === 'filled' && onlyPositionsEdit)) {
             return json(event, 409, {
                 error: `Cannot edit a ${status} job. Only open jobs can be edited; cancel and repost to make changes after a professional is scheduled.`
             });
+        }
+
+        // --- Validate positionsRequired against current hires ---
+        if (updateData.positionsRequired !== undefined) {
+            const next = updateData.positionsRequired;
+            if (!Number.isInteger(next) || next < 1 || next > 20) {
+                return json(event, 400, {
+                    error: "positionsRequired must be an integer between 1 and 20"
+                });
+            }
+            if (next < positionsFilled) {
+                return json(event, 400, {
+                    error: `positionsRequired cannot be less than positions already filled (${positionsFilled})`
+                });
+            }
         }
 
         // --- Validation parity with create ---
@@ -219,6 +242,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         addUpdateField('professionalRoles', 'professional_roles', 'SS');
         addUpdateField('shiftSpeciality', 'shift_speciality', 'S');
         addUpdateField('workLocationType', 'work_location_type', 'S');
+        addUpdateField('positionsRequired', 'positionsRequired', 'N');
+
+        // If positions are being raised on a 'filled' job, reopen it so new
+        // applications and hires can come in for the additional seats.
+        if (
+            updateData.positionsRequired !== undefined &&
+            status === 'filled' &&
+            updateData.positionsRequired > positionsFilled
+        ) {
+            updateExpressions.push("#status = :statusActive");
+            attributeNames["#status"] = "status";
+            attributeValues[":statusActive"] = { S: "active" };
+            fieldsUpdatedCount++;
+        }
 
         // Check if any fields were provided
         if (fieldsUpdatedCount === 0) {
@@ -283,6 +320,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 payType: updatedJob?.pay_type?.S || 'per_hour',
                 mealBreak: updatedJob?.meal_break?.BOOL || false,
                 status: updatedJob?.status?.S || 'active',
+                positionsRequired: updatedJob?.positionsRequired?.N ? parseInt(updatedJob.positionsRequired.N, 10) : undefined,
+                positionsFilled: updatedJob?.positionsFilled?.N ? parseInt(updatedJob.positionsFilled.N, 10) : undefined,
                 updatedAt: updatedTimestamp
             }
         });

@@ -1,25 +1,23 @@
 /**
- * AgentCore Memory I/O helpers.
+ * AgentCore Memory I/O helpers for the chat Lambda.
  *
- * Wraps the @aws-sdk/client-bedrock-agentcore data plane for the chat
- * Lambda's needs:
- *  - Write turns as conversational events so the managed SUMMARIZATION
- *    and USER_PREFERENCE strategies extract long-term records in the
- *    background.
- *  - Retrieve those records on session bootstrap and inject them into
- *    the first-turn preamble so the user perceives continuity across days.
- *  
+ * Two responsibilities remain after the AgentCore Runtime migration:
+ *  - `writeMemoryEvent`: persist turns from chatMessage's confirmAction
+ *    shortcut (the WS-bypass path that runs confirm_* tools directly).
+ *    Regular chat turns now flow through the runtime container, which
+ *    writes its own memory via runtime/shared/memory.ts.
+ *  - `clearUserMemory`: cascade-delete a user's derived memory records
+ *    on account deletion (deleteOwnAccount.ts).
  *
- *
- * All three helpers are tolerant: if AgentCore is unreachable or the memory
- * isn't provisioned yet, they log and return a neutral value rather than
- * blocking the chat turn. Memory is a quality-of-life signal, not load-bearing.
+ * Retrieval / preamble assembly moved into the runtime container — this
+ * Lambda no longer reads memory. All operations here are tolerant: if
+ * AgentCore is unreachable or the memory isn't provisioned yet, they
+ * log and return rather than blocking the chat turn.
  */
 
 import {
   BedrockAgentCoreClient,
   CreateEventCommand,
-  RetrieveMemoryRecordsCommand,
   ListMemoryRecordsCommand,
   BatchDeleteMemoryRecordsCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
@@ -73,43 +71,6 @@ export async function writeMemoryEvent(
 }
 
 /**
- * Fetch a compact, prompt-injection-ready text block summarising what
- * AgentCore Memory has on this user across prior sessions. Returns the
- * empty string if no records exist (cold start, AgentCore unreachable,
- * memory not yet provisioned, async extraction hasn't run yet).
- *
- * Caller is responsible for deciding whether to inject it into the
- * preamble — typically only on the first turn of a new chat session.
- */
-export async function hydrateMemoryPreamble(userSub: string): Promise<string> {
-  if (!MEMORY_ID) return "";
-
-  // Two semantic-search calls in parallel: one for prior session
-  // summaries, one for extracted preferences. namespacePath uses the
-  // hierarchical prefix so we match across all sessions for this user.
-  const [summaries, preferences] = await Promise.all([
-    retrieveRecordsSafe(`/summaries/${userSub}/`, "Most recent and relevant prior conversation context with this user."),
-    retrieveRecordsSafe(`/preferences/${userSub}/`, "Stable user preferences, goals, and constraints."),
-  ]);
-
-  if (!summaries.length && !preferences.length) return "";
-
-  const lines: string[] = [
-    `[USER MEMORY — extracted from prior conversations with this user; treat as context, do not echo verbatim]`,
-  ];
-  if (preferences.length) {
-    lines.push(`preferences:`);
-    for (const p of preferences) lines.push(`  - ${p}`);
-  }
-  if (summaries.length) {
-    lines.push(`recent session summaries:`);
-    for (const s of summaries) lines.push(`  - ${s}`);
-  }
-  lines.push(`[END USER MEMORY]`);
-  return lines.join("\n");
-}
-
-/**
  * Delete every derived memory record (summaries + preferences) for a given
  * user. Called from the account-deletion path so a closed account doesn't
  * leave conversational artifacts behind.
@@ -142,57 +103,6 @@ export async function clearUserMemory(userSub: string): Promise<void> {
 // ───────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ───────────────────────────────────────────────────────────────────────
-
-async function retrieveRecordsSafe(
-  namespacePath: string,
-  searchQuery: string,
-): Promise<string[]> {
-  try {
-    const res = await client.send(new RetrieveMemoryRecordsCommand({
-      memoryId: MEMORY_ID,
-      namespacePath,
-      searchCriteria: {
-        searchQuery,
-        topK: 5,
-      },
-    }));
-    const summaries = res.memoryRecordSummaries || [];
-    return summaries
-      .map((r: any) => extractRecordText(r))
-      .filter((s): s is string => !!s && s.length > 0);
-  } catch (e: any) {
-    // Empty namespace returns AccessDenied or ResourceNotFound on some
-    // accounts when no records exist yet — treat as cold start.
-    const name = e?.name || "";
-    if (name === "ResourceNotFoundException" || name === "AccessDeniedException") return [];
-    console.warn(`[agentCoreMemory] retrieve namespacePath=${namespacePath} failed: ${name} ${e?.message || e}`);
-    return [];
-  }
-}
-
-/** Pull a usable text string out of a MemoryRecordSummary. */
-function extractRecordText(record: any): string | undefined {
-  // Strategies may return content in different shapes:
-  //   - SUMMARIZATION → { content: { text: "..." } }
-  //   - USER_PREFERENCE → may be a structured JSON payload like
-  //     { content: { json: { ... } } } or stringified JSON
-  //   - some SDK versions surface a top-level `text` field
-  // Probe each shape and serialize JSON to a compact one-liner so the
-  // preamble stays prompt-friendly. Collapse whitespace either way.
-  const c = record?.content;
-  let text: string | undefined;
-  if (typeof c?.text === "string") {
-    text = c.text;
-  } else if (typeof record?.text === "string") {
-    text = record.text;
-  } else if (c?.json !== undefined) {
-    try { text = JSON.stringify(c.json); } catch { /* drop */ }
-  } else if (typeof c === "object" && c !== null) {
-    try { text = JSON.stringify(c); } catch { /* drop */ }
-  }
-  if (typeof text !== "string" || !text.trim()) return undefined;
-  return text.replace(/\s+/g, " ").trim();
-}
 
 async function deleteRecordsUnderNamespacePath(namespacePath: string): Promise<void> {
   let nextToken: string | undefined = undefined;

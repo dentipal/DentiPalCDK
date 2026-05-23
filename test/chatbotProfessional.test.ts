@@ -18,13 +18,22 @@ jest.mock("../lambda/src/handlers/chat/handlerAdapter", () => ({
 }));
 
 jest.mock("../lambda/src/handlers/chat/sessionStore", () => ({
-  setPendingPreview: jest.fn(async () => "preview-tok-fixed"),
-  clearPendingPreview: jest.fn(async () => {}),
   setRecentSearchResults: jest.fn(async () => {}),
+}));
+
+// Preview rows now live in a dedicated DDB table (DentiPal-V5-PreviewGates)
+// accessed via previewGateStore — see WS-2. The old session-row "pendingPreview"
+// path is gone, so the mock surface here mirrors the new module boundary:
+//   previewGateStore.putPreview   ← writes the row, returns a previewToken
+//   previewGate.clearPreviewAfterConfirm ← burns the row after success
+//   previewGate.verifyPreviewBeforeConfirm ← reads the row, checks token/payload
+jest.mock("../lambda/src/handlers/chat/previewGateStore", () => ({
+  putPreview: jest.fn(async () => "preview-tok-fixed"),
 }));
 
 jest.mock("../lambda/src/handlers/chat/previewGate", () => ({
   verifyPreviewBeforeConfirm: jest.fn(async () => ({ ok: true })),
+  clearPreviewAfterConfirm: jest.fn(async () => {}),
 }));
 
 jest.mock("../lambda/src/handlers/browseJobPostings", () => ({
@@ -56,14 +65,15 @@ import { AuthContext } from "../lambda/src/handlers/utils";
 import { callHandlerInProcess } from "../lambda/src/handlers/chat/handlerAdapter";
 import * as sessionStore from "../lambda/src/handlers/chat/sessionStore";
 import * as previewGate from "../lambda/src/handlers/chat/previewGate";
+import * as previewGateStore from "../lambda/src/handlers/chat/previewGateStore";
 import { runBrowseJobPostings } from "../lambda/src/handlers/browseJobPostings";
 import { runGetJobInvitations } from "../lambda/src/handlers/getJobInvitations";
 
 const mockCall = callHandlerInProcess as jest.MockedFunction<typeof callHandlerInProcess>;
 const mockBrowse = runBrowseJobPostings as unknown as jest.Mock;
 const mockGetInvites = runGetJobInvitations as unknown as jest.Mock;
-const mockSetPendingPreview = sessionStore.setPendingPreview as jest.Mock;
-const mockClearPendingPreview = sessionStore.clearPendingPreview as jest.Mock;
+const mockPutPreview = previewGateStore.putPreview as jest.Mock;
+const mockClearPreviewAfter = previewGate.clearPreviewAfterConfirm as jest.Mock;
 const mockSetRecentResults = sessionStore.setRecentSearchResults as jest.Mock;
 const mockVerifyGate = previewGate.verifyPreviewBeforeConfirm as jest.Mock;
 
@@ -98,7 +108,7 @@ function run(toolName: string, input: Record<string, any> = {}, auth = mkAuth(),
 beforeEach(() => {
   jest.clearAllMocks();
   mockVerifyGate.mockImplementation(async () => ({ ok: true }));
-  mockSetPendingPreview.mockImplementation(async () => "preview-tok-fixed");
+  mockPutPreview.mockImplementation(async () => "preview-tok-fixed");
 });
 
 // =========================================================================
@@ -357,16 +367,22 @@ describe("apply_to_job + legacy preview/confirm", () => {
     expect(res.data.kind).toBe("confirm_card");
     expect(res.data.previewToken).toBe("preview-tok-fixed");
     expect(res.data.confirmTool).toBe("confirm_apply_to_job");
-    expect(mockSetPendingPreview).toHaveBeenCalledWith(
-      "user-sub-1", CONN_ID, "preview_apply_to_job", { jobId: "J1" },
-    );
+    // Preview rows are now in PreviewGates (keyed by userSub+previewToken),
+    // not on the ChatConnections row. Asserts the new shape: connectionId
+    // is no longer part of the call.
+    expect(mockPutPreview).toHaveBeenCalledWith({
+      userSub: "user-sub-1",
+      toolName: "preview_apply_to_job",
+      payload: { jobId: "J1" },
+    });
   });
 
   test("TC-CBP-027: confirm_apply_to_job posts after gate succeeds and clears preview", async () => {
     mockCall.mockResolvedValueOnce({ status: 201, body: { applicationId: "A1" } });
     const res = await run("confirm_apply_to_job", { previewToken: "preview-tok-fixed", jobId: "J1", message: "hi" });
     expect(res.ok).toBe(true);
-    expect(mockClearPendingPreview).toHaveBeenCalledWith("user-sub-1", CONN_ID);
+    // New burn signature: (userSub, previewToken) — no connectionId.
+    expect(mockClearPreviewAfter).toHaveBeenCalledWith("user-sub-1", "preview-tok-fixed");
   });
 
   test("TC-CBP-028: tampered confirm payload rejected by preview gate", async () => {

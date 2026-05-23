@@ -9,7 +9,7 @@ import {
   BatchGetItemCommand,
   AttributeValue,
 } from "@aws-sdk/client-dynamodb";
-import { extractUserFromBearerToken } from "./utils";
+import { extractUserFromBearerToken, findSoftDeletedClinicIds } from "./utils";
 import { corsHeaders } from "./corsHeaders";
 export const dynamodb = new DynamoDBClient({
   region: process.env.REGION,
@@ -25,7 +25,7 @@ const JOB_INVITATIONS_TABLE = process.env.JOB_INVITATIONS_TABLE;
 async function fetchClinicName(
   clinicUserSub: string,
   clinicId: string,
-  cache: Map<string, string>
+  cache: Map<string, string | undefined>
 ): Promise<string | undefined> {
   // 1) Preferred: ClinicProfiles keyed by userSub.
   if (clinicUserSub) {
@@ -49,6 +49,8 @@ async function fetchClinicName(
 
   // 2) Fallback: Clinics table keyed by clinicId. Covers legacy/test rows
   //    where clinicUserSub is empty on both the application and job rows.
+  //    Returns undefined for soft-deleted clinics so the frontend falls back
+  //    to "Clinic no longer available" instead of leaking the real name.
   if (clinicId) {
     const cidKey = `cid:${clinicId}`;
     if (cache.has(cidKey)) return cache.get(cidKey);
@@ -56,9 +58,13 @@ async function fetchClinicName(
       const resp = await dynamodb.send(new GetItemCommand({
         TableName: CLINICS_TABLE,
         Key: { clinicId: { S: clinicId } },
-        ProjectionExpression: "#n",
+        ProjectionExpression: "#n, deletedAt",
         ExpressionAttributeNames: { "#n": "name" },
       }));
+      if (resp.Item?.deletedAt?.S) {
+        cache.set(cidKey, undefined);
+        return undefined;
+      }
       const name = resp.Item?.name?.S || "";
       if (name) {
         cache.set(cidKey, name);
@@ -189,8 +195,8 @@ export const handler = async (event: any) => {
     } while (exclusiveStartKey);
 
     const applicationsResponse = { Items: allItems };
-    const applications: any[] = [];
-    const clinicNameCache = new Map<string, string>();
+    let applications: any[] = [];
+    const clinicNameCache = new Map<string, string | undefined>();
 
     const toDates = (attr: AttributeValue | undefined): string[] => {
       if (!attr) return [];
@@ -372,6 +378,38 @@ export const handler = async (event: any) => {
         // ---- Job Type Filtering ----
         if (!jobType || application.jobType === jobType) {
           applications.push(application);
+        }
+      }
+    }
+
+    // ---- Drop pending-state applications tied to soft-deleted clinics ----
+    // Historical rows (status = completed / withdrawn / rejected / cancelled)
+    // stay visible so the professional's work record + audit trail survives a
+    // clinic deletion — the clinic name renders as "Clinic no longer
+    // available" via the frontend fallback. Pending-state rows (which would
+    // need the clinic to act on them) get hidden because no action is
+    // possible against a deleted clinic.
+    {
+      const PENDING_STATES = new Set([
+        "pending", "under_review", "negotiating", "accepted", "interviewing", "shortlisted",
+      ]);
+      const candidatePendingClinicIds = applications
+        .filter(a => PENDING_STATES.has((a.applicationStatus || "pending").toLowerCase()))
+        .map(a => (a as any).clinicId as string | undefined)
+        .filter((id): id is string => !!id);
+      if (candidatePendingClinicIds.length > 0) {
+        const deletedSet = await findSoftDeletedClinicIds(candidatePendingClinicIds);
+        if (deletedSet.size > 0) {
+          const before = applications.length;
+          applications = applications.filter(a => {
+            const status = (a.applicationStatus || "pending").toLowerCase();
+            if (!PENDING_STATES.has(status)) return true; // keep historical
+            const cid = (a as any).clinicId as string | undefined;
+            return !cid || !deletedSet.has(cid);
+          });
+          if (before !== applications.length) {
+            console.log(`[getJobApplications] Dropped ${before - applications.length} pending application(s) tied to soft-deleted clinics`);
+          }
         }
       }
     }

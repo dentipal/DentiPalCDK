@@ -92,6 +92,7 @@ interface JobData {
     requirements?: string[];
     work_location_type?: string;
     pay_type?: string;
+    positions_required?: number;
 }
 
 interface ClinicAddress {
@@ -298,6 +299,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             }
         }
 
+        const positionsRequired = jobData.positions_required ?? 1;
+        if (!Number.isInteger(positionsRequired) || positionsRequired < 1 || positionsRequired > 20) {
+            return json(event, 400, {
+                error: "Bad Request",
+                message: "positions_required must be an integer between 1 and 20",
+                details: { providedPositions: jobData.positions_required, validRange: "1-20" }
+            });
+        }
+
         // Meal break parsing
         const mealBreakRaw = typeof jobData.meal_break === "string" ? normalizeWs(jobData.meal_break) : "";
         if (mealBreakRaw && mealBreakRaw.length > 100) {
@@ -368,6 +378,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 pay_type: payType,
                 start_time: jobData.start_time,
                 end_time: jobData.end_time,
+                positionsRequired: positionsRequired,
+                positionsFilled: 0,
                 status: "active",
                 createdAt: timestamp,
                 updatedAt: timestamp,
@@ -448,7 +460,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 mealBreakMinutes: mealBreakMinutes,
                 totalHours: Number(jobData.total_days) * hoursPerDay,
                 startDate: sortedDates[0],
-                endDate: sortedDates[sortedDates.length - 1]
+                endDate: sortedDates[sortedDates.length - 1],
+                positionsRequired: positionsRequired,
             },
             timestamp: timestamp
         });
