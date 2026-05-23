@@ -104,7 +104,9 @@ export const PRO_TOOL_NAMES = new Set<string>([
   "query_ddb_table",
   "apply_to_job", "respond_invitation",
   "preview_negotiate", "confirm_negotiate",
-  "preview_apply_to_job", "confirm_apply_to_job",
+  // preview_apply_to_job / confirm_apply_to_job intentionally REMOVED so
+  // the agent can only route through the single-shot apply_to_job path
+  // (no proposedRate / availability / message prompting).
   "preview_respond_invitation", "confirm_respond_invitation",
   "preview_withdraw_application", "confirm_withdraw_application",
   "preview_attest_completed_shift", "confirm_attest_completed_shift",
@@ -116,7 +118,7 @@ export const PRO_TOOL_NAMES = new Set<string>([
 ]);
 
 export const CLINIC_TOOL_NAMES = new Set<string>([
-  "get_my_clinics", "get_action_needed", "get_open_shifts",
+  "get_my_clinics", "get_my_posted_jobs", "get_action_needed", "get_open_shifts",
   "get_scheduled_shifts", "get_completed_shifts",
   "list_applicants_for_job", "get_professional_info",
   "get_clinic_favorites", "get_job_details",
