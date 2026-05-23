@@ -439,7 +439,167 @@ function buildCallArgs(
  * a 500 with no body, which the model sees as "Error (undefined)" — same
  * surfacing problem the old toolExecutor fixed with safeBodyToString.
  */
-export const handler = async (event: GatewayInvocationEvent, _ctx: Context): Promise<DispatchResult> => {
+// ─────────────────────────────────────────────────────────────────────────
+// Bedrock Agents envelope shape (action group invocation).
+// Reference: https://docs.aws.amazon.com/bedrock/latest/userguide/agents-lambda.html
+// Bedrock sends:
+//   {
+//     messageVersion: "1.0",
+//     agent: { name, id, alias, version },
+//     actionGroup: "info-tools",
+//     function: "get_action_needed",
+//     parameters: [{ name, type, value }, ...],
+//     sessionId: "<conversationId>",
+//     sessionAttributes: { ... },
+//     promptSessionAttributes: { identity_userSub, identity_clinics_json, ... }
+//   }
+// We expect: a JSON response body the agent stringifies + a wrapped envelope:
+//   {
+//     messageVersion: "1.0",
+//     response: {
+//       actionGroup, function,
+//       functionResponse: { responseBody: { TEXT: { body: "<json>" } } }
+//     },
+//     sessionAttributes, promptSessionAttributes  // echoed back
+//   }
+// ─────────────────────────────────────────────────────────────────────────
+interface BedrockActionEvent {
+  messageVersion: "1.0";
+  agent?: { name?: string; id?: string; alias?: string; version?: string };
+  actionGroup?: string;
+  function?: string;
+  parameters?: Array<{ name: string; type: string; value: any }>;
+  sessionId?: string;
+  sessionAttributes?: Record<string, string>;
+  promptSessionAttributes?: Record<string, string>;
+}
+
+function isBedrockActionEvent(ev: any): ev is BedrockActionEvent {
+  return ev && typeof ev === "object" && ev.messageVersion === "1.0" && typeof ev.function === "string";
+}
+
+/**
+ * Convert a Bedrock action-group invocation into the existing
+ * GatewayInvocationEvent shape so the rest of this dispatcher (preview/
+ * confirm gates, normalizers, handler call) runs UNCHANGED.
+ *
+ * Parameters: Bedrock sends an array of {name, type, value}. We rebuild
+ * the input object. For parameters whose CFN type was "string" but whose
+ * underlying JSONSchema was object/array (we serialized as JSON strings
+ * in chat-bedrock-agents.ts), the model would have produced a stringified
+ * JSON; parse it back here. Catch parse errors silently — if the model
+ * sent a plain string, just keep it.
+ *
+ * Identity: Bedrock Agents has no per-invocation context for caller IAM
+ * identity. The runtime container (Deploy 3) passes userSub/email/clinics
+ * via `promptSessionAttributes` as JSON-stringified values; we deserialize
+ * them here. If they're missing (e.g. CLI sanity tests), we fall back to
+ * placeholder values so the dispatcher doesn't 401.
+ */
+function bedrockToGatewayEvent(ev: BedrockActionEvent): GatewayInvocationEvent {
+  const args: Record<string, any> = {};
+  for (const p of ev.parameters ?? []) {
+    let value: any = p.value;
+    // Bedrock Agents serializes ALL parameter values as strings in the
+    // event envelope, regardless of the schema type. Coerce based on the
+    // type the FunctionSchema declared so downstream handlers (which
+    // validate strictly — e.g. positions_required must be number 1..20)
+    // don't reject "2" vs 2.
+    if (typeof value === "string") {
+      if (p.type === "integer" || p.type === "number") {
+        const n = Number(value);
+        if (!Number.isNaN(n)) value = p.type === "integer" ? Math.trunc(n) : n;
+      } else if (p.type === "boolean") {
+        const lc = value.toLowerCase().trim();
+        if (lc === "true") value = true;
+        else if (lc === "false") value = false;
+      } else if (p.type === "string") {
+        const trimmed = value.trim();
+        if (
+          (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+          (trimmed.startsWith("[") && trimmed.endsWith("]"))
+        ) {
+          try { value = JSON.parse(trimmed); } catch { /* keep as string */ }
+        }
+      } else if (p.type === "array") {
+        const trimmed = value.trim();
+        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+          try { value = JSON.parse(trimmed); } catch { /* keep as string */ }
+        }
+      }
+    }
+    args[p.name] = value;
+  }
+
+  const psa = ev.promptSessionAttributes ?? {};
+  let clinics: Array<{ clinicId: string; name?: string }> = [];
+  if (psa.identity_clinics_json) {
+    try { clinics = JSON.parse(psa.identity_clinics_json); } catch { /* keep [] */ }
+  }
+  let userGroups: string[] = [];
+  if (psa.identity_user_groups_json) {
+    try { userGroups = JSON.parse(psa.identity_user_groups_json); } catch { /* keep [] */ }
+  }
+
+  return {
+    tool: ev.function,
+    arguments: args,
+    context: {
+      identity: {
+        userSub: psa.identity_user_sub || "bedrock-agent-cli-test",
+        userType: psa.identity_user_type || "clinic",
+        userGroups,
+        email: psa.identity_email || "",
+        clinics,
+      },
+      session: { conversationId: ev.sessionId },
+    },
+  };
+}
+
+function wrapForBedrock(
+  ev: BedrockActionEvent,
+  result: DispatchResult,
+): any {
+  // Bedrock wants the tool output as a string. Stringify either the
+  // success data or a structured error object so the model has enough
+  // context to react (and our trace translator can extract it).
+  const body = result.ok
+    ? JSON.stringify({ ok: true, data: result.data })
+    : JSON.stringify({ ok: false, status: result.status, error: result.error });
+  return {
+    messageVersion: "1.0",
+    response: {
+      actionGroup: ev.actionGroup,
+      function: ev.function,
+      functionResponse: {
+        responseBody: { TEXT: { body } },
+      },
+    },
+    sessionAttributes: ev.sessionAttributes ?? {},
+    promptSessionAttributes: ev.promptSessionAttributes ?? {},
+  };
+}
+
+/**
+ * Lambda entry. Dispatches on envelope shape:
+ *   - Bedrock Agents action-group invocation (messageVersion: "1.0") →
+ *     translate envelope, run the same core dispatcher, wrap result in
+ *     the Bedrock response shape.
+ *   - Everything else: treat as the existing AgentCore Gateway MCP shape.
+ *     During the hybrid migration both code paths exist; once Deploy 4
+ *     removes the Gateway wiring this branch becomes the only one.
+ */
+export const handler = async (event: any, ctx: Context): Promise<any> => {
+  if (isBedrockActionEvent(event)) {
+    const translated = bedrockToGatewayEvent(event);
+    const result = await runDispatcher(translated, ctx);
+    return wrapForBedrock(event, result);
+  }
+  return runDispatcher(event as GatewayInvocationEvent, ctx);
+};
+
+const runDispatcher = async (event: GatewayInvocationEvent, _ctx: Context): Promise<DispatchResult> => {
   const toolName = event.tool || event.name;
   if (!toolName) return err(400, "Gateway event missing tool/name field");
 
@@ -483,12 +643,20 @@ export const handler = async (event: GatewayInvocationEvent, _ctx: Context): Pro
       });
     }
 
-    // ----- confirm_* shortcut: verify the gate, then route to the handler -----
+    // ----- confirm_* shortcut: normalize FIRST so the gate compares apples
+    // to apples, then verify, then route to the handler.
+    //
+    // Why normalize before verify: preview_* normalizes the input (e.g.
+    // "qwerty clinic" -> "<uuid>") and stores the normalized payload as the
+    // gate. If confirm_* verifies the raw input first, the model's slight
+    // wording variations (raw clinic name vs. UUID) trip the equality check
+    // even though the underlying intent matches. Running normalizers on both
+    // sides eliminates the drift.
     if (toolName.startsWith("confirm_")) {
       const { previewToken, ...payload } = input;
+      runPreNormalizers(entry.preNormalizers, payload, clinicCtx);
       const gate = await verifyPreviewBeforeConfirm(auth.userSub, toolName, previewToken, payload);
       if (!gate.ok) return err(gate.status, gate.reason);
-      runPreNormalizers(entry.preNormalizers, payload, clinicCtx);
       const callArgs = buildCallArgs(toolName, entry, payload, auth);
       const r = await invokeUnderlyingHandler(entry.handlerModule, callArgs);
       if (r.status >= 400) {

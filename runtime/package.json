@@ -1,7 +1,7 @@
 {
   "name": "dentipal-runtime-agents",
-  "version": "0.1.0",
-  "description": "LangGraph.js agents (Professional / Clinic / Public) deployed to AgentCore Runtime via S3 direct code deploy (NODE_22).",
+  "version": "0.2.0",
+  "description": "Thin orchestrator (Professional / Clinic / Public) on AgentCore Runtime, delegating the agent loop to Bedrock Agents. NODE_22, direct S3 code deploy.",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,13 +16,8 @@
   },
   "dependencies": {
     "bedrock-agentcore": "^0.2.0",
-    "@aws-sdk/client-bedrock-agentcore": "^3.1045.0",
-    "@aws-sdk/client-bedrock-runtime": "^3.1045.0",
-    "@langchain/aws": "^0.1.5",
-    "@langchain/core": "^0.3.0",
-    "@langchain/langgraph": "^0.2.0",
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "zod": "^3.23.0"
+    "@aws-sdk/client-bedrock-agent-runtime": "^3.1045.0",
+    "@aws-sdk/client-bedrock-agentcore": "^3.1045.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

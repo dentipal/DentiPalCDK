@@ -2149,9 +2149,18 @@ export class DentiPalCDKStack extends cdk.Stack {
                 // against. Resolved at synth time via Fn::ImportValue against
                 // DentiPalChatbotStackV5's CfnOutputs (CHATBOT_EXPORTS).
                 PREVIEW_GATES_TABLE: cdk.Fn.importValue(CHATBOT_EXPORTS.previewGatesTableName),
-                BEDROCK_RUNTIME_PROFESSIONAL_ARN: cdk.Fn.importValue(CHATBOT_EXPORTS.professionalAgentArn),
-                BEDROCK_RUNTIME_CLINIC_ARN: cdk.Fn.importValue(CHATBOT_EXPORTS.clinicAgentArn),
-                BEDROCK_RUNTIME_PUBLIC_ARN: cdk.Fn.importValue(CHATBOT_EXPORTS.publicAgentArn),
+                // Hybrid migration: hardcoded V5 runtime ARNs as string
+                // literals. The chatbot stack's runtime ARN exports got
+                // stuck mid-transition (new runtimes created, output update
+                // canceled because main was importing the prior exports), so
+                // we bypass the cross-stack sync entirely. After the chatbot
+                // stack stabilizes, we can revert to Fn.importValue.
+                BEDROCK_RUNTIME_PROFESSIONAL_ARN:
+                  "arn:aws:bedrock-agentcore:us-east-1:489502444760:runtime/DentiPal_ProfessionalAgent_v5-zqkr8rEjxW",
+                BEDROCK_RUNTIME_CLINIC_ARN:
+                  "arn:aws:bedrock-agentcore:us-east-1:489502444760:runtime/DentiPal_ClinicAgent_v5-h4QZKo2BTJ",
+                BEDROCK_RUNTIME_PUBLIC_ARN:
+                  "arn:aws:bedrock-agentcore:us-east-1:489502444760:runtime/DentiPal_PublicAgent_v5-xW72gwGL5R",
                 // AgentCore Memory — long-term per-user memory hydrated by
                 // the LangGraph runtime on each invocation. The chat Lambda
                 // itself no longer reads it (the legacy Bedrock Agents path
@@ -2229,15 +2238,19 @@ export class DentiPalCDKStack extends cdk.Stack {
             ],
             resources: [cdk.Fn.importValue(CHATBOT_EXPORTS.previewGatesTableArn)],
         }));
+        // Hardcoded V5 runtime ARNs (matches env vars above). InvokeAgentRuntime
+        // permission scoped to the 3 specific runtime ARNs + their session/
+        // endpoint subresources. The "/*" suffixes are how Bedrock AgentCore
+        // models session-scoped sub-ARNs at IAM-policy-evaluation time.
         chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
             actions: ['bedrock-agentcore:InvokeAgentRuntime'],
             resources: [
-                cdk.Fn.importValue(CHATBOT_EXPORTS.professionalAgentArn),
-                cdk.Fn.importValue(CHATBOT_EXPORTS.clinicAgentArn),
-                cdk.Fn.importValue(CHATBOT_EXPORTS.publicAgentArn),
-                cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.professionalAgentArn), '/*']),
-                cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.clinicAgentArn), '/*']),
-                cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.publicAgentArn), '/*']),
+                'arn:aws:bedrock-agentcore:us-east-1:489502444760:runtime/DentiPal_ProfessionalAgent_v5-zqkr8rEjxW',
+                'arn:aws:bedrock-agentcore:us-east-1:489502444760:runtime/DentiPal_ClinicAgent_v5-h4QZKo2BTJ',
+                'arn:aws:bedrock-agentcore:us-east-1:489502444760:runtime/DentiPal_PublicAgent_v5-xW72gwGL5R',
+                'arn:aws:bedrock-agentcore:us-east-1:489502444760:runtime/DentiPal_ProfessionalAgent_v5-zqkr8rEjxW/*',
+                'arn:aws:bedrock-agentcore:us-east-1:489502444760:runtime/DentiPal_ClinicAgent_v5-h4QZKo2BTJ/*',
+                'arn:aws:bedrock-agentcore:us-east-1:489502444760:runtime/DentiPal_PublicAgent_v5-xW72gwGL5R/*',
             ],
         }));
 
