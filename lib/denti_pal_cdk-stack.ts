@@ -671,8 +671,7 @@ import * as cr from 'aws-cdk-lib/custom-resources';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as path from 'path';
-// Re-enable when DentiPalChatbotStackV5 is turned back on in bin/denti_pal_cdk.ts.
-// import { CHATBOT_EXPORTS } from './chatbot-stack';
+import { CHATBOT_EXPORTS } from './chatbot-stack';
 
 export class DentiPalCDKStack extends cdk.Stack {
     // ─── Public refs exposed to DentiPalChatbotStack ─────────────────
@@ -680,6 +679,7 @@ export class DentiPalCDKStack extends cdk.Stack {
     // in bin/denti_pal_cdk.ts) and mutates the chatMessage / monolith
     // Lambdas + grants IAM on shared business tables.
     public userPool!: cognito.UserPool;
+    public userPoolClientId!: string;
     public lambdaFunction!: lambda.Function;
     public chatMessageHandler!: lambda.Function;
     public chatMessagesTable!: dynamodb.Table;
@@ -857,6 +857,7 @@ export class DentiPalCDKStack extends cdk.Stack {
             authFlows: { userPassword: true, userSrp: true, adminUserPassword: true, custom: true },
             preventUserExistenceErrors: true,
         });
+        this.userPoolClientId = client.userPoolClientId;
 
         const groups = [
             'Root',
@@ -1646,10 +1647,9 @@ export class DentiPalCDKStack extends cdk.Stack {
                 NOTIFICATION_PREFERENCES_TABLE: notificationPreferencesTable.tableName,
                 NOTIFICATIONS_TABLE: notificationsTable.tableName,
                 CHAT_MESSAGES_TABLE: chatMessagesTable.tableName,
-                // CHAT_CONVERSATIONS_TABLE — DISABLED while
-                // DentiPalChatbotStackV5 is turned off. Uncomment when the
-                // chatbot stack ships (re-enable also in bin/denti_pal_cdk.ts).
-                // CHAT_CONVERSATIONS_TABLE: cdk.Fn.importValue(CHATBOT_EXPORTS.chatConversationsTableName),
+                // Sidebar's conversation list + CRUD — read/written by the
+                // REST monolith via /chat/conversations* routes.
+                CHAT_CONVERSATIONS_TABLE: cdk.Fn.importValue(CHATBOT_EXPORTS.chatConversationsTableName),
                 SES_REGION: this.region,
                 SES_TO: 'shashitest2004@gmail.com',     // Updated per your env variables
                 SMS_TOPIC_ARN: `arn:aws:sns:${this.region}:${this.account}:DentiPal-SMS-Notifications`, // Dynamic construction
@@ -1728,20 +1728,21 @@ export class DentiPalCDKStack extends cdk.Stack {
         allTables.forEach(table => {
             table.grantReadWriteData(lambdaFunction);
         });
-        // ChatConversations table grant — DISABLED while
-        // DentiPalChatbotStackV5 is turned off. Re-enable alongside the
-        // chatbot stack.
-        // lambdaFunction.addToRolePolicy(new iam.PolicyStatement({
-        //     actions: [
-        //         'dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem',
-        //         'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan',
-        //         'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem',
-        //     ],
-        //     resources: [
-        //         cdk.Fn.importValue(CHATBOT_EXPORTS.chatConversationsTableArn),
-        //         cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.chatConversationsTableArn), '/index/*']),
-        //     ],
-        // }));
+        // ChatConversations table — the REST monolith owns sidebar list/CRUD
+        // and transcript pagination, so it needs full RW on the base table
+        // plus query on the `userSub-lastMessageAt-index` GSI (for sidebar
+        // ordering).
+        lambdaFunction.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem',
+                'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan',
+                'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem',
+            ],
+            resources: [
+                cdk.Fn.importValue(CHATBOT_EXPORTS.chatConversationsTableArn),
+                cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.chatConversationsTableArn), '/index/*']),
+            ],
+        }));
 
         // Cognito Permissions
         lambdaFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -2143,15 +2144,14 @@ export class DentiPalCDKStack extends cdk.Stack {
                 // ChatConnections (new) + Connections (existing, for bootstrap read)
                 CHAT_CONNECTIONS_TABLE: chatConnectionsTable.tableName,
                 CONNS_TABLE: connectionsTable.tableName,
-                // Chatbot env vars — DISABLED while DentiPalChatbotStackV5
-                // is turned off. Re-enable alongside the chatbot stack in
-                // bin/denti_pal_cdk.ts. When the chatbot stack isn't
-                // deployed, these Fn.importValue calls would fail CFN
-                // deploy because the exports don't exist yet.
-                // PREVIEW_GATES_TABLE: cdk.Fn.importValue(CHATBOT_EXPORTS.previewGatesTableName),
-                // BEDROCK_RUNTIME_PROFESSIONAL_ARN: cdk.Fn.importValue(CHATBOT_EXPORTS.professionalAgentArn),
-                // BEDROCK_RUNTIME_CLINIC_ARN: cdk.Fn.importValue(CHATBOT_EXPORTS.clinicAgentArn),
-                // BEDROCK_RUNTIME_PUBLIC_ARN: cdk.Fn.importValue(CHATBOT_EXPORTS.publicAgentArn),
+                // Chatbot stack outputs — runtime ARNs (one per agent role) +
+                // the PreviewGates table that the confirm-path verifies tokens
+                // against. Resolved at synth time via Fn::ImportValue against
+                // DentiPalChatbotStackV5's CfnOutputs (CHATBOT_EXPORTS).
+                PREVIEW_GATES_TABLE: cdk.Fn.importValue(CHATBOT_EXPORTS.previewGatesTableName),
+                BEDROCK_RUNTIME_PROFESSIONAL_ARN: cdk.Fn.importValue(CHATBOT_EXPORTS.professionalAgentArn),
+                BEDROCK_RUNTIME_CLINIC_ARN: cdk.Fn.importValue(CHATBOT_EXPORTS.clinicAgentArn),
+                BEDROCK_RUNTIME_PUBLIC_ARN: cdk.Fn.importValue(CHATBOT_EXPORTS.publicAgentArn),
                 // AgentCore Memory — long-term per-user memory hydrated by
                 // the LangGraph runtime on each invocation. The chat Lambda
                 // itself no longer reads it (the legacy Bedrock Agents path
@@ -2218,27 +2218,28 @@ export class DentiPalCDKStack extends cdk.Stack {
         // RW because the same Lambda may also clear a user's thread when
         // they hit "Start fresh" in the future.
         chatMessagesTable.grantReadWriteData(chatMessageHandler);
-        // Chatbot IAM grants — DISABLED while DentiPalChatbotStackV5 is
-        // turned off. Re-enable alongside the chatbot stack.
-        // chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
-        //     actions: [
-        //         'dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem',
-        //         'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan',
-        //         'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem',
-        //     ],
-        //     resources: [cdk.Fn.importValue(CHATBOT_EXPORTS.previewGatesTableArn)],
-        // }));
-        // chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
-        //     actions: ['bedrock-agentcore:InvokeAgentRuntime'],
-        //     resources: [
-        //         cdk.Fn.importValue(CHATBOT_EXPORTS.professionalAgentArn),
-        //         cdk.Fn.importValue(CHATBOT_EXPORTS.clinicAgentArn),
-        //         cdk.Fn.importValue(CHATBOT_EXPORTS.publicAgentArn),
-        //         cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.professionalAgentArn), '/*']),
-        //         cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.clinicAgentArn), '/*']),
-        //         cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.publicAgentArn), '/*']),
-        //     ],
-        // }));
+        // Chatbot stack grants. PreviewGates RW for confirm-path verify; the
+        // wildcard ARN suffixes on the runtime ARNs cover ":endpoint/*" /
+        // ":session/*" descendants Bedrock attaches to each agent runtime.
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+                'dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem',
+                'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan',
+                'dynamodb:BatchWriteItem', 'dynamodb:BatchGetItem',
+            ],
+            resources: [cdk.Fn.importValue(CHATBOT_EXPORTS.previewGatesTableArn)],
+        }));
+        chatMessageHandler.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+            resources: [
+                cdk.Fn.importValue(CHATBOT_EXPORTS.professionalAgentArn),
+                cdk.Fn.importValue(CHATBOT_EXPORTS.clinicAgentArn),
+                cdk.Fn.importValue(CHATBOT_EXPORTS.publicAgentArn),
+                cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.professionalAgentArn), '/*']),
+                cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.clinicAgentArn), '/*']),
+                cdk.Fn.join('', [cdk.Fn.importValue(CHATBOT_EXPORTS.publicAgentArn), '/*']),
+            ],
+        }));
 
         // Cognito access — AdminGetUser for given_name/family_name (used by
         // refactored handlers like createTemporaryJob), AdminListGroupsForUser

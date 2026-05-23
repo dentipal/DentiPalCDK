@@ -185,12 +185,18 @@ export class ChatRuntime extends Construct {
     //
     // All three share the same zip + role; only EntryPoint differs.
     // ────────────────────────────────────────────────────────────────
-    const discoveryUrl =
-      `https://cognito-idp.${props.region}.amazonaws.com/${props.userPool.userPoolId}/.well-known/openid-configuration`;
-    const customJwtAuthorizer: Record<string, any> = { DiscoveryUrl: discoveryUrl };
-    if (props.allowedClientIds?.length) {
-      customJwtAuthorizer.AllowedClients = props.allowedClientIds;
-    }
+    // Authorizer choice: we OMIT AuthorizerConfiguration entirely, which makes
+    // the runtime default to AWS_IAM (SigV4). The chatMessage Lambda invokes
+    // the runtime via the AWS SDK's InvokeAgentRuntimeCommand, which signs
+    // with SigV4 using the Lambda's execution role — matches. The user's
+    // Cognito identity (userSub/email/groups/clinics) flows in the request
+    // body's `context.identity` field instead of via a forwarded JWT.
+    //
+    // CUSTOM_JWT (the alternative) would require the Lambda to drop the SDK
+    // and POST directly to the runtime endpoint with `Authorization: Bearer
+    // <user-jwt>` — more plumbing for no real gain, since the runtime trusts
+    // the Lambda to vouch for the user anyway.
+    void props.allowedClientIds;
 
     const sharedEnv: Record<string, string> = {
       // The runtime container reads these on init. Same shape the legacy
@@ -209,7 +215,7 @@ export class ChatRuntime extends Construct {
           // Name pattern (verify against service docs): alphanumerics +
           // underscores, must start with a letter.
           AgentRuntimeName: runtimeName,
-          Description: `DentiPal ${logicalId} — LangGraph.js agent on AgentCore Runtime (NODE_22).`,
+          Description: `DentiPal ${logicalId} - LangGraph.js agent on AgentCore Runtime (NODE_22).`,
           RoleArn: runtimeRole.roleArn,
           AgentRuntimeArtifact: {
             CodeConfiguration: {
@@ -231,28 +237,35 @@ export class ChatRuntime extends Construct {
               },
             },
           },
-          AuthorizerConfiguration: {
-            CustomJWTAuthorizer: customJwtAuthorizer,
-          },
-          ProtocolConfiguration: { ServerProtocol: "HTTP" },
+          // AuthorizerConfiguration intentionally omitted — defaults to AWS_IAM
+          // (SigV4) so the chatMessage Lambda's SDK InvokeAgentRuntimeCommand
+          // works without HTTPS+JWT plumbing. See comment block above.
+          ProtocolConfiguration: "HTTP",
           NetworkConfiguration: { NetworkMode: "PUBLIC" },
           EnvironmentVariables: sharedEnv,
         },
       });
 
+    // Construct IDs + AgentRuntimeNames bumped to "*V2" — same reason as the
+    // Gateway in chat-gateway.ts: AgentCore rejects in-place updates to both
+    // AuthorizerConfiguration and AgentRuntimeName, so we change the CDK
+    // construct ID (→ new CFN logical ID → CFN deletes the old runtime and
+    // creates a new one with AWS_IAM). Names also get _v2 to satisfy the
+    // service's "name must be unique per account" check during the brief
+    // overlap when both old and new exist mid-deploy.
     const proRuntime = makeRuntime(
-      "ProfessionalRuntime",
-      "DentiPal_ProfessionalAgent",
+      "ProfessionalRuntimeV2",
+      "DentiPal_ProfessionalAgent_v2",
       "dist/professional/index.js",
     );
     const clinicRuntime = makeRuntime(
-      "ClinicRuntime",
-      "DentiPal_ClinicAgent",
+      "ClinicRuntimeV2",
+      "DentiPal_ClinicAgent_v2",
       "dist/clinic/index.js",
     );
     const publicRuntime = makeRuntime(
-      "PublicRuntime",
-      "DentiPal_PublicAgent",
+      "PublicRuntimeV2",
+      "DentiPal_PublicAgent_v2",
       "dist/public/index.js",
     );
 

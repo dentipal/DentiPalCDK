@@ -48,6 +48,12 @@ export interface ChatbotStackProps extends cdk.StackProps {
    *  cross-stack dependency on main. */
   userPoolId: string;
 
+  /** Cognito user-pool app client ID. AgentCore's CUSTOM_JWT authorizer (which
+   *  is really standard Cognito-OIDC, not anything custom) requires at least
+   *  one of allowedClients/allowedAudience/allowedScopes/CustomClaims — we
+   *  use allowedClients so only tokens issued for our app client are accepted. */
+  userPoolClientId: string;
+
   /** AgentCore Memory id (CFN attribute, passed by main stack at synth time
    *  via main.chatMemoryId — string-valued, no construct ref). */
   chatMemoryId: string;
@@ -222,6 +228,7 @@ export class ChatbotStack extends cdk.Stack {
       userPool,
       region: this.region,
       dispatcherLambda: chatGatewayDispatcher,
+      allowedClientIds: [props.userPoolClientId],
     });
 
     this.chatRuntime = new ChatRuntime(this, "DentiPalChatRuntime", {
@@ -229,6 +236,7 @@ export class ChatbotStack extends cdk.Stack {
       region: this.region,
       gatewayMcpUrl: this.chatGateway.mcpUrl,
       agentCoreMemoryId: props.chatMemoryId,
+      allowedClientIds: [props.userPoolClientId],
     });
 
     // ────────────────────────────────────────────────────────────────
@@ -239,7 +247,7 @@ export class ChatbotStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ChatGatewayMcpUrlOut", {
       exportName: CHATBOT_EXPORTS.gatewayMcpUrl,
       value: this.chatGateway.mcpUrl,
-      description: "AGENTCORE_GATEWAY_MCP_URL — for any caller that needs to address Gateway directly.",
+      description: "AGENTCORE_GATEWAY_MCP_URL - for any caller that needs to address Gateway directly.",
     });
     new cdk.CfnOutput(this, "PreviewGatesTableNameOut", {
       exportName: CHATBOT_EXPORTS.previewGatesTableName,
@@ -256,6 +264,16 @@ export class ChatbotStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ChatConversationsTableArnOut", {
       exportName: CHATBOT_EXPORTS.chatConversationsTableArn,
       value: this.chatConversationsTable.tableArn,
+    });
+    // TEMP keepalive: forces the chatbot template to keep its Fn::ImportValue
+    // reference to main's userPoolClientId export. Without this, CDK strips
+    // the unused import (we no longer pass allowedClientIds to Gateway/Runtime
+    // since the AWS_IAM switch), and main's UPDATE then fails with "Cannot
+    // delete export ... as it is in use by chatbot." Safe to remove after the
+    // first successful deploy where both stacks settle.
+    new cdk.CfnOutput(this, "UserPoolClientIdKeepalive", {
+      value: props.userPoolClientId,
+      description: "Transition keepalive — see comment in chatbot-stack.ts; remove once both stacks have settled on AWS_IAM.",
     });
     new cdk.CfnOutput(this, "ProfessionalAgentRuntimeArnOut", {
       exportName: CHATBOT_EXPORTS.professionalAgentArn,

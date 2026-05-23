@@ -129,6 +129,34 @@ export function startServer(opts: ServerOptions): void {
     },
   });
 
+  // Hook into the SDK's underlying Fastify instance via the (technically
+  // private) _app field to do two things on /invocations:
+  //   1. LOG the Accept header so we can confirm what AgentCore actually
+  //      forwarded — useful diagnostic for future SSE handshake issues.
+  //   2. FORCE Accept to include "text/event-stream" if it doesn't already.
+  //      The BedrockAgentCoreApp SDK + @fastify/sse plugin only set
+  //      `reply.sse` when Accept contains that mime; otherwise the
+  //      async-generator handler path returns 406. AgentCore's proxy
+  //      appears to drop/replace the Accept header from
+  //      InvokeAgentRuntimeCommand's `accept` parameter, so we coerce it
+  //      here. Safe because every handler in this container streams.
+  const fastifyApp = (app as any)._app;
+  if (fastifyApp && typeof fastifyApp.addHook === "function") {
+    fastifyApp.addHook("onRequest", async (request: any) => {
+      if (request.url !== "/invocations") return;
+      const incoming = request.headers.accept || "";
+      request.log.info(
+        { incoming_accept: incoming, content_type: request.headers["content-type"] },
+        "[runtime] /invocations headers",
+      );
+      if (!incoming.includes("text/event-stream")) {
+        request.headers.accept = "text/event-stream";
+      }
+    });
+  } else {
+    console.warn("[runtime] couldn't attach onRequest hook — SDK shape changed");
+  }
+
   app.run();
   console.log(`[runtime:${opts.agentType}] started`);
 }

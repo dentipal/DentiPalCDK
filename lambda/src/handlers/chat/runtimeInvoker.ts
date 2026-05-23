@@ -130,7 +130,11 @@ export async function invokeAgentRuntime(opts: RuntimeInvokeOptions): Promise<Ru
     runtimeSessionId: opts.runtimeSessionId,
     payload: Buffer.from(JSON.stringify(payload)),
     contentType: "application/json",
-    accept: "application/x-ndjson",
+    // SSE is what BedrockAgentCoreApp emits for async-generator handlers
+    // (each yielded RunEvent becomes one `data: <json>\n\n` chunk).
+    // Asking for application/x-ndjson here makes the runtime return 406
+    // since the SDK doesn't declare ndjson among its supported mimes.
+    accept: "text/event-stream",
     qualifier: "DEFAULT",
   });
 
@@ -209,8 +213,23 @@ async function consumeEventLines(
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
+    // SSE format: each event is "data: <json>" (sometimes with optional
+    // "event: ..." / "id: ..." headers we don't use). Strip the prefix
+    // before parsing. Lines without "data: " are SSE control headers
+    // (event/id/retry) — skip them silently.
+    let jsonText: string;
+    if (line.startsWith("data:")) {
+      jsonText = line.slice("data:".length).trimStart();
+      if (!jsonText) continue; // empty data: line (used as heartbeat)
+    } else if (line.startsWith("event:") || line.startsWith("id:") || line.startsWith("retry:") || line.startsWith(":")) {
+      continue;
+    } else {
+      // Tolerate raw-ndjson fallback for non-SSE responses (older SDK
+      // shapes, local testing). Still try to parse as JSON.
+      jsonText = line;
+    }
     let ev: any;
-    try { ev = JSON.parse(line); }
+    try { ev = JSON.parse(jsonText); }
     catch {
       console.warn("[runtimeInvoker] dropped non-JSON line:", line.slice(0, 200));
       continue;

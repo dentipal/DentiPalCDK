@@ -63,7 +63,7 @@ export class ChatGateway extends Construct {
     // ────────────────────────────────────────────────────────────────
     const gatewayRole = new iam.Role(this, "GatewayInvokeRole", {
       assumedBy: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
-      description: "AgentCore Gateway → dispatcher Lambda invocation",
+      description: "AgentCore Gateway -> dispatcher Lambda invocation",
     });
     props.dispatcherLambda.grantInvoke(gatewayRole);
 
@@ -77,25 +77,33 @@ export class ChatGateway extends Construct {
     const discoveryUrl =
       `https://cognito-idp.${props.region}.amazonaws.com/${props.userPool.userPoolId}/.well-known/openid-configuration`;
 
-    const customJwtAuthorizer: Record<string, any> = { DiscoveryUrl: discoveryUrl };
-    if (props.allowedClientIds?.length) {
-      customJwtAuthorizer.AllowedClients = props.allowedClientIds;
-    }
+    // AWS_IAM auth: the runtime container calls Gateway with SigV4 signed by
+    // its own execution role (which has bedrock-agentcore:InvokeGateway). The
+    // user's Cognito identity flows down via the MCP request body, not via a
+    // forwarded JWT. Matches the Lambda→Runtime auth path so the whole chain
+    // is SigV4-based; the original CUSTOM_JWT setup needed JWT plumbing
+    // through every hop, which we avoided.
+    void discoveryUrl;
+    void props.allowedClientIds;
 
-    const gateway = new cdk.CfnResource(this, "DentiPalChatGateway", {
+    // Construct ID bumped to "DentiPalChatGatewayV2" — the AgentCore service
+    // rejects in-place updates to BOTH AuthorizerType and Name (despite the
+    // CFN schema saying Name is just createOnly). Changing the CDK construct
+    // ID changes the CFN logical ID, which makes CFN treat this as a brand
+    // new resource: it issues DELETE on the old gateway and CREATE on the new
+    // one, side-stepping the service's "no updates" rule. All 69 GatewayTargets
+    // cascade-replace because their GatewayIdentifier (createOnly) now points
+    // at the new gateway.
+    const gateway = new cdk.CfnResource(this, "DentiPalChatGatewayV2", {
       type: "AWS::BedrockAgentCore::Gateway",
       properties: {
-        // Name pattern: ^[a-zA-Z][a-zA-Z0-9_]{0,47}$ (verify against service docs).
-        Name: "DentiPal_ChatGateway",
+        // Name pattern (verified against live CFN schema): ^([0-9a-zA-Z][-]?){1,100}$ —
+        // alphanumeric + hyphens only. NO underscores.
+        Name: "DentiPal-ChatGateway-v2",
         Description: "MCP gateway exposing DentiPal chat tools to AgentCore Runtime agents.",
         ProtocolType: "MCP",
         RoleArn: gatewayRole.roleArn,
-        // CUSTOM_JWT is the AgentCore Gateway flavor that takes a generic
-        // OAuth/OIDC discovery URL — exactly what Cognito's user-pool JWKS
-        // endpoint exposes. AWS_IAM is the alternative but would require
-        // SigV4 from the runtime, harder to wire up.
-        AuthorizerType: "CUSTOM_JWT",
-        AuthorizerConfiguration: { CustomJWTAuthorizer: customJwtAuthorizer },
+        AuthorizerType: "AWS_IAM",
       },
     });
 
@@ -131,12 +139,25 @@ export class ChatGateway extends Construct {
         .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
         .join("");
 
+      // Gateway target Name must match ^([0-9a-zA-Z][-]?){1,100}$ — convert
+      // tool.name's underscores to hyphens for the RESOURCE name. The actual
+      // MCP tool name the model sees (InlinePayload.Name below) keeps its
+      // original underscored form so toolSchemas.ts / runtime / dispatcher
+      // routing all line up with the existing tool surface.
+      const gatewayTargetName = tool.name.replace(/_/g, "-");
+      // CFN caps Description at 200 chars on GatewayTarget. Truncate with
+      // ellipsis when needed; the InlinePayload Description (which the
+      // model actually reads) keeps the full text.
+      const targetDescription = tool.description.length > 197
+        ? tool.description.slice(0, 197) + "..."
+        : tool.description;
+
       new cdk.CfnResource(this, constructId, {
         type: "AWS::BedrockAgentCore::GatewayTarget",
         properties: {
           GatewayIdentifier: this.gatewayId,
-          Name: tool.name,
-          Description: tool.description.slice(0, 1000), // CFN typically caps descriptions
+          Name: gatewayTargetName,
+          Description: targetDescription,
           CredentialProviderConfigurations: [
             { CredentialProviderType: "GATEWAY_IAM_ROLE" },
           ],
@@ -151,7 +172,7 @@ export class ChatGateway extends Construct {
                   InlinePayload: [{
                     Name: tool.name,
                     Description: tool.description,
-                    InputSchema: tool.inputSchema,
+                    InputSchema: toAgentCoreSchema(tool.inputSchema),
                   }],
                 },
               },
@@ -161,4 +182,32 @@ export class ChatGateway extends Construct {
       });
     }
   }
+}
+
+// AgentCore GatewayTarget's `InputSchema` field is NOT raw JSONSchema. AWS
+// invented a TitleCase variant (`Type`, `Properties`, `Required`, `Items`,
+// `Description`) with only those five keys allowed — no `enum`, `default`,
+// `format`, `pattern`, `additionalProperties`, etc. (verified against the live
+// CFN type schema for AWS::BedrockAgentCore::GatewayTarget, definition
+// `SchemaDefinition`). Our toolSchemas.ts uses standard lowercase JSONSchema,
+// so we recursively transform here. Enum values get dropped, but the tool's
+// human-readable Description (which the model actually reads) still lists them.
+function toAgentCoreSchema(s: any): any {
+  if (!s || typeof s !== "object") return s;
+  const out: Record<string, any> = {};
+  if (s.type) out.Type = s.type;
+  if (s.description) out.Description = s.description;
+  if (Array.isArray(s.required)) out.Required = s.required;
+  if (s.properties && typeof s.properties === "object") {
+    const props: Record<string, any> = {};
+    for (const [k, v] of Object.entries(s.properties)) {
+      props[k] = toAgentCoreSchema(v);
+    }
+    out.Properties = props;
+  }
+  if (s.items) out.Items = toAgentCoreSchema(s.items);
+  // Default to "object" if Type missing — schema requires it and an empty
+  // object schema is the safest fallback (e.g. tools with `properties: {}`).
+  if (!out.Type) out.Type = "object";
+  return out;
 }
